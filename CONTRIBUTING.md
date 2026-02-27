@@ -12,11 +12,12 @@ zig build test      # verify everything works
 
 ## Build Gates
 
-Every change must pass both gates before it's considered done:
+Every change must pass all three gates before it's considered done:
 
 ```bash
 zig build test                      # all tests pass
 zig build -Doptimize=ReleaseSafe    # release build succeeds
+./check.sh                          # quality checks pass
 ```
 
 ## Code Style
@@ -40,5 +41,5 @@ See the project rules in the repository for the full engineering constitution.
 
 - Keep PRs focused on a single change
 - Include test coverage for new functionality
-- Both build gates must pass
+- All three gates must pass (`zig build test` + `zig build -Doptimize=ReleaseSafe` + `./check.sh`)
 - Reference related issues if applicable

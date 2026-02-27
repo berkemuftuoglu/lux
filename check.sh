@@ -1,6 +1,7 @@
 #!/bin/bash
 # Lux — Local Development Quality Gate
-# Run this before pushing or after any significant changes.
+# Zig has no official linter, so this script acts as a custom linter
+# and quality gate. Run before pushing or after any significant changes.
 # Usage: ./check.sh [--quick]
 
 RED='\033[0;31m'
