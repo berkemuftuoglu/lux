@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Lux — lightweight, local-first PostgreSQL web client">
+<title>Lux</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='2' y='2' width='20' height='20' rx='6' fill='%237c8df4'/><path d='M8 7v10h7' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+</head>
+<body>
+
+<!-- ═══ Connection Color Stripe ═══ -->
+<div class="conn-stripe" id="conn-stripe"></div>
+
+<!-- ═══ Header ═══ -->
+<header class="header">
+  <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+  </button>
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none"><rect x="2" y="2" width="20" height="20" rx="6" fill="url(#lg)"/><path d="M8 7v10h7" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="lg" x1="2" y1="2" x2="22" y2="22"><stop stop-color="#7c8df4"/><stop offset="1" stop-color="#5a6ad6"/></linearGradient></defs></svg>
+    Lux
+  </div>
+  <span class="version-badge">v0.1</span>
+  <div class="header-spacer"></div>
+  <button class="header-btn" id="btn-cmd-palette" title="Command Palette (Ctrl+K)" aria-label="Open command palette" style="border:1px solid var(--border);padding:0 12px;gap:8px">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:12px;height:12px"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <span style="opacity:0.5;font-size:10px;font-family:var(--font-mono)">Ctrl+K</span>
+  </button>
+  <div class="conn-dot" id="hdr-dot"></div>
+  <button class="header-btn" id="btn-theme" title="Toggle light/dark theme" aria-label="Toggle theme">
+    <svg id="theme-icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+    <svg id="theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>
+  </button>
+  <button class="header-btn" id="btn-readonly" title="Toggle read-only mode" aria-label="Toggle read-only mode">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+    Read-only
+  </button>
+  <button class="header-btn" id="btn-refresh" title="Refresh schema" aria-label="Refresh schema">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+  </button>
+</header>
+
+<!-- ═══ Main ═══ -->
+<main class="main" aria-label="Main content">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar" id="sidebar" aria-label="Tables sidebar">
+    <div class="sidebar-connect">
+      <div class="conn-input-row">
+        <input class="conn-input" id="conn-input" placeholder="postgresql://user@host/db" spellcheck="false" aria-label="Connection string">
+        <button class="conn-btn" id="conn-btn">Connect</button>
+      </div>
+      <div class="conn-status" id="conn-status" style="display:none">
+        <span class="dot" id="conn-dot"></span>
+        <span id="conn-msg"></span>
+      </div>
+      <button class="save-conn-btn" id="save-conn-btn" style="display:none" title="Save this connection">+ Save Connection</button>
+    </div>
+    <div class="saved-conns" id="saved-conns"></div>
+    <div class="sidebar-section">Tables <span class="table-count" id="table-count"></span> <div class="toolbar-spacer"></div><button id="btn-create-table" style="background:transparent;border:1px dashed var(--border);color:var(--text-muted);font-size:10px;padding:2px 8px;border-radius:4px;cursor:pointer;font-family:var(--font-ui);transition:all 0.15s" title="Create new table" aria-label="Create new table">+ New</button></div>
+    <div class="table-search" id="table-search-wrap" style="display:none">
+      <input id="table-search" placeholder="Filter tables..." spellcheck="false" aria-label="Search tables">
+    </div>
+    <div class="schema-tree" id="schema-tree">
+      <div class="sidebar-empty" id="sidebar-empty">
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4.03 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5"/></svg>
+        Connect to a database to browse tables
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── Sidebar Resize Handle ── -->
+  <div class="sidebar-resize" id="sidebar-resize"></div>
+
+  <!-- ── Content ── -->
+  <div class="content">
+    <nav class="tab-bar" role="tablist" aria-label="Main panels">
+      <button class="tab active" data-tab="tables" role="tab" aria-selected="true" aria-controls="panel-tables">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Tables
+      </button>
+      <button class="tab" data-tab="sql" role="tab" aria-selected="false" aria-controls="panel-sql">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        SQL
+      </button>
+      <button class="tab" data-tab="er" role="tab" aria-selected="false" aria-controls="panel-er">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="8" height="6" rx="1"/><rect x="14" y="3" width="8" height="6" rx="1"/><rect x="8" y="15" width="8" height="6" rx="1"/><line x1="6" y1="9" x2="12" y2="15"/><line x1="18" y1="9" x2="12" y2="15"/></svg>
+        ER
+      </button>
+      <button class="tab" data-tab="journal" role="tab" aria-selected="false" aria-controls="panel-journal">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        Journal
+        <span class="badge" id="journal-badge">0</span>
+      </button>
+    </nav>
+
+    <!-- ── Tables Panel ── -->
+    <div class="tab-panel active" id="panel-tables" role="tabpanel">
+      <div class="toolbar" id="table-toolbar" style="display:none">
+        <span class="toolbar-title" id="tbl-name"></span>
+        <span class="toolbar-info" id="tbl-info"></span>
+        <div class="toolbar-spacer"></div>
+        <button class="toolbar-btn" id="btn-add-row">+ Row</button>
+        <button class="toolbar-btn" id="btn-find-replace">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Find &amp; Replace
+        </button>
+        <button class="toolbar-btn" id="btn-ddl" title="Show CREATE TABLE">DDL</button>
+        <button class="toolbar-btn" id="btn-stats" title="Table statistics">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+          Stats
+        </button>
+        <button class="toolbar-btn" id="btn-truncate" title="Truncate table (delete all rows)">Truncate</button>
+        <div class="toolbar-sep"></div>
+        <button class="toolbar-btn" id="btn-import-csv" title="Import CSV">Import</button>
+        <button class="toolbar-btn" id="btn-export-csv">CSV</button>
+        <button class="toolbar-btn" id="btn-export-json">JSON</button>
+        <div class="toolbar-sep"></div>
+        <button class="toolbar-btn" id="btn-tbl-refresh" aria-label="Refresh table data">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+        </button>
+      </div>
+      <div class="bulk-bar" id="bulk-bar">
+        <span class="bulk-count" id="bulk-count">0 selected</span>
+        <div class="toolbar-spacer"></div>
+        <button class="bulk-btn" id="bulk-copy-json">Copy as JSON</button>
+        <button class="bulk-btn" id="bulk-copy-sql">Copy as INSERT</button>
+        <button class="bulk-btn danger" id="bulk-delete">Delete Selected</button>
+        <button class="bulk-btn" id="bulk-deselect">Deselect All</button>
+      </div>
+      <div class="grid-wrap" id="grid-wrap">
+        <div class="grid-empty" id="table-empty">
+          <div class="welcome-screen">
+            <div class="welcome-logo">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M8 7v10h7" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </div>
+            <div class="welcome-title">Welcome to Lux</div>
+            <div class="welcome-sub">
+              Connect to a PostgreSQL database using the sidebar,<br>
+              or press <kbd>Ctrl+K</kbd> to search tables and actions.
+            </div>
+          </div>
+        </div>
+        <table class="grid hidden" id="data-grid">
+          <thead id="grid-head"></thead>
+          <tbody id="grid-body"></tbody>
+        </table>
+      </div>
+      <div class="pagination hidden" id="pagination">
+        <span class="info" id="page-info"></span>
+        <div class="toolbar-spacer"></div>
+        <button class="page-btn" id="page-prev">&lsaquo; Prev</button>
+        <button class="page-btn" id="page-next">Next &rsaquo;</button>
+      </div>
+    </div>
+
+    <!-- ── SQL Panel ── -->
+    <div class="tab-panel" id="panel-sql" role="tabpanel">
+      <div class="sql-tab-bar" id="sql-tab-bar">
+        <button class="sql-tab-add" id="sql-tab-add" title="New query tab" aria-label="New SQL tab">+</button>
+      </div>
+      <div class="toolbar">
+        <button class="toolbar-btn primary" id="btn-run-sql">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Run
+        </button>
+        <span style="font-size:11px;color:var(--text-muted)">Ctrl+Enter</span>
+        <div class="toolbar-spacer"></div>
+        <button class="toolbar-btn" id="btn-sql-history" title="Query history">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          History
+        </button>
+        <button class="toolbar-btn" id="btn-format-sql" title="Format SQL">Format</button>
+        <button class="toolbar-btn" id="btn-saved-queries" title="Saved queries">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width:13px;height:13px"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+          Saved
+        </button>
+        <button class="toolbar-btn" id="btn-explain">Explain</button>
+        <button class="toolbar-btn" id="btn-preview-sql">Preview</button>
+      </div>
+      <div class="sql-area">
+        <div class="sql-editor-wrap">
+          <pre id="sql-highlight" aria-hidden="true"></pre>
+          <textarea class="sql-editor highlighting" id="sql-editor" placeholder="SELECT * FROM ..." spellcheck="false" aria-label="SQL query editor"></textarea>
+          <div class="sql-autocomplete" id="sql-autocomplete"></div>
+        </div>
+        <div class="sql-resize-handle" id="sql-resize"></div>
+        <div class="sql-results" id="sql-results">
+          <div class="sql-results-info" style="padding:48px;text-align:center;color:var(--text-muted)">
+            Write a query and press Run or Ctrl+Enter
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── ER Panel ── -->
+    <div class="tab-panel" id="panel-er" role="tabpanel">
+      <div class="toolbar">
+        <span class="toolbar-title">Entity Relationships</span>
+        <div class="toolbar-spacer"></div>
+        <button class="toolbar-btn" id="btn-er-fit" aria-label="Fit to screen">Fit</button>
+        <button class="toolbar-btn" id="btn-er-zoom-in" aria-label="Zoom in">+</button>
+        <button class="toolbar-btn" id="btn-er-zoom-out" aria-label="Zoom out">&minus;</button>
+      </div>
+      <div class="er-container" id="er-container">
+        <canvas id="er-canvas" aria-label="Entity relationship diagram">Entity relationship diagram renders here</canvas>
+        <div class="er-empty" id="er-empty">
+          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="8" height="6" rx="1"/><rect x="14" y="3" width="8" height="6" rx="1"/><rect x="8" y="15" width="8" height="6" rx="1"/><line x1="6" y1="9" x2="12" y2="15"/><line x1="18" y1="9" x2="12" y2="15"/></svg>
+          Connect to see entity relationships
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Journal Panel ── -->
+    <div class="tab-panel" id="panel-journal" role="tabpanel">
+      <div class="toolbar">
+        <span class="toolbar-title">Change Journal</span>
+        <div class="toolbar-spacer"></div>
+        <button class="toolbar-btn" id="btn-journal-refresh" aria-label="Refresh journal">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 4v6h6M23 20v-6h-6"/><path d="M20.49 9A9 9 0 005.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 013.51 15"/></svg>
+        </button>
+      </div>
+      <div class="journal-list" id="journal-list">
+        <div class="journal-empty" id="journal-empty">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          No changes recorded yet
+        </div>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- ═══ Status Bar ═══ -->
+<footer class="status-bar" role="status">
+  <span class="dot" id="status-dot"></span>
+  <span id="status-conn">Not connected</span>
+  <span class="ro-badge" id="status-ro">READ-ONLY</span>
+  <div class="toolbar-spacer"></div>
+  <span id="status-table"></span>
+</footer>
+
+<!-- ═══ Reconnect Banner ═══ -->
+<div class="reconnect-banner" id="reconnect-banner">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  Connection lost
+  <div class="toolbar-spacer"></div>
+  <button class="reconnect-btn" id="reconnect-btn">Reconnect</button>
+</div>
+
+<!-- ═══ Insert Modal ═══ -->
+<div class="modal-overlay" id="insert-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Insert row">
+    <div class="modal-title">Insert Row <span class="tbl-name" id="insert-tbl"></span></div>
+    <div class="modal-body" id="insert-fields"></div>
+    <div class="modal-actions">
+      <button class="btn cancel" id="insert-cancel">Cancel</button>
+      <button class="btn ok" id="insert-ok">Insert</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Find & Replace Modal ═══ -->
+<div class="modal-overlay" id="fnr-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Find and replace">
+    <div class="modal-title">Find &amp; Replace <span class="tbl-name" id="fnr-tbl"></span></div>
+    <div class="modal-body" style="gap:12px">
+      <div class="modal-field">
+        <div class="modal-field-label">Column</div>
+        <select id="fnr-column" aria-label="Column to search"></select>
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Find</div>
+        <input type="text" id="fnr-find" placeholder="Search text..." aria-label="Find text">
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Replace with</div>
+        <input type="text" id="fnr-replace" placeholder="Replacement text..." aria-label="Replace text">
+      </div>
+      <div id="fnr-preview" style="font-size:12px;color:var(--text-secondary);display:none"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn cancel" id="fnr-cancel">Cancel</button>
+      <button class="btn cancel" id="fnr-preview-btn">Preview</button>
+      <button class="btn ok" id="fnr-ok">Replace All</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Confirm Modal ═══ -->
+<div class="modal-overlay" id="confirm-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Confirm action">
+    <div class="modal-title" id="confirm-title">Confirm</div>
+    <div class="confirm-body" id="confirm-body"></div>
+    <div class="modal-actions">
+      <button class="btn cancel" id="confirm-cancel">Cancel</button>
+      <button class="btn danger" id="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Prompt Modal ═══ -->
+<div class="modal-overlay" id="prompt-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Input prompt">
+    <div class="modal-title" id="prompt-title">Input</div>
+    <div style="padding:8px 0"><input type="text" id="prompt-input" class="conn-input" aria-label="Input value" style="width:100%;box-sizing:border-box"></div>
+    <div class="modal-actions">
+      <button class="btn cancel" id="prompt-cancel">Cancel</button>
+      <button class="btn primary" id="prompt-ok">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ DDL Modal ═══ -->
+<div class="modal-overlay" id="ddl-overlay">
+  <div class="modal modal-wide" role="dialog" aria-modal="true" aria-label="Table DDL">
+    <div class="modal-title" id="ddl-title">Table DDL</div>
+    <pre class="ddl-content" id="ddl-content"></pre>
+    <div class="modal-actions">
+      <button class="btn cancel modal-close-btn">Close</button>
+      <button class="btn btn-copy-ddl" id="ddl-copy">Copy</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Shortcuts Modal ═══ -->
+<div class="modal-overlay" id="shortcuts-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" style="max-width:480px">
+    <div class="modal-title">Keyboard Shortcuts</div>
+    <div class="shortcuts-grid" style="margin-bottom:20px">
+      <kbd>Ctrl+Enter</kbd> <span>Run SQL query</span>
+      <kbd>Ctrl+L</kbd> <span>Focus SQL editor</span>
+      <kbd>Ctrl+F</kbd> <span>Find &amp; Replace (in Tables)</span>
+      <kbd>Escape</kbd> <span>Cancel edit / Close modal / Deselect</span>
+      <kbd>Double-click</kbd> <span>Edit cell</span>
+      <kbd>Right-click</kbd> <span>Context menu (copy, edit, NULL, delete)</span>
+      <kbd>Click cell</kbd> <span>Copy value to clipboard</span>
+      <kbd>Click row #</kbd> <span>View row detail</span>
+      <kbd>Shift+Click #</kbd> <span>Select range of rows</span>
+      <kbd>Ctrl+Click #</kbd> <span>Toggle row selection</span>
+      <kbd>Arrow keys</kbd> <span>Navigate grid cells</span>
+      <kbd>Enter</kbd> <span>Edit focused cell</span>
+      <kbd>Tab / Shift+Tab</kbd> <span>Next / Previous cell</span>
+      <kbd>?</kbd> <span>Show this help</span>
+      <kbd>Ctrl+K</kbd> <span>Command palette</span>
+      <kbd>Ctrl+N</kbd> <span>New SQL tab</span>
+      <kbd>Ctrl+S</kbd> <span>Save connection</span>
+    </div>
+    <div class="modal-actions">
+      <button class="btn cancel modal-close-btn">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ History Modal ═══ -->
+<div class="modal-overlay" id="history-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Query history" style="max-width:700px;max-height:80vh;display:flex;flex-direction:column">
+    <div class="modal-title" style="flex-shrink:0">Query History</div>
+    <div class="history-list modal-list-container" id="history-list">
+      <div style="padding:32px;text-align:center;color:var(--text-muted)">No queries yet</div>
+    </div>
+    <div class="modal-actions" style="flex-shrink:0">
+      <button class="btn cancel modal-close-btn">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Saved Queries Modal ═══ -->
+<div class="modal-overlay" id="saved-overlay">
+  <div class="modal modal-wide" role="dialog" aria-modal="true" aria-label="Saved queries" style="max-height:80vh;display:flex;flex-direction:column">
+    <div class="modal-title" style="flex-shrink:0">
+      Saved Queries
+      <div class="toolbar-spacer"></div>
+      <button class="toolbar-btn primary" id="btn-save-current" style="font-size:11px">Save Current</button>
+    </div>
+    <div class="history-list modal-list-container" id="saved-list">
+      <div style="padding:32px;text-align:center;color:var(--text-muted)">No saved queries yet</div>
+    </div>
+    <div class="modal-actions" style="flex-shrink:0">
+      <button class="btn cancel modal-close-btn">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Context Menu ═══ -->
+<div class="ctx-menu" id="ctx-menu"></div>
+
+<!-- ═══ Row Detail Modal ═══ -->
+<div class="modal-overlay" id="detail-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Row detail" style="max-width:600px">
+    <div class="modal-title" id="detail-title">Row Detail</div>
+    <div class="row-detail-grid" id="detail-grid" style="margin-bottom:20px;max-height:400px;overflow-y:auto"></div>
+    <div class="modal-actions">
+      <button class="btn cancel modal-close-btn">Close</button>
+      <button class="btn btn-copy-ddl" id="detail-copy">Copy JSON</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Import CSV Modal ═══ -->
+<div class="modal-overlay" id="import-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Import CSV" style="max-width:640px">
+    <div class="modal-title">Import CSV <span class="tbl-name" id="import-tbl"></span></div>
+    <div class="modal-body" style="gap:12px">
+      <div class="modal-field">
+        <div class="modal-field-label">CSV Data</div>
+        <textarea class="import-textarea" id="import-csv" placeholder="col1,col2,col3&#10;val1,val2,val3&#10;..." spellcheck="false" aria-label="CSV data"></textarea>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-secondary);cursor:pointer">
+        <input type="checkbox" id="import-header" checked style="accent-color:var(--accent)">
+        First row is header
+      </label>
+      <div id="import-preview" style="display:none;font-size:12px;color:var(--text-muted)"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn cancel" id="import-cancel">Cancel</button>
+      <button class="btn ok" id="import-ok">Import</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Table Creation Modal ═══ -->
+<div class="modal-overlay" id="create-table-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Create table" style="max-width:600px">
+    <div class="modal-title">Create Table</div>
+    <div class="modal-body" style="gap:12px">
+      <div class="modal-field">
+        <div class="modal-field-label">Table Name</div>
+        <input type="text" id="create-table-name" placeholder="new_table" spellcheck="false" aria-label="Table name">
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Columns</div>
+        <div class="create-table-cols" id="create-table-cols"></div>
+        <button class="add-col-btn" id="create-add-col">+ Add Column</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn cancel" id="create-table-cancel">Cancel</button>
+      <button class="btn" id="create-table-preview" style="background:var(--bg-surface);color:var(--text-secondary);border:1px solid var(--border)">Preview DDL</button>
+      <button class="btn ok" id="create-table-ok">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Save Connection Modal ═══ -->
+<div class="modal-overlay" id="save-conn-overlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-label="Save connection" style="max-width:420px">
+    <div class="modal-title">Save Connection</div>
+    <div class="modal-body" style="gap:12px">
+      <div class="modal-field">
+        <div class="modal-field-label">Name</div>
+        <input type="text" id="save-conn-name" placeholder="My Database" spellcheck="false" aria-label="Connection name">
+      </div>
+      <div class="modal-field">
+        <div class="modal-field-label">Color</div>
+        <div style="display:flex;gap:8px;padding:4px 0" id="save-conn-colors">
+          <span class="color-dot" data-color="green" style="background:var(--conn-green)" title="Development"></span>
+          <span class="color-dot" data-color="yellow" style="background:var(--conn-yellow)" title="Staging"></span>
+          <span class="color-dot" data-color="red" style="background:var(--conn-red)" title="Production"></span>
+          <span class="color-dot" data-color="blue" style="background:var(--conn-blue)" title="Default"></span>
+          <span class="color-dot" data-color="purple" style="background:var(--conn-purple)" title="Custom"></span>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn cancel" id="save-conn-cancel">Cancel</button>
+      <button class="btn ok" id="save-conn-ok">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Command Palette ═══ -->
+<div class="cmd-palette-overlay" id="cmd-overlay" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="cmd-palette">
+    <input id="cmd-input" placeholder="Search tables, run actions..." spellcheck="false" autocomplete="off" aria-label="Command palette search">
+    <div class="cmd-results" id="cmd-results">
+      <div class="cmd-empty">Type to search tables, columns, and actions</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Toast Container ═══ -->
+<div class="toast-container" id="toast-container"></div>
+
+<script defer src="/app.js"></script>
+</body>
+</html>

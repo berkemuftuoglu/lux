@@ -1,0 +1,17 @@
+.git
+.gitignore
+.claude
+.zig-cache
+zig-out
+.playwright-mcp
+docs
+CLAUDE.md
+TODO.md
+README.md
+CONTRIBUTING.md
+SECURITY.md
+LICENSE
+Dockerfile
+.dockerignore
+check.sh
+*.md

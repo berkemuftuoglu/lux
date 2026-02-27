@@ -1,0 +1,48 @@
+# Build artifacts
+.zig-cache/
+zig-out/
+*.o
+*.a
+*.so
+*.dylib
+
+# Internal docs (local only)
+CLAUDE.md
+TODO.md
+
+# Docs — keep public files, ignore the rest
+docs/*
+!docs/CHANGELOG.md
+!docs/logo.svg
+!docs/screenshots/
+
+# Claude Code config
+.claude/
+
+# Playwright MCP
+.playwright-mcp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*~
+.#*
+.idea/
+.vscode/
+*.code-workspace
+
+# Secrets / credentials
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+connections.json
+
+# Debug / temp
+*.core
+*.tmp
+debug.log
