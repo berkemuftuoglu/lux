@@ -16,8 +16,9 @@ docs/*
 !docs/logo.svg
 !docs/screenshots/
 
-# Claude Code config
+# AI config
 .claude/
+.planning/
 
 # Playwright MCP
 .playwright-mcp/
