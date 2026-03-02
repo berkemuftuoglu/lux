@@ -64,84 +64,7 @@ pub const PgConnection = struct {
             null, // paramFormats
             0, // resultFormat (text)
         ) orelse return error.QueryFailed;
-
-        const status = c.PQresultStatus(res);
-        if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
-            c.PQclear(res);
-            return error.QueryFailed;
-        }
-
-        const n_rows: usize = @intCast(c.PQntuples(res));
-        const n_cols: usize = @intCast(c.PQnfields(res));
-
-        // Collect column names
-        var col_names = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-        var col_names_filled: usize = 0;
-        errdefer {
-            for (col_names[0..col_names_filled]) |name| {
-                if (name.len > 0 and !isStaticStr(name)) allocator.free(name);
-            }
-            allocator.free(col_names);
-        }
-        for (0..n_cols) |col_idx| {
-            const name_ptr = c.PQfname(res, @intCast(col_idx));
-            if (name_ptr == null) {
-                col_names[col_idx] = "";
-            } else {
-                const name_slice = std.mem.sliceTo(name_ptr, 0);
-                col_names[col_idx] = allocator.dupe(u8, name_slice) catch return error.OutOfMemory;
-            }
-            col_names_filled = col_idx + 1;
-        }
-
-        // Collect rows as string values
-        var rows = allocator.alloc([][]const u8, n_rows) catch return error.OutOfMemory;
-        var rows_completed: usize = 0;
-        errdefer {
-            for (rows[0..rows_completed]) |row| {
-                for (row) |val| {
-                    if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
-                }
-                allocator.free(row);
-            }
-            allocator.free(rows);
-        }
-        for (0..n_rows) |row_idx| {
-            var row_data = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-            var cells_filled: usize = 0;
-            errdefer {
-                for (row_data[0..cells_filled]) |val| {
-                    if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
-                }
-                allocator.free(row_data);
-            }
-            for (0..n_cols) |col_idx| {
-                if (c.PQgetisnull(res, @intCast(row_idx), @intCast(col_idx)) != 0) {
-                    row_data[col_idx] = "NULL";
-                } else {
-                    const val_ptr = c.PQgetvalue(res, @intCast(row_idx), @intCast(col_idx));
-                    if (val_ptr == null) {
-                        row_data[col_idx] = "";
-                    } else {
-                        const val_slice = std.mem.sliceTo(val_ptr, 0);
-                        row_data[col_idx] = allocator.dupe(u8, val_slice) catch return error.OutOfMemory;
-                    }
-                }
-                cells_filled = col_idx + 1;
-            }
-            rows[row_idx] = row_data;
-            rows_completed = row_idx + 1;
-        }
-
-        c.PQclear(res);
-
-        return QueryResult{
-            .col_names = col_names,
-            .rows = rows,
-            .n_cols = n_cols,
-            .n_rows = n_rows,
-            .allocator = allocator,
-        };
+        return extractResult(res, allocator);
     }
 
     /// Run one or more SQL statements via PQexec (supports multi-statement scripts).
@@ -149,82 +72,7 @@ pub const PgConnection = struct {
     /// where users type arbitrary SQL including multi-statement scripts.
     pub fn runQueryMulti(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
         const res = c.PQexec(self.conn, sql) orelse return error.QueryFailed;
-
-        const status = c.PQresultStatus(res);
-        if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
-            c.PQclear(res);
-            return error.QueryFailed;
-        }
-
-        const n_rows: usize = @intCast(c.PQntuples(res));
-        const n_cols: usize = @intCast(c.PQnfields(res));
-
-        var col_names = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-        var col_names_filled: usize = 0;
-        errdefer {
-            for (col_names[0..col_names_filled]) |name| {
-                if (name.len > 0 and !isStaticStr(name)) allocator.free(name);
-            }
-            allocator.free(col_names);
-        }
-        for (0..n_cols) |col_idx| {
-            const name_ptr = c.PQfname(res, @intCast(col_idx));
-            if (name_ptr == null) {
-                col_names[col_idx] = "";
-            } else {
-                const name_slice = std.mem.sliceTo(name_ptr, 0);
-                col_names[col_idx] = allocator.dupe(u8, name_slice) catch return error.OutOfMemory;
-            }
-            col_names_filled = col_idx + 1;
-        }
-
-        var rows = allocator.alloc([][]const u8, n_rows) catch return error.OutOfMemory;
-        var rows_completed: usize = 0;
-        errdefer {
-            for (rows[0..rows_completed]) |row| {
-                for (row) |val| {
-                    if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
-                }
-                allocator.free(row);
-            }
-            allocator.free(rows);
-        }
-        for (0..n_rows) |row_idx| {
-            var row_data = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-            var cells_filled: usize = 0;
-            errdefer {
-                for (row_data[0..cells_filled]) |val| {
-                    if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
-                }
-                allocator.free(row_data);
-            }
-            for (0..n_cols) |col_idx| {
-                if (c.PQgetisnull(res, @intCast(row_idx), @intCast(col_idx)) != 0) {
-                    row_data[col_idx] = "NULL";
-                } else {
-                    const val_ptr = c.PQgetvalue(res, @intCast(row_idx), @intCast(col_idx));
-                    if (val_ptr == null) {
-                        row_data[col_idx] = "";
-                    } else {
-                        const val_slice = std.mem.sliceTo(val_ptr, 0);
-                        row_data[col_idx] = allocator.dupe(u8, val_slice) catch return error.OutOfMemory;
-                    }
-                }
-                cells_filled = col_idx + 1;
-            }
-            rows[row_idx] = row_data;
-            rows_completed = row_idx + 1;
-        }
-
-        c.PQclear(res);
-
-        return QueryResult{
-            .col_names = col_names,
-            .rows = rows,
-            .n_cols = n_cols,
-            .n_rows = n_rows,
-            .allocator = allocator,
-        };
+        return extractResult(res, allocator);
     }
 
     /// Fetch the schema: list of tables with their columns and types.
@@ -517,6 +365,90 @@ pub const PgConnection = struct {
         };
     }
 };
+
+/// Extract column names and row data from a PGresult into a QueryResult.
+/// Checks the result status, collects n_rows/n_cols, allocates and fills
+/// col_names and rows, calls PQclear(res), and returns the QueryResult.
+/// Called by both runQuery (after PQexecParams) and runQueryMulti (after PQexec).
+fn extractResult(res: *c.PGresult, allocator: std.mem.Allocator) PgError!QueryResult {
+    const status = c.PQresultStatus(res);
+    if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
+        c.PQclear(res);
+        return error.QueryFailed;
+    }
+
+    const n_rows: usize = @intCast(c.PQntuples(res));
+    const n_cols: usize = @intCast(c.PQnfields(res));
+
+    // Collect column names
+    var col_names = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
+    var col_names_filled: usize = 0;
+    errdefer {
+        for (col_names[0..col_names_filled]) |name| {
+            if (name.len > 0 and !isStaticStr(name)) allocator.free(name);
+        }
+        allocator.free(col_names);
+    }
+    for (0..n_cols) |col_idx| {
+        const name_ptr = c.PQfname(res, @intCast(col_idx));
+        if (name_ptr == null) {
+            col_names[col_idx] = "";
+        } else {
+            const name_slice = std.mem.sliceTo(name_ptr, 0);
+            col_names[col_idx] = allocator.dupe(u8, name_slice) catch return error.OutOfMemory;
+        }
+        col_names_filled = col_idx + 1;
+    }
+
+    // Collect rows as string values
+    var rows = allocator.alloc([][]const u8, n_rows) catch return error.OutOfMemory;
+    var rows_completed: usize = 0;
+    errdefer {
+        for (rows[0..rows_completed]) |row| {
+            for (row) |val| {
+                if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
+            }
+            allocator.free(row);
+        }
+        allocator.free(rows);
+    }
+    for (0..n_rows) |row_idx| {
+        var row_data = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
+        var cells_filled: usize = 0;
+        errdefer {
+            for (row_data[0..cells_filled]) |val| {
+                if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
+            }
+            allocator.free(row_data);
+        }
+        for (0..n_cols) |col_idx| {
+            if (c.PQgetisnull(res, @intCast(row_idx), @intCast(col_idx)) != 0) {
+                row_data[col_idx] = "NULL";
+            } else {
+                const val_ptr = c.PQgetvalue(res, @intCast(row_idx), @intCast(col_idx));
+                if (val_ptr == null) {
+                    row_data[col_idx] = "";
+                } else {
+                    const val_slice = std.mem.sliceTo(val_ptr, 0);
+                    row_data[col_idx] = allocator.dupe(u8, val_slice) catch return error.OutOfMemory;
+                }
+            }
+            cells_filled = col_idx + 1;
+        }
+        rows[row_idx] = row_data;
+        rows_completed = row_idx + 1;
+    }
+
+    c.PQclear(res);
+
+    return QueryResult{
+        .col_names = col_names,
+        .rows = rows,
+        .n_cols = n_cols,
+        .n_rows = n_rows,
+        .allocator = allocator,
+    };
+}
 
 /// Get a raw string pointer from a PGresult without allocating (valid until PQclear).
 fn getStringFieldNoAlloc(res: *c.PGresult, row: usize, col_idx: usize) []const u8 {

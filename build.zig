@@ -29,6 +29,12 @@ pub fn build(b: *std.Build) void {
     addTest(b, test_step, "src/main.zig", target, optimize);
     addTest(b, test_step, "src/web.zig", target, optimize);
     addTest(b, test_step, "src/postgres.zig", target, optimize);
+    addTest(b, test_step, "src/utils.zig", target, optimize);
+    addTest(b, test_step, "src/sql_guard.zig", target, optimize);
+    addTest(b, test_step, "src/crud.zig", target, optimize);
+    addTest(b, test_step, "src/schema.zig", target, optimize);
+    addTest(b, test_step, "src/export.zig", target, optimize);
+    addTest(b, test_step, "src/sql.zig", target, optimize);
 }
 
 /// Add a test compilation for a single source module.
