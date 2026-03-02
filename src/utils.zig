@@ -409,17 +409,26 @@ test "findContentLength: missing header" {
     try std.testing.expect(findContentLength(req) == null);
 }
 
-test "matchesIgnoreCase: basic" {
-    try std.testing.expect(matchesIgnoreCase("Content-Length:", "content-length:"));
-    try std.testing.expect(matchesIgnoreCase("CONTENT-LENGTH:", "content-length:"));
+test "matchesIgnoreCase: matches case-insensitively with prefix semantics" {
+    // Exact matches at different cases
+    try std.testing.expect(matchesIgnoreCase("SELECT", "SELECT"));
+    try std.testing.expect(matchesIgnoreCase("Select", "SELECT"));
+    try std.testing.expect(matchesIgnoreCase("sElEcT", "SELECT"));
+    // Prefix match (haystack longer than needle)
+    try std.testing.expect(matchesIgnoreCase("SELECT * FROM", "SELECT"));
+    // Non-alpha chars match exactly
+    try std.testing.expect(matchesIgnoreCase("content-length:", "Content-Length:"));
+    try std.testing.expect(matchesIgnoreCase("abc123", "ABC123"));
+}
+
+test "matchesIgnoreCase: rejects non-matches" {
     try std.testing.expect(!matchesIgnoreCase("Content-Type:", "content-length:"));
-}
-
-test "matchesIgnoreCase: short haystack" {
+    // Haystack shorter than needle
     try std.testing.expect(!matchesIgnoreCase("ab", "abcdef"));
+    try std.testing.expect(!matchesIgnoreCase("SEL", "SELECT"));
 }
 
-test "matchesIgnoreCase: empty needle" {
+test "matchesIgnoreCase: handles empty needle" {
     try std.testing.expect(matchesIgnoreCase("anything", ""));
 }
 
@@ -742,25 +751,6 @@ test "parseQueryParam: multiple same params uses first" {
     try std.testing.expectEqual(@as(usize, 10), result);
 }
 
-// ── matchesIgnoreCase edge cases ──────────────────────────────────────────
-
-test "matchesIgnoreCase: exact match" {
-    try std.testing.expect(matchesIgnoreCase("SELECT", "SELECT"));
-}
-
-test "matchesIgnoreCase: mixed case" {
-    try std.testing.expect(matchesIgnoreCase("Select", "SELECT"));
-    try std.testing.expect(matchesIgnoreCase("sElEcT", "SELECT"));
-}
-
-test "matchesIgnoreCase: haystack shorter than needle" {
-    try std.testing.expect(!matchesIgnoreCase("SEL", "SELECT"));
-}
-
-test "matchesIgnoreCase: prefix match with extra chars" {
-    // matchesIgnoreCase checks that haystack STARTS WITH needle (ignoring case)
-    try std.testing.expect(matchesIgnoreCase("SELECT * FROM", "SELECT"));
-}
 
 // ── extractJsonField edge cases ────────────────────────────────────────────
 
@@ -993,28 +983,16 @@ test "escapeStringValue: mixed quotes and other chars" {
     try std.testing.expectEqualStrings("it''s a \"test\"", result);
 }
 
-test "escapeStringValue: null byte rejected" {
+test "escapeStringValue: null bytes rejected at any position" {
     const allocator = std.testing.allocator;
-    const result = escapeStringValue(allocator, "hello\x00world");
-    try std.testing.expectError(error.InvalidCharacter, result);
-}
-
-test "escapeStringValue: null byte at start rejected" {
-    const allocator = std.testing.allocator;
-    const result = escapeStringValue(allocator, "\x00start");
-    try std.testing.expectError(error.InvalidCharacter, result);
-}
-
-test "escapeStringValue: null byte at end rejected" {
-    const allocator = std.testing.allocator;
-    const result = escapeStringValue(allocator, "end\x00");
-    try std.testing.expectError(error.InvalidCharacter, result);
-}
-
-test "escapeStringValue: single null byte rejected" {
-    const allocator = std.testing.allocator;
-    const result = escapeStringValue(allocator, "\x00");
-    try std.testing.expectError(error.InvalidCharacter, result);
+    // Middle position
+    try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "hello\x00world"));
+    // Start position
+    try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "\x00start"));
+    // End position
+    try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "end\x00"));
+    // Single null byte
+    try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "\x00"));
 }
 
 test "writeJsonEscaped: null byte is escaped per RFC 8259" {
@@ -1046,44 +1024,30 @@ test "writeJsonEscaped: all whitespace escapes" {
     try std.testing.expectEqualStrings("\\n\\r\\t", buf.items);
 }
 
-// ── matchesIgnoreCase additional ---
-
-test "matchesIgnoreCase: numbers match exactly" {
-    try std.testing.expect(matchesIgnoreCase("abc123", "ABC123"));
-}
-
-test "matchesIgnoreCase: special chars match exactly" {
-    try std.testing.expect(matchesIgnoreCase("content-length:", "Content-Length:"));
-}
 
 // --- indexOfIgnoreCase ---
 
-test "indexOfIgnoreCase: finds word at start" {
-    const result = indexOfIgnoreCase("DROP TABLE t", "drop");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 0), result.?);
+test "indexOfIgnoreCase: finds word at any position" {
+    // Start
+    const at_start = indexOfIgnoreCase("DROP TABLE t", "drop");
+    try std.testing.expect(at_start != null);
+    try std.testing.expectEqual(@as(usize, 0), at_start.?);
+    // Middle
+    const in_middle = indexOfIgnoreCase("ALTER TABLE foo ADD COLUMN bar", "ADD");
+    try std.testing.expect(in_middle != null);
+    try std.testing.expectEqual(@as(usize, 16), in_middle.?);
 }
 
-test "indexOfIgnoreCase: finds word in middle" {
-    const result = indexOfIgnoreCase("ALTER TABLE foo ADD COLUMN bar", "ADD");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 16), result.?);
-}
-
-test "indexOfIgnoreCase: returns null for missing word" {
-    const result = indexOfIgnoreCase("SELECT * FROM t", "DROP");
-    try std.testing.expect(result == null);
+test "indexOfIgnoreCase: returns null when not found" {
+    try std.testing.expect(indexOfIgnoreCase("SELECT * FROM t", "DROP") == null);
+    // Needle longer than haystack
+    try std.testing.expect(indexOfIgnoreCase("ab", "abcdef") == null);
 }
 
 test "indexOfIgnoreCase: empty needle returns zero" {
     const result = indexOfIgnoreCase("anything", "");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(usize, 0), result.?);
-}
-
-test "indexOfIgnoreCase: needle longer than haystack" {
-    const result = indexOfIgnoreCase("ab", "abcdef");
-    try std.testing.expect(result == null);
 }
 
 // --- eqlLower edge cases ---
@@ -1232,22 +1196,14 @@ test "findHeader: trims whitespace from value" {
 
 // ── escapeIdentifier null byte tests ────────────────────────────────
 
-test "escapeIdentifier: null byte rejected" {
+test "escapeIdentifier: null bytes rejected at any position" {
     const allocator = std.testing.allocator;
-    const result = escapeIdentifier(allocator, "table\x00; DROP TABLE users");
-    try std.testing.expectError(error.InvalidIdentifier, result);
-}
-
-test "escapeIdentifier: null byte at start rejected" {
-    const allocator = std.testing.allocator;
-    const result = escapeIdentifier(allocator, "\x00table");
-    try std.testing.expectError(error.InvalidIdentifier, result);
-}
-
-test "escapeIdentifier: null byte at end rejected" {
-    const allocator = std.testing.allocator;
-    const result = escapeIdentifier(allocator, "table\x00");
-    try std.testing.expectError(error.InvalidIdentifier, result);
+    // Middle position (injection attempt)
+    try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "table\x00; DROP TABLE users"));
+    // Start position
+    try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "\x00table"));
+    // End position
+    try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "table\x00"));
 }
 
 test "escapeIdentifier: normal string still works" {

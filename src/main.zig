@@ -121,8 +121,3 @@ fn printUsage(writer: anytype) !void {
     , .{});
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
-
-test "smoke: binary compiles and links" {
-    // If this test runs, the build system is working correctly.
-}

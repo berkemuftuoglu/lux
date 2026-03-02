@@ -1432,64 +1432,43 @@ test "findColumnInTable: returns false for missing column" {
     try std.testing.expect(!findColumnInTable(table, "nonexistent"));
 }
 
-test "validateCtid: valid ctids" {
+test "validateCtid: accepts valid ctid formats" {
+    // Standard format
     try std.testing.expect(validateCtid("(0,1)"));
-    try std.testing.expect(validateCtid("(123,456)"));
-    try std.testing.expect(validateCtid("(0,0)"));
-}
-
-test "validateCtid: invalid ctids" {
-    try std.testing.expect(!validateCtid(""));
-    try std.testing.expect(!validateCtid("(0)"));
-    try std.testing.expect(!validateCtid("0,1"));
-    try std.testing.expect(!validateCtid("(,1)"));
-    try std.testing.expect(!validateCtid("(0,)"));
-    try std.testing.expect(!validateCtid("(a,b)"));
-    try std.testing.expect(!validateCtid("abc"));
-}
-
-test "validateCtid: large numbers" {
+    // Large numbers
     try std.testing.expect(validateCtid("(9999999,9999999)"));
-}
-
-test "validateCtid: leading zeros" {
+    // Zeros
+    try std.testing.expect(validateCtid("(0,0)"));
+    // Leading zeros
     try std.testing.expect(validateCtid("(007,001)"));
 }
 
-test "validateCtid: SQL injection attempt" {
-    try std.testing.expect(!validateCtid("(0,1); DROP TABLE users"));
-}
-
-test "validateCtid: nested parens" {
-    try std.testing.expect(!validateCtid("((0,1))"));
-}
-
-test "validateCtid: empty string" {
+test "validateCtid: rejects malformed ctids" {
+    // Empty
     try std.testing.expect(!validateCtid(""));
-}
-
-test "validateCtid: only parens" {
-    try std.testing.expect(!validateCtid("()"));
-}
-
-test "validateCtid: missing comma" {
+    // Missing parens
+    try std.testing.expect(!validateCtid("0,1"));
+    // Missing comma
     try std.testing.expect(!validateCtid("(01)"));
-}
-
-test "validateCtid: letter in page" {
-    try std.testing.expect(!validateCtid("(a,1)"));
-}
-
-test "validateCtid: negative number" {
+    // Empty parens
+    try std.testing.expect(!validateCtid("()"));
+    // Missing page or tuple
+    try std.testing.expect(!validateCtid("(,1)"));
+    try std.testing.expect(!validateCtid("(0,)"));
+    // Non-numeric
+    try std.testing.expect(!validateCtid("(a,b)"));
+    try std.testing.expect(!validateCtid("abc"));
+    // Negative number
     try std.testing.expect(!validateCtid("(-1,1)"));
-}
-
-test "validateCtid: space inside" {
+    // Space inside
     try std.testing.expect(!validateCtid("(0, 1)"));
 }
 
-test "validateCtid: valid zero zero" {
-    try std.testing.expect(validateCtid("(0,0)"));
+test "validateCtid: rejects injection and nesting" {
+    // SQL injection attempt
+    try std.testing.expect(!validateCtid("(0,1); DROP TABLE users"));
+    // Nested parens
+    try std.testing.expect(!validateCtid("((0,1))"));
 }
 
 test "addJournalEntry: adds to journal" {
@@ -1626,36 +1605,3 @@ test "extractJsonObject: non-object value returns null" {
     try std.testing.expect(pairs == null);
 }
 
-test "handleTruncateTable: extracts table name from path" {
-    const path = "/api/tables/users/truncate";
-    const prefix = "/api/tables/";
-    const suffix = "/truncate";
-    if (path.len > prefix.len + suffix.len) {
-        const table_name = path[prefix.len .. path.len - suffix.len];
-        try std.testing.expectEqualStrings("users", table_name);
-    } else {
-        return error.TestUnexpectedResult;
-    }
-}
-
-test "handleTruncateTable: path too short returns empty" {
-    const path = "/api/tables//truncate";
-    const prefix = "/api/tables/";
-    const suffix = "/truncate";
-    if (path.len > prefix.len + suffix.len) {
-        const table_name = path[prefix.len .. path.len - suffix.len];
-        try std.testing.expectEqualStrings("", table_name);
-    }
-}
-
-test "handleTruncateTable: table name with underscore" {
-    const path = "/api/tables/my_table/truncate";
-    const prefix = "/api/tables/";
-    const suffix = "/truncate";
-    if (path.len > prefix.len + suffix.len) {
-        const table_name = path[prefix.len .. path.len - suffix.len];
-        try std.testing.expectEqualStrings("my_table", table_name);
-    } else {
-        return error.TestUnexpectedResult;
-    }
-}
