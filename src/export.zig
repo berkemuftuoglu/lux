@@ -6,22 +6,17 @@ const crud = @import("crud.zig");
 
 const ServerState = web.ServerState;
 
-// ── Error types ───────────────────────────────────────────────────────────
-
 const ExportError = error{
     OutOfMemory,
     FormatFailed,
 };
 
-/// CSV parsing error set.
 const CsvParseError = error{
     EmptyCsv,
     NoDataRows,
     ColumnCountMismatch,
     OutOfMemory,
 };
-
-// ── CSV helpers ───────────────────────────────────────────────────────────
 
 /// Write a single CSV field, quoting it if it contains commas, quotes, or newlines.
 /// Internal double quotes are escaped by doubling them (RFC 4180).
@@ -238,7 +233,6 @@ fn parseCsvContent(
     return .{ .headers = headers, .rows = data_rows };
 }
 
-/// Build and execute a single INSERT statement. Returns true on success.
 fn buildAndExecuteInsert(
     allocator: std.mem.Allocator,
     pg_conn: *postgres.PgConnection,
@@ -275,9 +269,6 @@ fn buildAndExecuteInsert(
     return true;
 }
 
-// ── Handler functions ─────────────────────────────────────────────────────
-
-/// Handle GET /api/export/<table>?format=csv|json — export table data as a file download.
 pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -393,7 +384,6 @@ pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerStat
     }
 }
 
-/// Handle POST /api/sql/export — execute SQL and return results as CSV or JSON download.
 pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -503,7 +493,6 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *Serv
     }
 }
 
-/// Handle GET /api/tables/:name/ddl — return CREATE TABLE statement for the given table.
 pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -621,7 +610,6 @@ pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerSt
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle POST /api/tables/:name/import — import CSV data into a table.
 pub fn handleCsvImport(
     stream: std.net.Stream,
     request: []const u8,
@@ -834,7 +822,6 @@ pub fn handleCsvImport(
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-/// Handle GET /api/tables/:name/stats — return table size and row statistics.
 pub fn handleTableStats(
     stream: std.net.Stream,
     path: []const u8,
@@ -959,7 +946,7 @@ pub fn handleTableStats(
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// Tests
 
 test "escapeCsvField: plain text passes through" {
     var buf = std.ArrayList(u8).init(std.testing.allocator);

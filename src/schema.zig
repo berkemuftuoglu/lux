@@ -6,8 +6,6 @@ const web = @import("web.zig");
 
 const ServerState = web.ServerState;
 
-// ── Connection file helpers ───────────────────────────────────────────────
-
 const CONNECTIONS_FILENAME = "connections.json";
 const MAX_CONNECTIONS = 100;
 
@@ -25,8 +23,6 @@ const ConnectionFileError = error{
     ParseFailed,
 };
 
-/// Build a JSON string representing a single connection entry.
-/// Caller owns the returned memory.
 fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8, conninfo: []const u8, color: []const u8) ConnectionFileError![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
@@ -97,8 +93,6 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     _ = sep; // suppress unused variable — sep used in format strings above
 }
 
-/// Cross-platform env var lookup. Uses std.posix.getenv on POSIX,
-/// std.process.getEnvVarOwned is not needed since we only read the pointer.
 fn getEnvVar(key: [*:0]const u8) ?[]const u8 {
     if (builtin.os.tag == .windows) {
         // On Windows, std.posix.getenv is not available.
@@ -113,7 +107,6 @@ fn getEnvVar(key: [*:0]const u8) ?[]const u8 {
     return std.posix.getenv(std.mem.span(key));
 }
 
-/// Build the full path to the connections file. Caller owns the returned memory.
 fn getConfigFilePath(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     const dir = try getConfigDir(allocator);
     defer allocator.free(dir);
@@ -162,7 +155,6 @@ fn writeConnectionsFile(allocator: std.mem.Allocator, data: []const u8) Connecti
     file.writeAll(data) catch return error.WriteFailed;
 }
 
-/// Find the highest connection ID in the file content, for auto-increment.
 fn findMaxConnectionId(file_content: []const u8) u64 {
     var max_id: u64 = 0;
     var pos: usize = 0;
@@ -185,9 +177,6 @@ fn findMaxConnectionId(file_content: []const u8) u64 {
     return max_id;
 }
 
-// ── Handler functions ─────────────────────────────────────────────────────
-
-/// Handle POST /api/connect — connect to Postgres, fetch schema, store for per-query use.
 pub fn handleConnect(
     stream: std.net.Stream,
     request: []const u8,
@@ -473,7 +462,6 @@ pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle POST /api/reconnect — reconnect using the last connection string.
 pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
     const allocator = state.allocator;
 
@@ -570,7 +558,6 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle GET /api/health — check database connection health.
 pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
@@ -606,7 +593,6 @@ pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-/// Handle POST /api/settings/read-only — toggle read-only mode.
 pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     var extra_buf: [1024]u8 = undefined;
     const body = readRequestBodySimple(stream, request, &extra_buf, 1024) orelse {
@@ -627,14 +613,12 @@ pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, state: 
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-/// Handle GET /api/settings/read-only — get current read-only state.
 pub fn handleReadOnlyGet(stream: std.net.Stream, state: *const ServerState) !void {
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.read_only) "true" else "false"}) catch return;
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-/// Handle GET /api/connections — return saved connections.
 pub fn handleGetConnections(stream: std.net.Stream, state: *ServerState) !void {
     const allocator = state.allocator;
     const data = readConnectionsFile(allocator) catch {
@@ -645,7 +629,6 @@ pub fn handleGetConnections(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", data);
 }
 
-/// Handle POST /api/connections — save a new connection.
 pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     const allocator = state.allocator;
 
@@ -785,7 +768,6 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
     try utils.sendResponse(stream, "200 OK", "application/json", id_resp);
 }
 
-/// Handle DELETE /api/connections/:id — delete a saved connection.
 pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
     const allocator = state.allocator;
 
@@ -891,9 +873,6 @@ pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, state: *
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────
-
-/// Simple body reader (used by handleReadOnlyToggle).
 fn readRequestBodySimple(
     stream: std.net.Stream,
     request: []const u8,
@@ -923,7 +902,7 @@ fn readRequestBodySimple(
     }
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// Tests
 
 test "formatConnectionJson: basic entry" {
     const allocator = std.testing.allocator;

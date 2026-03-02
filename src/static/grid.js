@@ -1,7 +1,3 @@
-/* ═══════════════════════════════════════════════════════════════
-   LUX — Grid Module
-   Table rendering, cell focus, pagination, context menu, row detail, row selection, bulk operations
-   ═══════════════════════════════════════════════════════════════ */
 'use strict';
 
 function displayCols() { return currentPkMode === 'ctid' ? currentColumns.filter(c => c !== 'ctid') : currentColumns; }
@@ -211,7 +207,7 @@ function renderPagination() {
 $('page-prev').onclick = () => { pageOffset = Math.max(0, pageOffset - pageLimit); loadTableData(); };
 $('page-next').onclick = () => { pageOffset += pageLimit; loadTableData(); };
 
-// ── Context Menu ──
+// Context Menu
 function showContextMenu(x, y, rowIdx, colName, td) {
   const menu = $('ctx-menu');
   const val = td.textContent;
@@ -278,7 +274,7 @@ function copyRowAsInsert(rowIdx) {
   copyToClipboard(sql).then(() => toast('Copied as INSERT', 'success')).catch(() => {});
 }
 
-// ── Multi-Row Selection ──
+// Multi-Row Selection
 function updateRowSelection() {
   $('grid-body').querySelectorAll('tr').forEach(tr => {
     const ri = parseInt(tr.dataset.ridx);
@@ -363,7 +359,7 @@ $('bulk-copy-sql').onclick = () => {
   copyToClipboard(stmts.join('\n')).then(() => toast('Copied ' + stmts.length + ' INSERT statements', 'success')).catch(() => {});
 };
 
-// ── Row Detail Modal ──
+// Row Detail Modal
 function showRowDetail(rowIdx) {
   const cols = displayCols();
   const meta = getTableMeta(currentTable);

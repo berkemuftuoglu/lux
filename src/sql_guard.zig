@@ -1,17 +1,11 @@
 const std = @import("std");
 
-// ── Types ────────────────────────────────────────────────────────────────
-
-/// Result of SQL destructiveness analysis.
 pub const SqlGuardResult = struct {
     is_destructive: bool,
     operation: []const u8,
     warning: []const u8,
 };
 
-// ── Functions ────────────────────────────────────────────────────────────
-
-/// Analyze SQL for destructive operations (UPDATE/DELETE without WHERE, DROP, TRUNCATE, ALTER).
 pub fn analyzeSql(sql: []const u8) SqlGuardResult {
     // Skip leading whitespace
     var i: usize = 0;
@@ -263,8 +257,6 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
     return false;
 }
 
-// ── Private helpers ──────────────────────────────────────────────────────
-
 fn matchesIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (haystack.len < needle.len) return false;
     for (needle, 0..) |c, idx| {
@@ -276,7 +268,6 @@ fn matchesIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     return true;
 }
 
-/// Case-insensitive word search (checks for word boundary).
 pub fn containsIgnoreCaseWord(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;
     const limit = haystack.len - needle.len + 1;
@@ -300,9 +291,9 @@ fn isAlphanumUnderscore(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
 }
 
-// ── Tests ──────────────────────────────────────────────────────────────
+// Tests
 
-// ── isSqlReadSafe EXPLAIN ANALYZE tests ─────────────────────────────────
+// isSqlReadSafe EXPLAIN ANALYZE tests
 
 test "isSqlReadSafe: plain EXPLAIN is safe" {
     try std.testing.expect(isSqlReadSafe("EXPLAIN SELECT 1"));
@@ -324,7 +315,7 @@ test "isSqlReadSafe: EXPLAIN ANALYZE INSERT is blocked" {
     try std.testing.expect(!isSqlReadSafe("EXPLAIN ANALYZE INSERT INTO users VALUES (1)"));
 }
 
-// ── analyzeSql tests ──────────────────────────────────────────────────
+// analyzeSql tests
 
 test "analyzeSql: SELECT is safe" {
     const r = analyzeSql("SELECT * FROM users");
@@ -376,7 +367,7 @@ test "analyzeSql: empty is safe" {
     try std.testing.expect(!r.is_destructive);
 }
 
-// ── analyzeSql edge cases ──────────────────────────────────────────────
+// analyzeSql edge cases
 
 test "analyzeSql: case insensitive DROP" {
     const r = analyzeSql("drop table users");
@@ -421,7 +412,7 @@ test "analyzeSql: CREATE is not destructive" {
     try std.testing.expect(!r.is_destructive);
 }
 
-// ── containsIgnoreCaseWord edge cases ──────────────────────────────────
+// containsIgnoreCaseWord edge cases
 
 test "containsIgnoreCaseWord: word at start" {
     try std.testing.expect(containsIgnoreCaseWord("WHERE id = 1", "WHERE"));
@@ -456,7 +447,7 @@ test "containsIgnoreCaseWord: needle longer than haystack" {
     try std.testing.expect(!containsIgnoreCaseWord("HI", "HELLO"));
 }
 
-// ── isAlpha tests ──────────────────────────────────────────────────────────
+// isAlpha tests
 
 test "isAlpha: letters and underscore" {
     try std.testing.expect(isAlpha('a'));
@@ -514,7 +505,7 @@ test "containsIgnoreCaseWord: WHERE preceded by underscore" {
     try std.testing.expect(!containsIgnoreCaseWord("DO_WHERE", "WHERE"));
 }
 
-// ── hasMultipleStatements tests ──────────────────────────────────────
+// hasMultipleStatements tests
 
 test "hasMultipleStatements: single SELECT" {
     try std.testing.expect(!hasMultipleStatements("SELECT * FROM users"));

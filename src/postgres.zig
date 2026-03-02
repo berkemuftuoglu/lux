@@ -11,12 +11,9 @@ pub const PgError = error{
     InvalidData,
 };
 
-/// A connection to a PostgreSQL database via libpq.
 pub const PgConnection = struct {
     conn: *c.PGconn,
 
-    /// Connect to a PostgreSQL database using a libpq connection string.
-    /// Example: "postgresql://user:pass@localhost/mydb"
     pub fn connect(conninfo: [*:0]const u8) PgError!PgConnection {
         const conn = c.PQconnectdb(conninfo) orelse return error.ConnectionFailed;
         if (c.PQstatus(conn) != c.CONNECTION_OK) {
@@ -34,7 +31,6 @@ pub const PgConnection = struct {
         return PgConnection{ .conn = conn };
     }
 
-    /// Check if the connection is in a good state.
     pub fn isOk(self: *const PgConnection) bool {
         return c.PQstatus(self.conn) == c.CONNECTION_OK;
     }
@@ -44,7 +40,6 @@ pub const PgConnection = struct {
         self.* = undefined;
     }
 
-    /// Get the connection error message (if any).
     pub fn errorMessage(self: *const PgConnection) []const u8 {
         const msg = c.PQerrorMessage(self.conn);
         if (msg == null) return "";
@@ -75,7 +70,6 @@ pub const PgConnection = struct {
         return extractResult(res, allocator);
     }
 
-    /// Fetch the schema: list of tables with their columns and types.
     pub fn fetchSchema(self: *PgConnection, allocator: std.mem.Allocator) PgError!SchemaInfo {
         const sql =
             "SELECT table_name, column_name, data_type " ++
@@ -146,7 +140,6 @@ pub const PgConnection = struct {
         };
     }
 
-    /// Fetch enhanced schema with PK, FK, ENUM, and nullability info.
     pub fn fetchEnhancedSchema(self: *PgConnection, allocator: std.mem.Allocator) PgError!EnhancedSchemaInfo {
         // Q1: Columns + PK info
         const col_sql =
@@ -366,10 +359,6 @@ pub const PgConnection = struct {
     }
 };
 
-/// Extract column names and row data from a PGresult into a QueryResult.
-/// Checks the result status, collects n_rows/n_cols, allocates and fills
-/// col_names and rows, calls PQclear(res), and returns the QueryResult.
-/// Called by both runQuery (after PQexecParams) and runQueryMulti (after PQexec).
 fn extractResult(res: *c.PGresult, allocator: std.mem.Allocator) PgError!QueryResult {
     const status = c.PQresultStatus(res);
     if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
@@ -555,7 +544,6 @@ pub const SchemaInfo = struct {
     tables: []TableInfo,
     allocator: std.mem.Allocator,
 
-    /// Format the schema as a concise text description.
     pub fn format(self: *const SchemaInfo, allocator: std.mem.Allocator) ![]u8 {
         var buf = std.ArrayList(u8).init(allocator);
         errdefer buf.deinit();
@@ -587,7 +575,7 @@ pub const SchemaInfo = struct {
     }
 };
 
-// ── Tests ──────────────────────────────────────────────────────────────
+// Tests
 
 test "isStaticStr: identifies static strings" {
     try std.testing.expect(isStaticStr("NULL"));

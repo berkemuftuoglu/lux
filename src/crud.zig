@@ -9,9 +9,6 @@ const ServerState = web.ServerState;
 const ChangeEntry = web.ChangeEntry;
 const MAX_JOURNAL_ENTRIES = web.MAX_JOURNAL_ENTRIES;
 
-// ── Helpers shared within crud.zig ───────────────────────────────────────
-
-/// Metadata for table data JSON response.
 pub const TableDataMeta = struct {
     total: usize,
     limit: usize,
@@ -27,7 +24,6 @@ const KVPair = struct {
     value: []const u8,
 };
 
-/// Find a table by name in the schema. Returns the TableInfo or null.
 pub fn findTableInSchema(tables: []const postgres.TableInfo, name: []const u8) ?postgres.TableInfo {
     for (tables) |t| {
         if (std.mem.eql(u8, t.name, name)) return t;
@@ -35,7 +31,6 @@ pub fn findTableInSchema(tables: []const postgres.TableInfo, name: []const u8) ?
     return null;
 }
 
-/// Check if a column exists in a table's schema.
 pub fn findColumnInTable(table: postgres.TableInfo, col_name: []const u8) bool {
     for (table.columns) |col| {
         if (std.mem.eql(u8, col.name, col_name)) return true;
@@ -74,7 +69,6 @@ pub fn readRequestBody(
     }
 }
 
-/// Check if read-only mode blocks this operation. Returns true if blocked.
 pub fn enforceReadOnly(stream: std.net.Stream, state: *const ServerState) !bool {
     if (state.read_only) {
         try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to make changes.\"}");
@@ -83,7 +77,6 @@ pub fn enforceReadOnly(stream: std.net.Stream, state: *const ServerState) !bool 
     return false;
 }
 
-/// Validate a Postgres ctid value has the expected format: (page,offset).
 pub fn validateCtid(ctid: []const u8) bool {
     if (ctid.len < 5) return false;
     if (ctid[0] != '(') return false;
@@ -98,7 +91,6 @@ pub fn validateCtid(ctid: []const u8) bool {
     return true;
 }
 
-/// Format a single row as a compact JSON object: {"col1":"val1","col2":"val2"}
 fn formatRowAsJsonCompact(allocator: std.mem.Allocator, col_names: []const []const u8, row: []const []const u8) ![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     errdefer buf.deinit();
@@ -191,7 +183,6 @@ fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name:
     };
 }
 
-/// Add an entry to the change journal.
 pub fn addJournalEntry(
     state: *ServerState,
     table_name: []const u8,
@@ -275,8 +266,6 @@ pub fn addJournalEntry(
     return entry.id;
 }
 
-// ── JSON serialization helpers ────────────────────────────────────────────
-
 /// Write the shared "columns":[...] and "rows":[[...]] JSON to the writer.
 /// Used by both sendTableDataJson and sendQueryResultJson to eliminate duplication.
 fn writeColumnsAndRows(w: anytype, pg_result: *const postgres.QueryResult) !void {
@@ -310,7 +299,6 @@ fn writeColumnsAndRows(w: anytype, pg_result: *const postgres.QueryResult) !void
     try w.writeByte(']');
 }
 
-/// Serialize paginated table data as JSON and send as HTTP response.
 pub fn sendTableDataJson(
     stream: std.net.Stream,
     allocator: std.mem.Allocator,
@@ -373,7 +361,6 @@ pub fn sendTableDataJson(
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Send a Postgres QueryResult as JSON with columns and rows.
 pub fn sendQueryResultJson(stream: std.net.Stream, allocator: std.mem.Allocator, pg_result: *postgres.QueryResult) !void {
     var json_buf = std.ArrayList(u8).init(allocator);
     defer json_buf.deinit();
@@ -387,8 +374,6 @@ pub fn sendQueryResultJson(stream: std.net.Stream, allocator: std.mem.Allocator,
     try w.writeByte('}');
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
-
-// ── Handler functions ─────────────────────────────────────────────────────
 
 /// Handle GET /api/tables/:name/data — return paginated table data.
 /// Path format: /api/tables/<name>/data or /api/tables/<name>/data?limit=N&offset=N
@@ -665,7 +650,6 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     });
 }
 
-/// Handle POST /api/update — update a single cell value.
 pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -811,7 +795,6 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-/// Handle POST /api/delete-row — delete a row by primary key.
 pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -939,7 +922,6 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
 }
 
-/// Handle POST /api/insert-row — insert a row with default values.
 pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -1204,7 +1186,6 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle POST /api/tables/:name/bulk-update — find and replace in a column.
 pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -1321,7 +1302,6 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     }
 }
 
-/// Handle POST /api/tables/<name>/truncate — remove all rows from a table.
 pub fn handleTruncateTable(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -1390,7 +1370,7 @@ pub fn handleTruncateTable(stream: std.net.Stream, path: []const u8, state: *Ser
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// Tests
 
 test "findTableInSchema: finds existing table" {
     const cols = [_]postgres.ColumnInfo{

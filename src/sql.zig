@@ -9,9 +9,6 @@ const ServerState = web.ServerState;
 const QueryHistoryEntry = web.QueryHistoryEntry;
 const MAX_HISTORY_ENTRIES = web.MAX_HISTORY_ENTRIES;
 
-// ── History ───────────────────────────────────────────────────────────────
-
-/// Record a query execution in the history log.
 pub fn addHistoryEntry(
     state: *ServerState,
     sql: []const u8,
@@ -40,9 +37,6 @@ pub fn addHistoryEntry(
     }
 }
 
-// ── SQL execution ─────────────────────────────────────────────────────────
-
-/// Handle POST /api/sql — execute a SQL query and return results as JSON.
 pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -173,8 +167,6 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     try crud.sendQueryResultJson(stream, allocator, &result);
 }
 
-// ── SQL preview ───────────────────────────────────────────────────────────
-
 /// Handle POST /api/sql/preview — wrap query in BEGIN/ROLLBACK to preview effects.
 pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
@@ -287,9 +279,6 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-// ── Schema preview ────────────────────────────────────────────────────────
-
-/// Generate rollback SQL for common DDL operations.
 pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
     // Simple token-based DDL analysis
     // ADD COLUMN → DROP COLUMN
@@ -354,7 +343,6 @@ pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
     try writer.writeAll("-- No automatic rollback available for this operation.");
 }
 
-/// Handle POST /api/sql/schema-preview — analyze DDL and generate rollback SQL.
 pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -395,8 +383,6 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
 
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
-
-// ── History handler ───────────────────────────────────────────────────────
 
 /// Handle GET /api/history — return recent query history entries (newest first).
 pub fn handleHistory(stream: std.net.Stream, state: *ServerState) !void {
@@ -449,9 +435,6 @@ pub fn handleHistory(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json.items);
 }
 
-// ── Journal handlers ──────────────────────────────────────────────────────
-
-/// Handle GET /api/journal — return recent change journal entries.
 pub fn handleJournal(stream: std.net.Stream, state: *const ServerState) !void {
     const allocator = state.allocator;
     var json_buf = std.ArrayList(u8).init(allocator);
@@ -485,7 +468,6 @@ pub fn handleJournal(stream: std.net.Stream, state: *const ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle POST /api/journal/undo — reverse a change.
 pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -590,7 +572,7 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *Se
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────────
+// Tests
 
 test "addHistoryEntry: adds to history" {
     var state = web.ServerState.init(std.testing.allocator);

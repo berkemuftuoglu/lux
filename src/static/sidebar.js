@@ -1,10 +1,6 @@
-/* ═══════════════════════════════════════════════════════════════
-   LUX — Sidebar Module
-   Schema loading, table selection, sidebar rendering, type detection, ER diagram
-   ═══════════════════════════════════════════════════════════════ */
 'use strict';
 
-// ── Schema ──
+// Schema
 async function loadSchema() {
   try {
     schemaData = await fetchJson('/api/schema');
@@ -90,7 +86,7 @@ $('table-search').addEventListener('input', () => {
   });
 });
 
-// ── Table Selection & Data ──
+// Table Selection & Data
 function updateDestructiveButtons(enabled) {
   const ids = ['btn-truncate', 'btn-import-csv', 'btn-export-csv', 'btn-export-json'];
   ids.forEach(id => {
@@ -205,7 +201,7 @@ function enumPillClass(val) {
   return 'pill-default';
 }
 
-// ── ER Diagram ──
+// ER Diagram
 let erPositions = []; // stored for hover detection
 let erTablePos = {};
 let erHoveredTable = null;

@@ -1,17 +1,13 @@
-/* ═══════════════════════════════════════════════════════════════
-   LUX — Client Core
-   Utilities, state, connection management, SQL editor, initialization
-   ═══════════════════════════════════════════════════════════════ */
 'use strict';
 
-// ── Constants ──
+// Constants
 const TOAST_DURATION = 3500;
 const TOAST_HOVER_DURATION = 2000;
 const HEALTH_CHECK_INTERVAL = 30000;
 const AC_LINE_HEIGHT = 23;
 const AC_CHAR_WIDTH = 8.4;
 
-// ── Helpers ──
+// Helpers
 const $ = id => document.getElementById(id);
 const $$ = sel => document.querySelectorAll(sel);
 function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
@@ -39,7 +35,7 @@ async function fetchJson(url, opts) {
   return res.json();
 }
 
-// ── Theme Toggle ──
+// Theme Toggle
 function setTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme);
   localStorage.setItem('lux-theme', theme);
@@ -58,7 +54,7 @@ if (savedTheme) setTheme(savedTheme);
 else if (window.matchMedia('(prefers-color-scheme: light)').matches) setTheme('light');
 else setTheme('dark');
 
-// ── State ──
+// State
 let schemaData = null;
 let currentTable = null;
 let currentColumns = [];
@@ -83,7 +79,7 @@ let selectedRows = new Set();
 let lastSelectedRow = -1;
 let lastSqlQuery = '';
 
-// ── Toast ──
+// Toast
 function toast(msg, type) {
   const el = document.createElement('div');
   el.className = 'toast ' + (type || 'info');
@@ -94,7 +90,7 @@ function toast(msg, type) {
   el.addEventListener('mouseleave', () => { timer = setTimeout(() => { el.classList.add('hiding'); setTimeout(() => el.remove(), 200); }, TOAST_HOVER_DURATION); });
 }
 
-// ── Loading Spinner ──
+// Loading Spinner
 function showLoading(parentId) {
   const parent = $(parentId);
   if (!parent || parent.querySelector('.loading-overlay')) return;
@@ -111,7 +107,7 @@ function hideLoading(parentId) {
   if (overlay) overlay.remove();
 }
 
-// ── Confirm Dialog ──
+// Confirm Dialog
 let confirmResolve = null;
 function confirm(title, body) {
   return new Promise(resolve => {
@@ -141,7 +137,7 @@ $('prompt-cancel').onclick = () => { $('prompt-overlay').classList.remove('open'
 $('prompt-input').addEventListener('keydown', e => { if (e.key === 'Enter') $('prompt-ok').click(); });
 $('prompt-overlay').onclick = e => { if (e.target === $('prompt-overlay')) $('prompt-cancel').click(); };
 
-// ── Focus Trap ──
+// Focus Trap
 function trapFocus(modal) {
   const focusable = modal.querySelectorAll('button, input, textarea, select, [tabindex]:not([tabindex="-1"])');
   if (!focusable.length) return;
@@ -159,7 +155,7 @@ function releaseFocus(modal) {
   if (modal._focusTrap) modal.removeEventListener('keydown', modal._focusTrap);
 }
 
-// ── Tabs ──
+// Tabs
 $$('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
     $$('.tab').forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
@@ -172,7 +168,7 @@ $$('.tab').forEach(tab => {
   });
 });
 
-// ── Connection ──
+// Connection
 $('conn-btn').onclick = doConnect;
 $('conn-input').addEventListener('keydown', e => { if (e.key === 'Enter') doConnect(); });
 
@@ -220,7 +216,7 @@ function updateConnUI() {
   $('save-conn-btn').style.display = dbConnected ? '' : 'none';
 }
 
-// ── Insert Row (Modal) ──
+// Insert Row (Modal)
 $('btn-add-row').onclick = () => {
   if (!currentTable || !dbConnected) return;
   const meta = getTableMeta(currentTable);
@@ -286,7 +282,7 @@ $('insert-cancel').onclick = () => { releaseFocus($('insert-overlay')); $('inser
 $('insert-overlay').onclick = e => { if (e.target === $('insert-overlay')) { releaseFocus($('insert-overlay')); $('insert-overlay').classList.remove('open'); } };
 $('insert-fields').addEventListener('keydown', e => { if (e.key === 'Enter') submitInsert(); });
 
-// ── Export ──
+// Export
 $('btn-export-csv').onclick = () => {
   if (currentTable) window.location.href = '/api/export/' + encodeURIComponent(currentTable) + '?format=csv';
 };
@@ -294,7 +290,7 @@ $('btn-export-json').onclick = () => {
   if (currentTable) window.location.href = '/api/export/' + encodeURIComponent(currentTable) + '?format=json';
 };
 
-// ── Find & Replace ──
+// Find & Replace
 $('btn-find-replace').onclick = () => {
   if (!currentTable || !dbConnected) return;
   $('fnr-tbl').textContent = currentTable;
@@ -354,11 +350,11 @@ $('fnr-ok').onclick = async () => {
 $('fnr-cancel').onclick = () => { releaseFocus($('fnr-overlay')); $('fnr-overlay').classList.remove('open'); };
 $('fnr-overlay').onclick = e => { if (e.target === $('fnr-overlay')) { releaseFocus($('fnr-overlay')); $('fnr-overlay').classList.remove('open'); } };
 
-// ── Refresh ──
+// Refresh
 $('btn-refresh').onclick = async () => { if (dbConnected) { await loadSchema(); toast('Schema refreshed', 'success'); } };
 $('btn-tbl-refresh').onclick = () => loadTableData();
 
-// ── SQL Editor ──
+// SQL Editor
 const sqlEditor = $('sql-editor');
 const sqlHighlight = $('sql-highlight');
 
@@ -443,7 +439,7 @@ sqlEditor.addEventListener('scroll', () => {
   sqlHighlight.scrollLeft = sqlEditor.scrollLeft;
 });
 
-// ── SQL Autocomplete ──
+// SQL Autocomplete
 const acDropdown = $('sql-autocomplete');
 let acItems = [];
 let acIndex = -1;
@@ -597,7 +593,7 @@ sqlEditor.addEventListener('keydown', e => {
 
 sqlEditor.addEventListener('blur', () => setTimeout(hideAC, 150));
 
-// ── Run SQL ──
+// Run SQL
 $('btn-run-sql').onclick = runSQL;
 sqlEditor.addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); hideAC(); runSQL(); }
@@ -747,7 +743,7 @@ function renderSQLResult(data, elapsed) {
   lastSqlQuery = sqlEditor.value.trim();
 }
 
-// ── DDL Viewer ──
+// DDL Viewer
 $('btn-ddl').onclick = async () => {
   if (!currentTable) return;
   $('ddl-title').textContent = currentTable + ' \u2014 DDL';
@@ -765,7 +761,7 @@ $('ddl-copy').onclick = () => {
 };
 $('ddl-overlay').onclick = e => { if (e.target === $('ddl-overlay')) { releaseFocus($('ddl-overlay')); $('ddl-overlay').classList.remove('open'); } };
 
-// ── Query History ──
+// Query History
 $('btn-sql-history').onclick = async () => {
   $('history-overlay').classList.add('open');
   trapFocus($('history-overlay'));
@@ -809,7 +805,7 @@ $('btn-sql-history').onclick = async () => {
 };
 $('history-overlay').onclick = e => { if (e.target === $('history-overlay')) { releaseFocus($('history-overlay')); $('history-overlay').classList.remove('open'); } };
 
-// ── Table Stats ──
+// Table Stats
 $('btn-stats').onclick = async () => {
   if (!currentTable) return;
   try {
@@ -844,7 +840,7 @@ $('btn-stats').onclick = async () => {
   } catch(e) { toast('Failed to load stats', 'error'); }
 };
 
-// ── Truncate Table ──
+// Truncate Table
 $('btn-truncate').onclick = async () => {
   if (!currentTable || !dbConnected) return;
   const ok = await confirm('Truncate Table', 'TRUNCATE TABLE "' + currentTable + '" \u2014 This will delete ALL rows. This cannot be undone.');
@@ -858,7 +854,7 @@ $('btn-truncate').onclick = async () => {
   } catch(e) { toast('Truncate failed', 'error'); }
 };
 
-// ── SQL Formatter ──
+// SQL Formatter
 $('btn-format-sql').onclick = () => {
   const sql = sqlEditor.value.trim();
   if (!sql) return;
@@ -955,7 +951,7 @@ function formatSQL(sql) {
   return formatted.trim();
 }
 
-// ── Saved Queries ──
+// Saved Queries
 function getSavedQueries() {
   try { return JSON.parse(localStorage.getItem('lux-saved-queries') || '[]'); }
   catch(e) { return []; }
@@ -1030,7 +1026,7 @@ function renderSavedQueries() {
 
 $('saved-overlay').onclick = e => { if (e.target === $('saved-overlay')) { releaseFocus($('saved-overlay')); $('saved-overlay').classList.remove('open'); } };
 
-// ── Sidebar Resize ──
+// Sidebar Resize
 (function() {
   const handle = $('sidebar-resize');
   const sidebar = $('sidebar');
@@ -1059,7 +1055,7 @@ $('saved-overlay').onclick = e => { if (e.target === $('saved-overlay')) { relea
   });
 })();
 
-// ── SQL Editor Resize ──
+// SQL Editor Resize
 (function() {
   const handle = $('sql-resize');
   const wrap = document.querySelector('.sql-editor-wrap');
@@ -1092,7 +1088,7 @@ $('saved-overlay').onclick = e => { if (e.target === $('saved-overlay')) { relea
   });
 })();
 
-// ── Keyboard Shortcuts ──
+// Keyboard Shortcuts
 document.addEventListener('keydown', e => {
   // Ctrl+L: focus SQL editor
   if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
@@ -1180,7 +1176,7 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ── Init ──
+// Init
 // Deferred until DOMContentLoaded so all script modules (sidebar.js, grid.js, crud.js)
 // are fully parsed and their functions are available.
 async function init() {
@@ -1203,7 +1199,7 @@ window.addEventListener('resize', () => {
   if ($('panel-er').classList.contains('active')) drawER();
 });
 
-// ── Connection Manager ──
+// Connection Manager
 let savedConnColor = 'blue';
 let savedConnsMap = new Map();
 
@@ -1296,7 +1292,7 @@ $('save-conn-ok').onclick = async () => {
 $('save-conn-cancel').onclick = () => { releaseFocus($('save-conn-overlay')); $('save-conn-overlay').classList.remove('open'); };
 $('save-conn-overlay').onclick = e => { if (e.target === $('save-conn-overlay')) { releaseFocus($('save-conn-overlay')); $('save-conn-overlay').classList.remove('open'); } };
 
-// ── SQL Tabs ──
+// SQL Tabs
 let sqlTabs = [{ id: 0, name: 'Query 1', sql: '', results: '' }];
 let activeSqlTab = 0;
 let nextSqlTabId = 1;
@@ -1387,7 +1383,7 @@ async function closeSqlTab(tabId) {
 
 $('sql-tab-add').onclick = addSqlTab;
 
-// ── Column Resizing ──
+// Column Resizing
 (function() {
   let resizing = false;
   let resizeTh = null;
@@ -1427,7 +1423,7 @@ $('sql-tab-add').onclick = addSqlTab;
   });
 })();
 
-// ── Table Creation ──
+// Table Creation
 let createTableColCount = 0;
 
 $('btn-create-table').onclick = () => {
@@ -1529,7 +1525,7 @@ $('create-table-ok').onclick = async () => {
 $('create-table-cancel').onclick = () => { releaseFocus($('create-table-overlay')); $('create-table-overlay').classList.remove('open'); };
 $('create-table-overlay').onclick = e => { if (e.target === $('create-table-overlay')) { releaseFocus($('create-table-overlay')); $('create-table-overlay').classList.remove('open'); } };
 
-// ── Health Check & Reconnect ──
+// Health Check & Reconnect
 let healthCheckInterval = null;
 
 function startHealthCheck() {
@@ -1570,7 +1566,7 @@ $('reconnect-btn').onclick = async () => {
   $('reconnect-btn').disabled = false;
 };
 
-// ── SQL Results Export ──
+// SQL Results Export
 async function exportSqlResults(format) {
   const sql = lastSqlQuery;
   if (!sql) { toast('No query to export', 'error'); return; }
@@ -1594,7 +1590,7 @@ async function exportSqlResults(format) {
   } catch(e) { toast('Export failed', 'error'); }
 }
 
-// ── Import CSV ──
+// Import CSV
 $('btn-import-csv').onclick = () => {
   if (!currentTable || !dbConnected || readOnlyMode) {
     if (readOnlyMode) toast('Read-only mode', 'error');
@@ -1629,7 +1625,7 @@ $('import-ok').onclick = async () => {
 $('import-cancel').onclick = () => { releaseFocus($('import-overlay')); $('import-overlay').classList.remove('open'); };
 $('import-overlay').onclick = e => { if (e.target === $('import-overlay')) { releaseFocus($('import-overlay')); $('import-overlay').classList.remove('open'); } };
 
-// ── Connection Color Stripe ──
+// Connection Color Stripe
 function setConnStripe(color) {
   const stripe = $('conn-stripe');
   stripe.className = 'conn-stripe';
@@ -1653,7 +1649,7 @@ function getSavedConnColor(conninfo) {
   return null;
 }
 
-// ── Command Palette (Ctrl+K) ──
+// Command Palette (Ctrl+K)
 let cmdIndex = 0;
 let cmdItems = [];
 

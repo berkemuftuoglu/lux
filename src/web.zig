@@ -19,7 +19,6 @@ const WebError = error{
     AcceptFailed,
 };
 
-/// A single change entry in the change journal.
 pub const ChangeEntry = struct {
     id: u64,
     timestamp: i64,
@@ -36,7 +35,6 @@ pub const ChangeEntry = struct {
 pub const MAX_JOURNAL_ENTRIES = 10000;
 pub const MAX_HISTORY_ENTRIES = 500;
 
-/// A single query history entry for the SQL execution log.
 pub const QueryHistoryEntry = struct {
     sql: []const u8,
     timestamp: i64,
@@ -46,24 +44,20 @@ pub const QueryHistoryEntry = struct {
     error_msg: ?[]const u8,
 };
 
-/// Mutable server state for the PostgreSQL web client.
 pub const ServerState = struct {
     allocator: std.mem.Allocator,
     /// Stored Postgres connection string (null-terminated) for per-query connections.
     conninfo_z: ?[:0]u8 = null,
     /// Schema column info for table/column resolution.
     schema_tables: ?[]postgres.TableInfo = null,
-    /// Human-readable schema text for display.
     schema_text: ?[]u8 = null,
     /// Enhanced schema with PK, FK, ENUM, nullability info.
     enhanced_schema: ?[]postgres.EnhancedTableInfo = null,
     /// Read-only mode — blocks DML/DDL operations.
     read_only: bool = false,
-    /// Change journal for undo support.
     change_journal: std.ArrayList(ChangeEntry) = undefined,
     next_journal_id: u64 = 1,
     journal_initialized: bool = false,
-    /// Query execution history.
     query_history: std.ArrayList(QueryHistoryEntry) = undefined,
     history_initialized: bool = false,
     /// Last successful connection string (for reconnect).
@@ -83,7 +77,6 @@ pub const ServerState = struct {
         };
     }
 
-    /// Returns true if a Postgres connection is configured.
     pub fn hasDbConnection(self: *const ServerState) bool {
         return self.conninfo_z != null;
     }
@@ -240,7 +233,7 @@ fn handleConnection(
     }
 }
 
-// ── ServerState tests ────────────────────────────────────────────────────
+// ServerState tests
 
 test "ServerState: init defaults" {
     const state = ServerState.init(std.testing.allocator);

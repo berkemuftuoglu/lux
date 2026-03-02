@@ -1,10 +1,6 @@
-/* ═══════════════════════════════════════════════════════════════
-   LUX — CRUD Module
-   Edit, save, delete, insert, FK selection, read-only mode, journal
-   ═══════════════════════════════════════════════════════════════ */
 'use strict';
 
-// ── FK Autocomplete state (in-grid editing) ──
+// FK Autocomplete state (in-grid editing)
 let fkDropdown = null;
 let fkItems = [];
 let fkIndex = -1;
@@ -69,7 +65,7 @@ function hideFkDropdown() {
   fkIndex = -1;
 }
 
-// ── Inline Cell Editing ──
+// Inline Cell Editing
 function startEdit(td) {
   if (readOnlyMode) { toast('Read-only mode', 'error'); return; }
   if (editingCell) cancelEdit();
@@ -181,7 +177,7 @@ async function saveEdit() {
   } catch(e) { toast('Update failed', 'error'); loadTableData(); }
 }
 
-// ── Delete Row ──
+// Delete Row
 async function deleteRow(rowIdx) {
   if (readOnlyMode) { toast('Read-only mode', 'error'); return; }
 
@@ -213,7 +209,7 @@ async function deleteRow(rowIdx) {
   } catch(e) { toast('Delete failed', 'error'); }
 }
 
-// ── Insert Row (Modal) ──
+// Insert Row (Modal)
 async function submitInsert() {
   const meta = getTableMeta(currentTable);
   if (!meta) return;
@@ -250,7 +246,7 @@ async function submitInsert() {
   } catch(e) { toast('Insert failed', 'error'); }
 }
 
-// ── Set to NULL ──
+// Set to NULL
 async function setToNull(rowIdx, colName, td) {
   if (readOnlyMode) { toast('Read-only mode', 'error'); return; }
   let pkCol, pkVal;
@@ -289,7 +285,7 @@ async function setToNull(rowIdx, colName, td) {
   } catch(e) { toast('Update failed', 'error'); }
 }
 
-// ── Read-Only Toggle ──
+// Read-Only Toggle
 $('btn-readonly').onclick = async () => {
   try {
     const data = await fetchJson('/api/settings/read-only', { method: 'POST' });
@@ -312,7 +308,7 @@ function updateReadOnlyUI() {
   $('status-ro').classList.toggle('show', readOnlyMode);
 }
 
-// ── Journal ──
+// Journal
 function bumpJournal() {
   journalCount++;
   const badge = $('journal-badge');
