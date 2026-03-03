@@ -3,8 +3,6 @@ const c = @cImport({
     @cInclude("libpq-fe.h");
 });
 
-const log = std.log.scoped(.postgres);
-
 pub const PgError = error{
     ConnectionFailed,
     QueryFailed,
@@ -61,7 +59,7 @@ pub const PgConnection = struct {
             null, // paramFormats
             0, // resultFormat (text)
         ) orelse return error.QueryFailed;
-        return extractResult(res, allocator);
+        return extractResult(allocator, res);
     }
 
     /// Run one or more SQL statements via PQexec (supports multi-statement scripts).
@@ -69,7 +67,7 @@ pub const PgConnection = struct {
     /// where users type arbitrary SQL including multi-statement scripts.
     pub fn runQueryMulti(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
         const res = c.PQexec(self.conn, sql) orelse return error.QueryFailed;
-        return extractResult(res, allocator);
+        return extractResult(allocator, res);
     }
 
     pub fn fetchSchema(self: *PgConnection, allocator: std.mem.Allocator) PgError!SchemaInfo {
@@ -103,9 +101,9 @@ pub const PgConnection = struct {
         errdefer current_columns.deinit(allocator);
 
         for (0..n_rows) |row_idx| {
-            const tname = getStringField(res, row_idx, 0, allocator) catch return error.OutOfMemory;
-            const cname = getStringField(res, row_idx, 1, allocator) catch return error.OutOfMemory;
-            const dtype = getStringField(res, row_idx, 2, allocator) catch return error.OutOfMemory;
+            const tname = getStringField(allocator, res, row_idx, 0) catch return error.OutOfMemory;
+            const cname = getStringField(allocator, res, row_idx, 1) catch return error.OutOfMemory;
+            const dtype = getStringField(allocator, res, row_idx, 2) catch return error.OutOfMemory;
 
             if (current_table == null or !std.mem.eql(u8, current_table.?, tname)) {
                 // New table — flush previous
@@ -272,9 +270,9 @@ pub const PgConnection = struct {
         }
 
         for (0..col_rows) |ri| {
-            const tname = getStringField(col_res, ri, 0, allocator) catch return error.OutOfMemory;
-            const cname = getStringField(col_res, ri, 1, allocator) catch return error.OutOfMemory;
-            const dtype = getStringField(col_res, ri, 2, allocator) catch return error.OutOfMemory;
+            const tname = getStringField(allocator, col_res, ri, 0) catch return error.OutOfMemory;
+            const cname = getStringField(allocator, col_res, ri, 1) catch return error.OutOfMemory;
+            const dtype = getStringField(allocator, col_res, ri, 2) catch return error.OutOfMemory;
             const nullable_str = getStringFieldNoAlloc(col_res, ri, 3);
             const default_str = getStringFieldNoAlloc(col_res, ri, 4);
             const pk_str = getStringFieldNoAlloc(col_res, ri, 5);
@@ -361,7 +359,7 @@ pub const PgConnection = struct {
     }
 };
 
-fn extractResult(res: *c.PGresult, allocator: std.mem.Allocator) PgError!QueryResult {
+fn extractResult(allocator: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
     const status = c.PQresultStatus(res);
     if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
         c.PQclear(res);
@@ -449,7 +447,7 @@ fn getStringFieldNoAlloc(res: *c.PGresult, row: usize, col_idx: usize) []const u
     return std.mem.sliceTo(val_ptr, 0);
 }
 
-fn getStringField(res: *c.PGresult, row: usize, col: usize, allocator: std.mem.Allocator) ![]const u8 {
+fn getStringField(allocator: std.mem.Allocator, res: *c.PGresult, row: usize, col: usize) ![]const u8 {
     const val_ptr = c.PQgetvalue(res, @intCast(row), @intCast(col));
     if (val_ptr == null) return "";
     const val_slice = std.mem.sliceTo(val_ptr, 0);

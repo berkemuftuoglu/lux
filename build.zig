@@ -55,6 +55,43 @@ pub fn build(b: *std.Build) void {
     addPostgres(check_exe);
     const check_step = b.step("check", "Check compilation without linking");
     check_step.dependOn(&check_exe.step);
+
+    // --- Lint step (zlint + fmt check + JS quality) ---
+    // zlint v0.7.9 build.zig uses addStaticLibrary which was removed in Zig 0.15.x.
+    // Building from source as a lazy dependency is blocked until zlint publishes a
+    // Zig 0.15.x-compatible build. Use the prebuilt binary via addSystemCommand instead.
+    const lint_step = b.step("lint", "Run zlint and format check");
+
+    const run_zlint = b.addSystemCommand(&.{
+        "bash", "-c", "find src -name '*.zig' | zlint --stdin",
+    });
+    run_zlint.stdio = .inherit;
+    lint_step.dependOn(&run_zlint.step);
+
+    const fmt_check = b.addFmt(.{
+        .paths = &.{"src/"},
+        .check = true,
+    });
+    lint_step.dependOn(&fmt_check.step);
+
+    // JS quality checks (migrated from check.sh)
+    const js_no_var = b.addSystemCommand(&.{
+        "bash", "-c",
+        "! grep -rnP '^\\s*var\\s|\\svar\\s' src/static/*.js 2>/dev/null | grep -v '// var ok' | grep -q .",
+    });
+    lint_step.dependOn(&js_no_var.step);
+
+    const js_no_console = b.addSystemCommand(&.{
+        "bash", "-c",
+        "! grep -rn 'console\\.log' src/static/*.js 2>/dev/null | grep -q .",
+    });
+    lint_step.dependOn(&js_no_console.step);
+
+    const js_no_unsafe = b.addSystemCommand(&.{
+        "bash", "-c",
+        "! grep -rn '[^a-z]eval\\x28' src/static/*.js 2>/dev/null | grep -q .",
+    });
+    lint_step.dependOn(&js_no_unsafe.step);
 }
 
 /// Add a test compilation for a single source module.

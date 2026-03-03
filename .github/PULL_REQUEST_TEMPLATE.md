@@ -8,4 +8,4 @@ Steps to verify the change works correctly.
 
 ## Checklist
 
-- [ ] Pre-push hook passes (`zig build test` + `zig build -Doptimize=ReleaseSafe` + `check.sh`)
+- [ ] Pre-push hook passes (`zig build test` + `zig build -Doptimize=ReleaseSafe` + `zig build lint`)

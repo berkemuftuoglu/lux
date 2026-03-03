@@ -9,14 +9,6 @@ const log = std.log.scoped(.schema);
 const ServerState = web.ServerState;
 
 const connections_filename = "connections.json";
-const max_connections = 100;
-
-const ConnectionEntry = struct {
-    id: u64,
-    name: []const u8,
-    conninfo: []const u8,
-    color: []const u8,
-};
 
 const ConnectionFileError = error{
     OutOfMemory,
@@ -52,7 +44,9 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     // All platforms: XDG_CONFIG_HOME takes priority if set
     if (getEnvVar("XDG_CONFIG_HOME")) |xdg| {
         const path = std.fmt.allocPrint(allocator, "{s}" ++ sep_str ++ "lux" ++ sep_str, .{xdg}) catch return error.OutOfMemory;
-        std.fs.cwd().makePath(path) catch {};
+        std.fs.cwd().makePath(path) catch |err| {
+            log.warn("could not create config dir: {s}", .{@errorName(err)});
+        };
         return path;
     }
 
@@ -61,13 +55,17 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
             // %APPDATA% (typically C:\Users\<user>\AppData\Roaming)
             if (getEnvVar("APPDATA")) |appdata| {
                 const path = std.fmt.allocPrint(allocator, "{s}" ++ sep_str ++ "lux" ++ sep_str, .{appdata}) catch return error.OutOfMemory;
-                std.fs.cwd().makePath(path) catch {};
+                std.fs.cwd().makePath(path) catch |err| {
+                    log.warn("could not create config dir: {s}", .{@errorName(err)});
+                };
                 return path;
             }
             // Fallback: %USERPROFILE%\AppData\Roaming\lux\
             if (getEnvVar("USERPROFILE")) |profile| {
                 const path = std.fmt.allocPrint(allocator, "{s}" ++ sep_str ++ "AppData" ++ sep_str ++ "Roaming" ++ sep_str ++ "lux" ++ sep_str, .{profile}) catch return error.OutOfMemory;
-                std.fs.cwd().makePath(path) catch {};
+                std.fs.cwd().makePath(path) catch |err| {
+                    log.warn("could not create config dir: {s}", .{@errorName(err)});
+                };
                 return path;
             }
             return error.ReadFailed;
@@ -76,7 +74,9 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
             // ~/Library/Application Support/lux/
             if (getEnvVar("HOME")) |home| {
                 const path = std.fmt.allocPrint(allocator, "{s}/Library/Application Support/lux/", .{home}) catch return error.OutOfMemory;
-                std.fs.cwd().makePath(path) catch {};
+                std.fs.cwd().makePath(path) catch |err| {
+                    log.warn("could not create config dir: {s}", .{@errorName(err)});
+                };
                 return path;
             }
             return error.ReadFailed;
@@ -85,7 +85,9 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
             // Linux: ~/.config/lux/
             if (getEnvVar("HOME")) |home| {
                 const path = std.fmt.allocPrint(allocator, "{s}/.config/lux/", .{home}) catch return error.OutOfMemory;
-                std.fs.cwd().makePath(path) catch {};
+                std.fs.cwd().makePath(path) catch |err| {
+                    log.warn("could not create config dir: {s}", .{@errorName(err)});
+                };
                 return path;
             }
             return error.ReadFailed;
@@ -263,9 +265,9 @@ pub fn handleConnect(
         var err_buf: [1024]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&err_buf);
         const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"Connection failed: ") catch {};
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch {};
-        ew.writeAll("\"}") catch {};
+        ew.writeAll("{\"error\":\"Connection failed: ") catch return;
+        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
+        ew.writeAll("\"}") catch return;
         allocator.free(conninfo_z);
         try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
         return;
@@ -475,9 +477,9 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
         var err_buf: [1024]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&err_buf);
         const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"Reconnect failed: ") catch {};
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch {};
-        ew.writeAll("\"}") catch {};
+        ew.writeAll("{\"error\":\"Reconnect failed: ") catch return;
+        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
+        ew.writeAll("\"}") catch return;
         allocator.free(conninfo_z);
         try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
         return;
@@ -553,7 +555,7 @@ pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState) !void {
     defer pg_result.deinit();
 
     const end_time = std.time.milliTimestamp();
-    const latency = @as(u64, @intCast(@max(0, end_time - start_time)));
+    const latency: u64 = @intCast(@max(0, end_time - start_time));
 
     var resp_buf: [128]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"connected\":true,\"latency_ms\":{d}}}", .{latency}) catch {

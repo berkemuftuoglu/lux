@@ -133,6 +133,17 @@ The binary has no runtime dependencies beyond libpq — copy it anywhere and run
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and enter your connection
 string in the UI.
 
+### Development
+
+```bash
+zig build test                      # run all tests
+zig build -Doptimize=ReleaseSafe    # release build gate
+zig build lint                      # zlint + JS quality + format check
+```
+
+The lint step requires [zlint](https://github.com/DonIsaac/zlint/releases) on your PATH.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow.
+
 ### Options
 
 ```bash

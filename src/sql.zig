@@ -146,7 +146,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
         pg_conn.runQuery(allocator, sql_z);
     var result = pg_result catch {
         const end_time = std.time.milliTimestamp();
-        const duration = @as(u64, @intCast(@max(0, end_time - start_time)));
+        const duration: u64 = @intCast(@max(0, end_time - start_time));
         const err_msg = pg_conn.errorMessage();
         addHistoryEntry(state, sql_text, duration, null, true, err_msg);
         var err_buf: [512]u8 = undefined;
@@ -160,11 +160,11 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     };
     defer result.deinit();
     const end_time = std.time.milliTimestamp();
-    const duration = @as(u64, @intCast(@max(0, end_time - start_time)));
+    const duration: u64 = @intCast(@max(0, end_time - start_time));
     addHistoryEntry(state, sql_text, duration, result.n_rows, false, null);
 
     // Build JSON response
-    try crud.sendQueryResultJson(stream, allocator, &result);
+    try crud.sendQueryResultJson(allocator, stream, &result);
 }
 
 /// Handle POST /api/sql/preview — wrap query in BEGIN/ROLLBACK to preview effects.
@@ -224,9 +224,9 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
         var err_buf: [512]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&err_buf);
         const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch {};
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch {};
-        ew.writeAll("\"}") catch {};
+        ew.writeAll("{\"error\":\"") catch return;
+        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
+        ew.writeAll("\"}") catch return;
         if (pg_conn.runQuery(allocator, "ROLLBACK")) |rb| {
             var r = rb;
             r.deinit();
@@ -362,7 +362,9 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
     // Generate rollback SQL
     var rollback_buf = std.ArrayList(u8){};
     defer rollback_buf.deinit(allocator);
-    generateRollbackSql(sql_text, rollback_buf.writer(allocator)) catch {};
+    generateRollbackSql(sql_text, rollback_buf.writer(allocator)) catch |err| {
+        log.warn("generateRollbackSql failed: {s}", .{@errorName(err)});
+    };
     const rollback = if (rollback_buf.items.len > 0) rollback_buf.items else "-- No automatic rollback available";
 
     // Detect operation type

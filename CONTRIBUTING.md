@@ -10,6 +10,12 @@ cd lux
 zig build test      # verify everything works
 ```
 
+```bash
+# Optional: install zlint for the lint gate
+# Download prebuilt binary from https://github.com/DonIsaac/zlint/releases
+# and place it on your PATH.
+```
+
 ## Build Gates
 
 Every change must pass all three gates before it's considered done:
@@ -17,7 +23,7 @@ Every change must pass all three gates before it's considered done:
 ```bash
 zig build test                      # all tests pass
 zig build -Doptimize=ReleaseSafe    # release build succeeds
-./check.sh                          # quality checks pass
+zig build lint                      # zlint + format check
 ```
 
 ## Code Style
@@ -27,7 +33,7 @@ zig build -Doptimize=ReleaseSafe    # release build succeeds
 | Files | snake_case | `postgres.zig` |
 | Functions | camelCase | `fetchSchema()` |
 | Types | PascalCase | `ServerState` |
-| Constants | SCREAMING_SNAKE | `MAX_REQUEST_SIZE` |
+| Constants | snake_case | `max_request_size` |
 
 ## Rules
 
@@ -41,5 +47,5 @@ See the project rules in the repository for the full engineering constitution.
 
 - Keep PRs focused on a single change
 - Include test coverage for new functionality
-- All three gates must pass (`zig build test` + `zig build -Doptimize=ReleaseSafe` + `./check.sh`)
+- All three gates must pass (`zig build test` + `zig build -Doptimize=ReleaseSafe` + `zig build lint`)
 - Reference related issues if applicable

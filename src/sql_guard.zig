@@ -1,7 +1,5 @@
 const std = @import("std");
 
-const log = std.log.scoped(.sql_guard);
-
 pub const SqlGuardResult = struct {
     is_destructive: bool,
     operation: []const u8,

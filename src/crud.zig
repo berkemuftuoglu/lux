@@ -1,8 +1,6 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const postgres = @import("postgres.zig");
 const utils = @import("utils.zig");
-const sql_guard = @import("sql_guard.zig");
 const web = @import("web.zig");
 
 const log = std.log.scoped(.crud);
@@ -252,8 +250,8 @@ fn writeColumnsAndRows(w: anytype, pg_result: *const postgres.QueryResult) !void
 }
 
 pub fn sendTableDataJson(
-    stream: std.net.Stream,
     allocator: std.mem.Allocator,
+    stream: std.net.Stream,
     state: *ServerState,
     pg_result: *postgres.QueryResult,
     table_name: []const u8,
@@ -314,7 +312,7 @@ pub fn sendTableDataJson(
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn sendQueryResultJson(stream: std.net.Stream, allocator: std.mem.Allocator, pg_result: *postgres.QueryResult) !void {
+pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream, pg_result: *postgres.QueryResult) !void {
     var json_buf = std.ArrayList(u8){};
     defer json_buf.deinit(allocator);
     const w = json_buf.writer(allocator);
@@ -592,7 +590,7 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     defer pg_result.deinit();
 
     // Build and send JSON response
-    try sendTableDataJson(stream, allocator, state, &pg_result, table_name, .{
+    try sendTableDataJson(allocator, stream, state, &pg_result, table_name, .{
         .total = total,
         .limit = limit,
         .offset = offset,
@@ -840,11 +838,17 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
         defer sel_buf.deinit(allocator);
         const sel_w = sel_buf.writer(allocator);
         if (is_ctid_mode) {
-            sel_w.print("SELECT * FROM \"{s}\" WHERE ctid = '{s}'::tid LIMIT 1", .{ table_name, escaped_pk }) catch {};
+            sel_w.print("SELECT * FROM \"{s}\" WHERE ctid = '{s}'::tid LIMIT 1", .{ table_name, escaped_pk }) catch |err| {
+                log.warn("sel_buf write failed: {s}", .{@errorName(err)});
+            };
         } else {
-            sel_w.print("SELECT * FROM \"{s}\" WHERE \"{s}\" = '{s}' LIMIT 1", .{ table_name, pk_column, escaped_pk }) catch {};
+            sel_w.print("SELECT * FROM \"{s}\" WHERE \"{s}\" = '{s}' LIMIT 1", .{ table_name, pk_column, escaped_pk }) catch |err| {
+                log.warn("sel_buf write failed: {s}", .{@errorName(err)});
+            };
         }
-        sel_buf.append(allocator, 0) catch {};
+        sel_buf.append(allocator, 0) catch |err| {
+            log.warn("sel_buf null-terminator append failed: {s}", .{@errorName(err)});
+        };
         if (sel_buf.items.len > 1) {
             const sel_z: [*:0]const u8 = sel_buf.items[0 .. sel_buf.items.len - 1 :0];
             if (pg_conn.runQuery(allocator, sel_z)) |sel_res| {
@@ -1318,9 +1322,9 @@ pub fn handleTruncateTable(stream: std.net.Stream, path: []const u8, state: *Ser
         var err_buf: [1024]u8 = undefined;
         var efbs = std.io.fixedBufferStream(&err_buf);
         const ew = efbs.writer();
-        ew.writeAll("{\"error\":\"TRUNCATE failed: ") catch {};
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch {};
-        ew.writeAll("\"}") catch {};
+        ew.writeAll("{\"error\":\"TRUNCATE failed: ") catch return;
+        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
+        ew.writeAll("\"}") catch return;
         try utils.sendResponse(stream, "200 OK", "application/json", efbs.getWritten());
         return;
     };

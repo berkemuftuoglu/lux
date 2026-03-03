@@ -4,8 +4,6 @@ const utils = @import("utils.zig");
 const web = @import("web.zig");
 const crud = @import("crud.zig");
 
-const log = std.log.scoped(.@"export");
-
 const ServerState = web.ServerState;
 
 const ExportError = error{
@@ -710,9 +708,9 @@ pub fn handleCsvImport(
                 var err_buf: [256]u8 = undefined;
                 var fbs = std.io.fixedBufferStream(&err_buf);
                 const ew = fbs.writer();
-                ew.writeAll("{\"error\":\"CSV column '") catch {};
-                utils.writeJsonEscaped(ew, header) catch {};
-                ew.writeAll("' not found in table schema\"}") catch {};
+                ew.writeAll("{\"error\":\"CSV column '") catch return;
+                utils.writeJsonEscaped(ew, header) catch return;
+                ew.writeAll("' not found in table schema\"}") catch return;
                 try utils.sendResponse(stream, "400 Bad Request", "application/json", fbs.getWritten());
                 return;
             }

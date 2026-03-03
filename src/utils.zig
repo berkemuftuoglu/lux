@@ -1,7 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
-
-const log = std.log.scoped(.utils);
 
 pub const IdentifierError = error{
     InvalidIdentifier,

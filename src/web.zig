@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const postgres = @import("postgres.zig");
 const utils = @import("utils.zig");
 const crud = @import("crud.zig");
@@ -22,11 +21,6 @@ const app_js = @embedFile("static/app.js");
 const grid_js = @embedFile("static/grid.js");
 const sidebar_js = @embedFile("static/sidebar.js");
 const crud_js = @embedFile("static/crud.js");
-
-const WebError = error{
-    BindFailed,
-    AcceptFailed,
-};
 
 pub const ChangeEntry = struct {
     id: u64,
@@ -161,7 +155,7 @@ fn handleConnection(
 
     // If the buffer is full and we never found \r\n\r\n, the request is oversized
     if (total_read == buf.len and std.mem.indexOf(u8, buf[0..total_read], "\r\n\r\n") == null) {
-        utils.sendResponse(stream, "400 Bad Request", "text/plain", "Request too large") catch {};
+        utils.sendResponse(stream, "400 Bad Request", "text/plain", "Request too large") catch return;
         return;
     }
 
