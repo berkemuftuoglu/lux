@@ -8,9 +8,11 @@ pub fn build(b: *std.Build) void {
     // --- Main executable ---
     const exe = b.addExecutable(.{
         .name = "lux",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addPostgres(exe);
     b.installArtifact(exe);
@@ -26,15 +28,33 @@ pub fn build(b: *std.Build) void {
 
     // --- Test step ---
     const test_step = b.step("test", "Run unit tests");
-    addTest(b, test_step, "src/main.zig", target, optimize);
-    addTest(b, test_step, "src/web.zig", target, optimize);
-    addTest(b, test_step, "src/postgres.zig", target, optimize);
-    addTest(b, test_step, "src/utils.zig", target, optimize);
-    addTest(b, test_step, "src/sql_guard.zig", target, optimize);
-    addTest(b, test_step, "src/crud.zig", target, optimize);
-    addTest(b, test_step, "src/schema.zig", target, optimize);
-    addTest(b, test_step, "src/export.zig", target, optimize);
-    addTest(b, test_step, "src/sql.zig", target, optimize);
+    const test_files = [_][]const u8{
+        "src/main.zig",
+        "src/web.zig",
+        "src/postgres.zig",
+        "src/utils.zig",
+        "src/sql_guard.zig",
+        "src/crud.zig",
+        "src/schema.zig",
+        "src/export.zig",
+        "src/sql.zig",
+    };
+    for (test_files) |source| {
+        addTest(b, test_step, source, target, optimize);
+    }
+
+    // --- Check step (ZLS build-on-save, compile without linking) ---
+    const check_exe = b.addExecutable(.{
+        .name = "lux",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    addPostgres(check_exe);
+    const check_step = b.step("check", "Check compilation without linking");
+    check_step.dependOn(&check_exe.step);
 }
 
 /// Add a test compilation for a single source module.
@@ -46,9 +66,11 @@ fn addTest(
     optimize: std.builtin.OptimizeMode,
 ) void {
     const unit_test = b.addTest(.{
-        .root_source_file = b.path(source),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path(source),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
     addPostgres(unit_test);
     const run_test = b.addRunArtifact(unit_test);

@@ -4,6 +4,8 @@ const postgres = @import("postgres.zig");
 const utils = @import("utils.zig");
 const web = @import("web.zig");
 
+const log = std.log.scoped(.schema);
+
 const ServerState = web.ServerState;
 
 const CONNECTIONS_FILENAME = "connections.json";
@@ -24,9 +26,9 @@ const ConnectionFileError = error{
 };
 
 fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8, conninfo: []const u8, color: []const u8) ConnectionFileError![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
-    const w = buf.writer();
+    var buf = std.ArrayList(u8){};
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
     w.writeAll("{\"id\":") catch return error.OutOfMemory;
     w.print("{d}", .{id}) catch return error.OutOfMemory;
     w.writeAll(",\"name\":\"") catch return error.OutOfMemory;
@@ -36,7 +38,7 @@ fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8,
     w.writeAll("\",\"color\":\"") catch return error.OutOfMemory;
     utils.writeJsonEscaped(w, color) catch return error.OutOfMemory;
     w.writeAll("\"}") catch return error.OutOfMemory;
-    return buf.toOwnedSlice() catch return error.OutOfMemory;
+    return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
 /// Build the path to the platform-specific config directory for Lux.
@@ -93,18 +95,8 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     _ = sep; // suppress unused variable — sep used in format strings above
 }
 
-fn getEnvVar(key: [*:0]const u8) ?[]const u8 {
-    if (builtin.os.tag == .windows) {
-        // On Windows, std.posix.getenv is not available.
-        // Use the C runtime getenv which Zig links via linkLibC.
-        const c = @cImport(@cInclude("stdlib.h"));
-        const val = c.getenv(key);
-        if (val) |ptr| {
-            return std.mem.span(@as([*:0]const u8, @ptrCast(ptr)));
-        }
-        return null;
-    }
-    return std.posix.getenv(std.mem.span(key));
+fn getEnvVar(key: []const u8) ?[]const u8 {
+    return std.posix.getenv(key);
 }
 
 fn getConfigFilePath(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
@@ -229,11 +221,10 @@ pub fn handleConnect(
     };
 
     // Build null-terminated connection string
-    const conninfo_z = allocator.allocSentinel(u8, conninfo_str.len, 0) catch {
+    const conninfo_z = allocator.dupeZ(u8, conninfo_str) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    @memcpy(conninfo_z[0..conninfo_str.len], conninfo_str);
 
     // Test connection and fetch schema
     var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
@@ -307,9 +298,9 @@ pub fn handleConnect(
     schema.deinit();
 
     // Build response with schema info
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
     w.writeAll("{\"status\":\"connected\",\"schema\":\"") catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"status\":\"connected\"}");
         return;
@@ -381,9 +372,9 @@ pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
         return;
     };
 
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
 
     try w.writeAll("{\"tables\":[");
 
@@ -471,11 +462,10 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
     };
 
     // Build null-terminated connection string
-    const conninfo_z = allocator.allocSentinel(u8, last_ci.len, 0) catch {
+    const conninfo_z = allocator.dupeZ(u8, last_ci) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    @memcpy(conninfo_z[0..last_ci.len], last_ci);
 
     // Test connection
     var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
@@ -544,9 +534,9 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
     schema.deinit();
 
     // Build response
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
     w.writeAll("{\"ok\":true,\"schema\":\"") catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
         return;
@@ -685,9 +675,9 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
         };
         defer allocator.free(entry);
 
-        var new_file = std.ArrayList(u8).init(allocator);
-        defer new_file.deinit();
-        const nw = new_file.writer();
+        var new_file = std.ArrayList(u8){};
+        defer new_file.deinit(allocator);
+        const nw = new_file.writer(allocator);
         nw.writeAll("{\"connections\":[") catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
@@ -717,9 +707,9 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
     defer allocator.free(entry);
 
     // Insert entry into existing JSON — find the closing "]}" and insert before it
-    var new_file = std.ArrayList(u8).init(allocator);
-    defer new_file.deinit();
-    const nw = new_file.writer();
+    var new_file = std.ArrayList(u8){};
+    defer new_file.deinit(allocator);
+    const nw = new_file.writer(allocator);
 
     // Find last ']' in existing content
     const close_bracket = std.mem.lastIndexOfScalar(u8, existing, ']') orelse {
@@ -791,9 +781,9 @@ pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, state: *
     defer allocator.free(existing);
 
     // Rebuild the connections array, skipping the one with target_id.
-    var new_file = std.ArrayList(u8).init(allocator);
-    defer new_file.deinit();
-    const nw = new_file.writer();
+    var new_file = std.ArrayList(u8){};
+    defer new_file.deinit(allocator);
+    const nw = new_file.writer(allocator);
     nw.writeAll("{\"connections\":[") catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
@@ -1011,4 +1001,8 @@ test "getConfigDir: returns a path ending with lux dir separator" {
     const ends_slash = std.mem.endsWith(u8, path, "lux/");
     const ends_backslash = std.mem.endsWith(u8, path, "lux\\");
     try std.testing.expect(ends_slash or ends_backslash);
+}
+
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
 }

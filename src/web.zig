@@ -7,6 +7,15 @@ const schema_mod = @import("schema.zig");
 const export_mod = @import("export.zig");
 const sql_mod = @import("sql.zig");
 
+const log = std.log.scoped(.web);
+
+/// Atomic flag set by SIGINT/SIGTERM to trigger graceful shutdown.
+var shutdown_requested = std.atomic.Value(bool).init(false);
+
+fn handleSignal(_: c_int) callconv(.c) void {
+    shutdown_requested.store(true, .release);
+}
+
 const index_html = @embedFile("static/index.html");
 const styles_css = @embedFile("static/styles.css");
 const app_js = @embedFile("static/app.js");
@@ -32,8 +41,8 @@ pub const ChangeEntry = struct {
     undone: bool,
 };
 
-pub const MAX_JOURNAL_ENTRIES = 10000;
-pub const MAX_HISTORY_ENTRIES = 500;
+pub const max_journal_entries = 10000;
+pub const max_history_entries = 500;
 
 pub const QueryHistoryEntry = struct {
     sql: []const u8,
@@ -55,11 +64,9 @@ pub const ServerState = struct {
     enhanced_schema: ?[]postgres.EnhancedTableInfo = null,
     /// Read-only mode — blocks DML/DDL operations.
     read_only: bool = false,
-    change_journal: std.ArrayList(ChangeEntry) = undefined,
+    change_journal: std.ArrayList(ChangeEntry) = .{},
     next_journal_id: u64 = 1,
-    journal_initialized: bool = false,
-    query_history: std.ArrayList(QueryHistoryEntry) = undefined,
-    history_initialized: bool = false,
+    query_history: std.ArrayList(QueryHistoryEntry) = .{},
     /// Last successful connection string (for reconnect).
     last_conninfo: ?[]const u8 = null,
     /// Next auto-increment ID for saved connections.
@@ -70,10 +77,8 @@ pub const ServerState = struct {
     pub fn init(allocator: std.mem.Allocator) ServerState {
         return .{
             .allocator = allocator,
-            .change_journal = std.ArrayList(ChangeEntry).init(allocator),
-            .journal_initialized = true,
-            .query_history = std.ArrayList(QueryHistoryEntry).init(allocator),
-            .history_initialized = true,
+            .change_journal = .{},
+            .query_history = .{},
         };
     }
 
@@ -84,8 +89,6 @@ pub const ServerState = struct {
 
 /// Start the web server and block forever serving requests.
 pub fn serve(
-    stderr: anytype,
-    stdout: anytype,
     state: *ServerState,
     port: u16,
     bind_addr: []const u8,
@@ -93,42 +96,65 @@ pub fn serve(
     state.port = port;
 
     const address = std.net.Address.parseIp(bind_addr, port) catch {
-        try stderr.print("Error: invalid bind address '{s}'\n", .{bind_addr});
+        log.err("invalid bind address '{s}'", .{bind_addr});
         std.process.exit(1);
     };
 
     var server = address.listen(.{
         .reuse_address = true,
     }) catch {
-        try stderr.print("Error: failed to bind to port {d}\n", .{port});
+        log.err("failed to bind to port {d}", .{port});
         std.process.exit(1);
     };
     defer server.deinit();
 
-    try stdout.print("Lux web UI running at http://{s}:{d}\n", .{ bind_addr, port });
-    try stdout.print("Open this URL in your browser. Press Ctrl-C to stop.\n", .{});
+    log.info("Lux web UI running at http://{s}:{d}", .{ bind_addr, port });
+    log.info("open this URL in your browser, press Ctrl-C to stop", .{});
 
-    while (true) {
-        const conn = server.accept() catch {
-            try stderr.print("Warning: accept failed, retrying...\n", .{});
+    // Install signal handlers for graceful shutdown
+    var sa = std.posix.Sigaction{
+        .handler = .{ .handler = handleSignal },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.INT, &sa, null);
+    std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
+
+    while (!shutdown_requested.load(.acquire)) {
+        const conn = server.accept() catch |err| {
+            if (shutdown_requested.load(.acquire)) break;
+            log.warn("accept failed: {s}", .{@errorName(err)});
             continue;
         };
         defer conn.stream.close();
 
+        // Set 5-second receive timeout so idle clients don't hold connections forever
+        const timeout = std.posix.timeval{ .sec = 5, .usec = 0 };
+        std.posix.setsockopt(conn.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+            log.warn("failed to set socket timeout: {s}", .{@errorName(err)});
+        };
+
         handleConnection(conn.stream, state) catch |err| {
-            // Log and continue — don't crash the server on a bad request
-            stderr.print("Request error: {s}\n", .{@errorName(err)}) catch {};
+            log.debug("request error: {s}", .{@errorName(err)});
         };
     }
+
+    log.info("shutting down", .{});
 }
 
-const MAX_REQUEST_SIZE = 8192;
+const max_request_size = 8192;
 
 fn handleConnection(
     stream: std.net.Stream,
     state: *ServerState,
 ) !void {
-    var buf: [MAX_REQUEST_SIZE]u8 = undefined;
+    // Per-request arena: freed automatically after the response is sent.
+    // Handler functions use state.allocator for long-lived allocations (journal, history).
+    var arena = std.heap.ArenaAllocator.init(state.allocator);
+    defer arena.deinit();
+    _ = arena.allocator(); // available for future request-scoped allocations
+
+    var buf: [max_request_size]u8 = undefined;
     var total_read: usize = 0;
 
     // Read request headers (look for \r\n\r\n)
@@ -137,6 +163,12 @@ fn handleConnection(
         if (n == 0) return; // Connection closed
         total_read += n;
         if (std.mem.indexOf(u8, buf[0..total_read], "\r\n\r\n") != null) break;
+    }
+
+    // If the buffer is full and we never found \r\n\r\n, the request is oversized
+    if (total_read == buf.len and std.mem.indexOf(u8, buf[0..total_read], "\r\n\r\n") == null) {
+        utils.sendResponse(stream, "400 Bad Request", "text/plain", "Request too large") catch {};
+        return;
     }
 
     const request = buf[0..total_read];
@@ -240,4 +272,8 @@ test "ServerState: init defaults" {
     try std.testing.expect(!state.hasDbConnection());
     try std.testing.expect(state.schema_text == null);
     try std.testing.expect(!state.read_only);
+}
+
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
 }

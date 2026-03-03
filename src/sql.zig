@@ -5,9 +5,11 @@ const sql_guard = @import("sql_guard.zig");
 const web = @import("web.zig");
 const crud = @import("crud.zig");
 
+const log = std.log.scoped(.sql);
+
 const ServerState = web.ServerState;
 const QueryHistoryEntry = web.QueryHistoryEntry;
-const MAX_HISTORY_ENTRIES = web.MAX_HISTORY_ENTRIES;
+const max_history_entries = web.max_history_entries;
 
 pub fn addHistoryEntry(
     state: *ServerState,
@@ -17,11 +19,10 @@ pub fn addHistoryEntry(
     is_error: bool,
     error_msg: ?[]const u8,
 ) void {
-    if (!state.history_initialized) return;
     const ts = std.time.timestamp();
     const sql_dupe = state.allocator.dupe(u8, sql) catch return;
     const err_dupe: ?[]const u8 = if (error_msg) |e| (state.allocator.dupe(u8, e) catch null) else null;
-    state.query_history.append(.{
+    state.query_history.append(state.allocator, .{
         .sql = sql_dupe,
         .timestamp = ts,
         .duration_ms = duration_ms,
@@ -29,8 +30,8 @@ pub fn addHistoryEntry(
         .is_error = is_error,
         .error_msg = err_dupe,
     }) catch return;
-    // Cap at MAX_HISTORY_ENTRIES
-    if (state.query_history.items.len > MAX_HISTORY_ENTRIES) {
+    // Cap at max_history_entries
+    if (state.query_history.items.len > max_history_entries) {
         const old = state.query_history.orderedRemove(0);
         state.allocator.free(old.sql);
         if (old.error_msg) |e| state.allocator.free(e);
@@ -109,9 +110,9 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     if (!is_forced) {
         const guard = sql_guard.analyzeSql(sql_text);
         if (guard.is_destructive) {
-            var warn_buf = std.ArrayList(u8).init(allocator);
-            defer warn_buf.deinit();
-            const ww = warn_buf.writer();
+            var warn_buf = std.ArrayList(u8){};
+            defer warn_buf.deinit(allocator);
+            const ww = warn_buf.writer(allocator);
             try ww.writeAll("{\"requires_confirmation\":true,\"operation\":\"");
             try utils.writeJsonEscaped(ww, guard.operation);
             try ww.writeAll("\",\"warning\":\"");
@@ -123,12 +124,11 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     }
 
     // Build null-terminated SQL
-    const sql_z = allocator.allocSentinel(u8, sql_text.len, 0) catch {
+    const sql_z = allocator.dupeZ(u8, sql_text) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
     defer allocator.free(sql_z);
-    @memcpy(sql_z[0..sql_text.len], sql_text);
 
     // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
@@ -209,7 +209,7 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
     begin_result.deinit();
 
     // Execute the query
-    const sql_z = allocator.allocSentinel(u8, sql_text.len, 0) catch {
+    const sql_z = allocator.dupeZ(u8, sql_text) catch {
         if (pg_conn.runQuery(allocator, "ROLLBACK")) |rb| {
             var r = rb;
             r.deinit();
@@ -218,7 +218,6 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
         return;
     };
     defer allocator.free(sql_z);
-    @memcpy(sql_z[0..sql_text.len], sql_text);
 
     var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
         // Try to get error message before rollback
@@ -244,9 +243,9 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
     } else |_| {}
 
     // Build preview response
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
     try w.print("{{\"preview\":true,\"affected_rows\":{d},", .{pg_result.n_rows});
 
     // Include column names and first few rows as sample
@@ -361,18 +360,18 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
     };
 
     // Generate rollback SQL
-    var rollback_buf = std.ArrayList(u8).init(allocator);
-    defer rollback_buf.deinit();
-    generateRollbackSql(sql_text, rollback_buf.writer()) catch {};
+    var rollback_buf = std.ArrayList(u8){};
+    defer rollback_buf.deinit(allocator);
+    generateRollbackSql(sql_text, rollback_buf.writer(allocator)) catch {};
     const rollback = if (rollback_buf.items.len > 0) rollback_buf.items else "-- No automatic rollback available";
 
     // Detect operation type
     const guard = sql_guard.analyzeSql(sql_text);
 
     // Build response
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
     try w.writeAll("{\"operation\":\"");
     try utils.writeJsonEscaped(w, guard.operation);
     try w.writeAll("\",\"warning\":\"");
@@ -390,8 +389,8 @@ pub fn handleHistory(stream: std.net.Stream, state: *ServerState) !void {
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    var json = std.ArrayList(u8).init(alloc);
-    try json.appendSlice("{\"entries\":[");
+    var json = std.ArrayList(u8){};
+    try json.appendSlice(alloc, "{\"entries\":[");
 
     const items = state.query_history.items;
     const count = @min(items.len, 100);
@@ -401,68 +400,66 @@ pub fn handleHistory(stream: std.net.Stream, state: *ServerState) !void {
     var i: usize = items.len;
     while (i > 0 and wrote < count) {
         i -= 1;
-        if (wrote > 0) try json.appendSlice(",");
-        try json.appendSlice("{\"sql\":\"");
-        try utils.writeJsonEscaped(json.writer(), items[i].sql);
-        try json.appendSlice("\",\"timestamp\":");
+        if (wrote > 0) try json.appendSlice(alloc, ",");
+        try json.appendSlice(alloc, "{\"sql\":\"");
+        try utils.writeJsonEscaped(json.writer(alloc), items[i].sql);
+        try json.appendSlice(alloc, "\",\"timestamp\":");
         var ts_buf: [20]u8 = undefined;
-        const ts_len = std.fmt.formatIntBuf(&ts_buf, items[i].timestamp, 10, .lower, .{});
-        try json.appendSlice(ts_buf[0..ts_len]);
-        try json.appendSlice(",\"duration_ms\":");
+        const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{items[i].timestamp}) catch ts_buf[0..0];
+        try json.appendSlice(alloc, ts_str);
+        try json.appendSlice(alloc, ",\"duration_ms\":");
         var dur_buf: [20]u8 = undefined;
-        const dur_len = std.fmt.formatIntBuf(&dur_buf, items[i].duration_ms, 10, .lower, .{});
-        try json.appendSlice(dur_buf[0..dur_len]);
+        const dur_str = std.fmt.bufPrint(&dur_buf, "{d}", .{items[i].duration_ms}) catch dur_buf[0..0];
+        try json.appendSlice(alloc, dur_str);
         if (items[i].row_count) |rc| {
-            try json.appendSlice(",\"row_count\":");
+            try json.appendSlice(alloc, ",\"row_count\":");
             var rc_buf: [20]u8 = undefined;
-            const rc_len = std.fmt.formatIntBuf(&rc_buf, rc, 10, .lower, .{});
-            try json.appendSlice(rc_buf[0..rc_len]);
+            const rc_str = std.fmt.bufPrint(&rc_buf, "{d}", .{rc}) catch rc_buf[0..0];
+            try json.appendSlice(alloc, rc_str);
         } else {
-            try json.appendSlice(",\"row_count\":null");
+            try json.appendSlice(alloc, ",\"row_count\":null");
         }
-        try json.appendSlice(",\"is_error\":");
-        try json.appendSlice(if (items[i].is_error) "true" else "false");
+        try json.appendSlice(alloc, ",\"is_error\":");
+        try json.appendSlice(alloc, if (items[i].is_error) "true" else "false");
         if (items[i].error_msg) |em| {
-            try json.appendSlice(",\"error\":\"");
-            try utils.writeJsonEscaped(json.writer(), em);
-            try json.appendSlice("\"");
+            try json.appendSlice(alloc, ",\"error\":\"");
+            try utils.writeJsonEscaped(json.writer(alloc), em);
+            try json.appendSlice(alloc, "\"");
         }
-        try json.appendSlice("}");
+        try json.appendSlice(alloc, "}");
         wrote += 1;
     }
 
-    try json.appendSlice("]}");
+    try json.appendSlice(alloc, "]}");
     try utils.sendResponse(stream, "200 OK", "application/json", json.items);
 }
 
 pub fn handleJournal(stream: std.net.Stream, state: *const ServerState) !void {
     const allocator = state.allocator;
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
 
     try w.writeAll("{\"entries\":[");
-    if (state.journal_initialized) {
-        const items = state.change_journal.items;
-        const start = if (items.len > 100) items.len - 100 else 0;
-        for (items[start..], 0..) |entry, i| {
-            if (i > 0) try w.writeByte(',');
-            try w.print("{{\"id\":{d},\"timestamp\":{d},\"table\":\"", .{ entry.id, entry.timestamp });
-            try utils.writeJsonEscaped(w, entry.table_name);
-            try w.writeAll("\",\"operation\":\"");
-            try utils.writeJsonEscaped(w, entry.operation);
-            try w.writeAll("\",\"column\":\"");
-            try utils.writeJsonEscaped(w, entry.column_name);
-            try w.writeAll("\",\"old_value\":\"");
-            try utils.writeJsonEscaped(w, entry.old_value);
-            try w.writeAll("\",\"new_value\":\"");
-            try utils.writeJsonEscaped(w, entry.new_value);
-            try w.writeAll("\",\"pk_column\":\"");
-            try utils.writeJsonEscaped(w, entry.pk_column);
-            try w.writeAll("\",\"pk_value\":\"");
-            try utils.writeJsonEscaped(w, entry.pk_value);
-            try w.print("\",\"undone\":{s}}}", .{if (entry.undone) "true" else "false"});
-        }
+    const items = state.change_journal.items;
+    const start = if (items.len > 100) items.len - 100 else 0;
+    for (items[start..], 0..) |entry, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("{{\"id\":{d},\"timestamp\":{d},\"table\":\"", .{ entry.id, entry.timestamp });
+        try utils.writeJsonEscaped(w, entry.table_name);
+        try w.writeAll("\",\"operation\":\"");
+        try utils.writeJsonEscaped(w, entry.operation);
+        try w.writeAll("\",\"column\":\"");
+        try utils.writeJsonEscaped(w, entry.column_name);
+        try w.writeAll("\",\"old_value\":\"");
+        try utils.writeJsonEscaped(w, entry.old_value);
+        try w.writeAll("\",\"new_value\":\"");
+        try utils.writeJsonEscaped(w, entry.new_value);
+        try w.writeAll("\",\"pk_column\":\"");
+        try utils.writeJsonEscaped(w, entry.pk_column);
+        try w.writeAll("\",\"pk_value\":\"");
+        try utils.writeJsonEscaped(w, entry.pk_value);
+        try w.print("\",\"undone\":{s}}}", .{if (entry.undone) "true" else "false"});
     }
     try w.writeAll("]}");
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
@@ -492,13 +489,12 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *Se
     };
 
     // Find the entry
-    if (!state.journal_initialized) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Journal not initialized\"}");
-        return;
-    }
     var found_entry: ?*web.ChangeEntry = null;
     for (state.change_journal.items) |*entry| {
-        if (entry.id == id) { found_entry = entry; break; }
+        if (entry.id == id) {
+            found_entry = entry;
+            break;
+        }
     }
     const entry = found_entry orelse {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Journal entry not found\"}");
@@ -510,9 +506,9 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *Se
     }
 
     // Build undo SQL
-    var sql_buf = std.ArrayList(u8).init(allocator);
-    defer sql_buf.deinit();
-    const w = sql_buf.writer();
+    var sql_buf = std.ArrayList(u8){};
+    defer sql_buf.deinit(allocator);
+    const w = sql_buf.writer(allocator);
 
     if (std.mem.eql(u8, entry.operation, "update")) {
         // Restore old value
@@ -546,7 +542,7 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *Se
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Unknown operation\"}");
         return;
     }
-    try sql_buf.append(0);
+    try sql_buf.append(allocator, 0);
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
     // Execute undo
@@ -581,8 +577,8 @@ test "addHistoryEntry: adds to history" {
             std.testing.allocator.free(entry.sql);
             if (entry.error_msg) |e| std.testing.allocator.free(e);
         }
-        state.query_history.deinit();
-        state.change_journal.deinit();
+        state.query_history.deinit(std.testing.allocator);
+        state.change_journal.deinit(std.testing.allocator);
     }
     addHistoryEntry(&state, "SELECT 1", 42, 1, false, null);
     try std.testing.expectEqual(@as(usize, 1), state.query_history.items.len);
@@ -600,8 +596,8 @@ test "addHistoryEntry: records error" {
             std.testing.allocator.free(entry.sql);
             if (entry.error_msg) |e| std.testing.allocator.free(e);
         }
-        state.query_history.deinit();
-        state.change_journal.deinit();
+        state.query_history.deinit(std.testing.allocator);
+        state.change_journal.deinit(std.testing.allocator);
     }
     addHistoryEntry(&state, "BAD SQL", 5, null, true, "syntax error");
     try std.testing.expectEqual(@as(usize, 1), state.query_history.items.len);
@@ -617,8 +613,8 @@ test "addHistoryEntry: multiple entries" {
             std.testing.allocator.free(entry.sql);
             if (entry.error_msg) |e| std.testing.allocator.free(e);
         }
-        state.query_history.deinit();
-        state.change_journal.deinit();
+        state.query_history.deinit(std.testing.allocator);
+        state.change_journal.deinit(std.testing.allocator);
     }
     addHistoryEntry(&state, "SELECT 1", 10, 1, false, null);
     addHistoryEntry(&state, "SELECT 2", 20, 2, false, null);
@@ -628,35 +624,23 @@ test "addHistoryEntry: multiple entries" {
     try std.testing.expectEqualStrings("SELECT 3", state.query_history.items[2].sql);
 }
 
-test "addHistoryEntry: uninitialized history is safe" {
-    var state = web.ServerState{
-        .allocator = std.testing.allocator,
-        .journal_initialized = false,
-        .change_journal = undefined,
-        .history_initialized = false,
-        .query_history = undefined,
-    };
-    // Should not crash when history is uninitialized
-    addHistoryEntry(&state, "SELECT 1", 10, 1, false, null);
-}
-
-test "addHistoryEntry: caps at MAX_HISTORY_ENTRIES" {
+test "addHistoryEntry: caps at max_history_entries" {
     var state = web.ServerState.init(std.testing.allocator);
     defer {
         for (state.query_history.items) |entry| {
             std.testing.allocator.free(entry.sql);
             if (entry.error_msg) |e| std.testing.allocator.free(e);
         }
-        state.query_history.deinit();
-        state.change_journal.deinit();
+        state.query_history.deinit(std.testing.allocator);
+        state.change_journal.deinit(std.testing.allocator);
     }
-    // Add MAX_HISTORY_ENTRIES + 5 entries
+    // Add max_history_entries + 5 entries
     var i: usize = 0;
-    while (i < MAX_HISTORY_ENTRIES + 5) : (i += 1) {
+    while (i < max_history_entries + 5) : (i += 1) {
         addHistoryEntry(&state, "SELECT 1", 1, 1, false, null);
     }
-    // Should be capped at MAX_HISTORY_ENTRIES
-    try std.testing.expectEqual(MAX_HISTORY_ENTRIES, state.query_history.items.len);
+    // Should be capped at max_history_entries
+    try std.testing.expectEqual(max_history_entries, state.query_history.items.len);
 }
 
 test "addHistoryEntry: error msg null when no error" {
@@ -666,8 +650,8 @@ test "addHistoryEntry: error msg null when no error" {
             std.testing.allocator.free(entry.sql);
             if (entry.error_msg) |e| std.testing.allocator.free(e);
         }
-        state.query_history.deinit();
-        state.change_journal.deinit();
+        state.query_history.deinit(std.testing.allocator);
+        state.change_journal.deinit(std.testing.allocator);
     }
     addHistoryEntry(&state, "SELECT 1", 0, 0, false, null);
     try std.testing.expect(state.query_history.items[0].error_msg == null);
@@ -680,8 +664,8 @@ test "addHistoryEntry: dupes sql string" {
             std.testing.allocator.free(entry.sql);
             if (entry.error_msg) |e| std.testing.allocator.free(e);
         }
-        state.query_history.deinit();
-        state.change_journal.deinit();
+        state.query_history.deinit(std.testing.allocator);
+        state.change_journal.deinit(std.testing.allocator);
     }
     var buf: [10]u8 = undefined;
     @memcpy(buf[0..8], "SELECT 1");
@@ -691,13 +675,12 @@ test "addHistoryEntry: dupes sql string" {
     try std.testing.expectEqualStrings("SELECT 1", state.query_history.items[0].sql);
 }
 
-test "ServerState: history initialized" {
+test "ServerState: history starts empty" {
     var state = web.ServerState.init(std.testing.allocator);
     defer {
-        state.query_history.deinit();
-        state.change_journal.deinit();
+        state.query_history.deinit(std.testing.allocator);
+        state.change_journal.deinit(std.testing.allocator);
     }
-    try std.testing.expect(state.history_initialized);
     try std.testing.expectEqual(@as(usize, 0), state.query_history.items.len);
 }
 
@@ -733,44 +716,44 @@ test "QueryHistoryEntry: error entry" {
 }
 
 test "generateRollbackSql: CREATE TABLE generates DROP" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try generateRollbackSql("CREATE TABLE users (id int)", buf.writer());
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try generateRollbackSql("CREATE TABLE users (id int)", buf.writer(std.testing.allocator));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "DROP TABLE") != null);
 }
 
 test "generateRollbackSql: DROP TABLE warns about data loss" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try generateRollbackSql("DROP TABLE users", buf.writer());
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try generateRollbackSql("DROP TABLE users", buf.writer(std.testing.allocator));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "WARNING") != null);
 }
 
 test "generateRollbackSql: TRUNCATE warns about data loss" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try generateRollbackSql("TRUNCATE TABLE users", buf.writer());
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try generateRollbackSql("TRUNCATE TABLE users", buf.writer(std.testing.allocator));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "WARNING") != null);
 }
 
 test "generateRollbackSql: ALTER ADD COLUMN generates DROP COLUMN" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try generateRollbackSql("ALTER TABLE users ADD COLUMN email text", buf.writer());
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try generateRollbackSql("ALTER TABLE users ADD COLUMN email text", buf.writer(std.testing.allocator));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "DROP COLUMN") != null);
 }
 
 test "generateRollbackSql: unknown operation gives generic message" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try generateRollbackSql("VACUUM ANALYZE", buf.writer());
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try generateRollbackSql("VACUUM ANALYZE", buf.writer(std.testing.allocator));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "No automatic rollback") != null);
 }
 
 test "generateRollbackSql: CREATE INDEX generates DROP INDEX" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try generateRollbackSql("CREATE INDEX idx_name ON users (name)", buf.writer());
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try generateRollbackSql("CREATE INDEX idx_name ON users (name)", buf.writer(std.testing.allocator));
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "DROP INDEX") != null);
 }
 
@@ -787,11 +770,15 @@ test "handleJournal: serializes entries as JSON" {
             std.testing.allocator.free(entry.pk_column);
             std.testing.allocator.free(entry.pk_value);
         }
-        state.change_journal.deinit();
+        state.change_journal.deinit(std.testing.allocator);
     }
-    _ = crud.addJournalEntry(&state, "t1", "delete", "", "", "", "id", "5");
-    _ = crud.addJournalEntry(&state, "t2", "insert", "", "", "", "id", "10");
+    _ = crud.addJournalEntry(&state, "t1", "delete", "", "", "", "id", "5") catch 0;
+    _ = crud.addJournalEntry(&state, "t2", "insert", "", "", "", "id", "10") catch 0;
     try std.testing.expectEqual(@as(usize, 2), state.change_journal.items.len);
     try std.testing.expectEqualStrings("delete", state.change_journal.items[0].operation);
     try std.testing.expectEqualStrings("insert", state.change_journal.items[1].operation);
+}
+
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
 }

@@ -5,9 +5,11 @@ const utils = @import("utils.zig");
 const sql_guard = @import("sql_guard.zig");
 const web = @import("web.zig");
 
+const log = std.log.scoped(.crud);
+
 const ServerState = web.ServerState;
 const ChangeEntry = web.ChangeEntry;
-const MAX_JOURNAL_ENTRIES = web.MAX_JOURNAL_ENTRIES;
+const max_journal_entries = web.max_journal_entries;
 
 pub const TableDataMeta = struct {
     total: usize,
@@ -86,15 +88,19 @@ pub fn validateCtid(ctid: []const u8) bool {
     const page = inner[0..comma];
     const offset = inner[comma + 1 ..];
     if (page.len == 0 or offset.len == 0) return false;
-    for (page) |ch| { if (ch < '0' or ch > '9') return false; }
-    for (offset) |ch| { if (ch < '0' or ch > '9') return false; }
+    for (page) |ch| {
+        if (ch < '0' or ch > '9') return false;
+    }
+    for (offset) |ch| {
+        if (ch < '0' or ch > '9') return false;
+    }
     return true;
 }
 
 fn formatRowAsJsonCompact(allocator: std.mem.Allocator, col_names: []const []const u8, row: []const []const u8) ![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
-    const bw = buf.writer();
+    var buf = std.ArrayList(u8){};
+    errdefer buf.deinit(allocator);
+    const bw = buf.writer(allocator);
     try bw.writeByte('{');
     const len = @min(col_names.len, row.len);
     for (0..len) |i| {
@@ -106,7 +112,7 @@ fn formatRowAsJsonCompact(allocator: std.mem.Allocator, col_names: []const []con
         try bw.writeByte('"');
     }
     try bw.writeByte('}');
-    return buf.toOwnedSlice();
+    return buf.toOwnedSlice(allocator);
 }
 
 /// Extract key-value pairs from a JSON object field (e.g. "values": {"col":"val", ...}).
@@ -132,7 +138,7 @@ fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name:
     } else return null;
 
     // Parse key-value pairs inside the object
-    var pairs = std.ArrayList(KVPair).init(allocator);
+    var pairs = std.ArrayList(KVPair){};
     var pos = obj_start;
     while (pos < body.len) {
         // Skip whitespace and commas
@@ -154,8 +160,8 @@ fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name:
 
         // Handle null value
         if (pos + 4 <= body.len and std.mem.eql(u8, body[pos..][0..4], "null")) {
-            pairs.append(.{ .key = key, .value = "__NULL__" }) catch {
-                pairs.deinit();
+            pairs.append(allocator, .{ .key = key, .value = "__NULL__" }) catch {
+                pairs.deinit(allocator);
                 return null;
             };
             pos += 4;
@@ -171,14 +177,14 @@ fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name:
         const val = body[val_start..pos];
         pos += 1; // skip closing quote
 
-        pairs.append(.{ .key = key, .value = val }) catch {
-            pairs.deinit();
+        pairs.append(allocator, .{ .key = key, .value = val }) catch {
+            pairs.deinit(allocator);
             return null;
         };
     }
 
-    return pairs.toOwnedSlice() catch {
-        pairs.deinit();
+    return pairs.toOwnedSlice(allocator) catch {
+        pairs.deinit(allocator);
         return null;
     };
 }
@@ -192,12 +198,11 @@ pub fn addJournalEntry(
     new_value: []const u8,
     pk_column: []const u8,
     pk_value: []const u8,
-) u64 {
-    if (!state.journal_initialized) return 0;
+) !u64 {
     const allocator = state.allocator;
 
     // Drop oldest if at capacity — free the inner strings to prevent leak
-    if (state.change_journal.items.len >= MAX_JOURNAL_ENTRIES) {
+    if (state.change_journal.items.len >= max_journal_entries) {
         const old = state.change_journal.orderedRemove(0);
         allocator.free(old.table_name);
         allocator.free(old.operation);
@@ -208,46 +213,20 @@ pub fn addJournalEntry(
         allocator.free(old.pk_value);
     }
 
-    const tn = allocator.dupe(u8, table_name) catch return 0;
-    const op = allocator.dupe(u8, operation) catch {
-        allocator.free(tn);
-        return 0;
-    };
-    const cn = allocator.dupe(u8, column_name) catch {
-        allocator.free(tn);
-        allocator.free(op);
-        return 0;
-    };
-    const ov = allocator.dupe(u8, old_value) catch {
-        allocator.free(tn);
-        allocator.free(op);
-        allocator.free(cn);
-        return 0;
-    };
-    const nv = allocator.dupe(u8, new_value) catch {
-        allocator.free(tn);
-        allocator.free(op);
-        allocator.free(cn);
-        allocator.free(ov);
-        return 0;
-    };
-    const pkc = allocator.dupe(u8, pk_column) catch {
-        allocator.free(tn);
-        allocator.free(op);
-        allocator.free(cn);
-        allocator.free(ov);
-        allocator.free(nv);
-        return 0;
-    };
-    const pkv = allocator.dupe(u8, pk_value) catch {
-        allocator.free(tn);
-        allocator.free(op);
-        allocator.free(cn);
-        allocator.free(ov);
-        allocator.free(nv);
-        allocator.free(pkc);
-        return 0;
-    };
+    const tn = try allocator.dupe(u8, table_name);
+    errdefer allocator.free(tn);
+    const op = try allocator.dupe(u8, operation);
+    errdefer allocator.free(op);
+    const cn = try allocator.dupe(u8, column_name);
+    errdefer allocator.free(cn);
+    const ov = try allocator.dupe(u8, old_value);
+    errdefer allocator.free(ov);
+    const nv = try allocator.dupe(u8, new_value);
+    errdefer allocator.free(nv);
+    const pkc = try allocator.dupe(u8, pk_column);
+    errdefer allocator.free(pkc);
+    const pkv = try allocator.dupe(u8, pk_value);
+    errdefer allocator.free(pkv);
 
     const entry = ChangeEntry{
         .id = state.next_journal_id,
@@ -261,7 +240,7 @@ pub fn addJournalEntry(
         .pk_value = pkv,
         .undone = false,
     };
-    state.change_journal.append(entry) catch return 0;
+    try state.change_journal.append(state.allocator, entry);
     state.next_journal_id += 1;
     return entry.id;
 }
@@ -307,15 +286,13 @@ pub fn sendTableDataJson(
     table_name: []const u8,
     meta: TableDataMeta,
 ) !void {
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
 
     try w.print("{{\"total\":{d},\"limit\":{d},\"offset\":{d},\"count_exact\":{s},\"pk_mode\":\"{s}\",\"pagination\":\"{s}\",", .{
-        meta.total, meta.limit, meta.offset,
-        if (meta.use_exact_count) "true" else "false",
-        if (meta.table_has_pk) "column" else "ctid",
-        if (meta.use_keyset) "keyset" else "offset",
+        meta.total,                                    meta.limit,                                  meta.offset,
+        if (meta.use_exact_count) "true" else "false", if (meta.table_has_pk) "column" else "ctid", if (meta.use_keyset) "keyset" else "offset",
     });
 
     // Include PK info from enhanced schema
@@ -342,7 +319,10 @@ pub fn sendTableDataJson(
     if (meta.use_keyset and meta.pk_col_name != null and pg_result.n_rows > 0) {
         var pk_result_idx: ?usize = null;
         for (pg_result.col_names, 0..) |name, ci| {
-            if (std.mem.eql(u8, name, meta.pk_col_name.?)) { pk_result_idx = ci; break; }
+            if (std.mem.eql(u8, name, meta.pk_col_name.?)) {
+                pk_result_idx = ci;
+                break;
+            }
         }
         if (pk_result_idx) |pki| {
             const first_row = pg_result.rows[0];
@@ -362,9 +342,9 @@ pub fn sendTableDataJson(
 }
 
 pub fn sendQueryResultJson(stream: std.net.Stream, allocator: std.mem.Allocator, pg_result: *postgres.QueryResult) !void {
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
 
     try w.print("{{\"row_count\":{d},", .{pg_result.n_rows});
 
@@ -519,12 +499,12 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     if (!table_has_pk) view_check: {
         var view_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch break :view_check;
         defer view_conn.deinit();
-        var vq_buf = std.ArrayList(u8).init(allocator);
-        defer vq_buf.deinit();
+        var vq_buf = std.ArrayList(u8){};
+        defer vq_buf.deinit(allocator);
         const esc_tn = utils.escapeStringValue(allocator, table_name) catch break :view_check;
         defer allocator.free(esc_tn);
-        vq_buf.writer().print("SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = '{s}' AND n.nspname = 'public' AND c.relkind = 'v'", .{esc_tn}) catch break :view_check;
-        vq_buf.append(0) catch break :view_check;
+        vq_buf.writer(allocator).print("SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = '{s}' AND n.nspname = 'public' AND c.relkind = 'v'", .{esc_tn}) catch break :view_check;
+        vq_buf.append(allocator, 0) catch break :view_check;
         const vq_z: [*:0]const u8 = @ptrCast(vq_buf.items[0 .. vq_buf.items.len - 1 :0]);
         var vr = view_conn.runQuery(allocator, vq_z) catch break :view_check;
         is_view = vr.n_rows > 0;
@@ -536,9 +516,9 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     const use_keyset = table_has_pk and pk_col_name != null and (after_cursor != null or before_cursor != null);
 
     // Build WHERE clause from filters and keyset cursor
-    var where_buf = std.ArrayList(u8).init(allocator);
-    defer where_buf.deinit();
-    const ww = where_buf.writer();
+    var where_buf = std.ArrayList(u8){};
+    defer where_buf.deinit(allocator);
+    const ww = where_buf.writer(allocator);
     var where_parts: usize = 0;
 
     if (has_filters or use_keyset) {
@@ -579,21 +559,21 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     const where_clause = where_buf.items;
 
     // Build count query
-    var count_buf = std.ArrayList(u8).init(allocator);
-    defer count_buf.deinit();
+    var count_buf = std.ArrayList(u8){};
+    defer count_buf.deinit(allocator);
     if (!use_exact_count) {
         const esc_count_tn = try utils.escapeStringValue(allocator, table_name);
         defer allocator.free(esc_count_tn);
-        try count_buf.writer().print("SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables WHERE relname = '{s}'", .{esc_count_tn});
+        try count_buf.writer(allocator).print("SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables WHERE relname = '{s}'", .{esc_count_tn});
     } else {
-        try count_buf.writer().print("SELECT COUNT(*) FROM \"{s}\"{s}", .{ table_name, where_clause });
+        try count_buf.writer(allocator).print("SELECT COUNT(*) FROM \"{s}\"{s}", .{ table_name, where_clause });
     }
-    try count_buf.append(0);
+    try count_buf.append(allocator, 0);
 
     // Build data query
-    var sql_list = std.ArrayList(u8).init(allocator);
-    defer sql_list.deinit();
-    const sw = sql_list.writer();
+    var sql_list = std.ArrayList(u8){};
+    defer sql_list.deinit(allocator);
+    const sw = sql_list.writer(allocator);
 
     if (use_keyset and before_cursor != null) {
         // Backward keyset: reverse order, will re-reverse results
@@ -608,7 +588,7 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     } else {
         try sw.print("SELECT {s} FROM \"{s}\"{s} LIMIT {d} OFFSET {d}", .{ select_cols, table_name, where_clause, limit, offset });
     }
-    try sql_list.append(0);
+    try sql_list.append(allocator, 0);
 
     // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
@@ -751,9 +731,9 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
     const value_expr: []const u8 = if (is_json_col) "'::jsonb" else "'";
 
     // Build SQL: use ctid WHERE clause for no-PK tables
-    var sql_buf = std.ArrayList(u8).init(allocator);
-    defer sql_buf.deinit();
-    const w = sql_buf.writer();
+    var sql_buf = std.ArrayList(u8){};
+    defer sql_buf.deinit(allocator);
+    const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
         try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}{s} WHERE ctid = '{s}'::tid RETURNING \"{s}\"", .{
             table_name, column_name, escaped_value, value_expr, escaped_pk, column_name,
@@ -763,7 +743,7 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
             table_name, column_name, escaped_value, value_expr, pk_column, escaped_pk, column_name,
         });
     }
-    try sql_buf.append(0); // null terminator
+    try sql_buf.append(allocator, 0); // null terminator
 
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
@@ -788,7 +768,10 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
 
     // Record journal entry — use the value field as the new value, old value from request
     const old_value_field = utils.extractJsonField(body, "old_value") orelse "";
-    const journal_id = addJournalEntry(state, table_name, "update", column_name, old_value_field, value, pk_column, pk_value);
+    const journal_id = addJournalEntry(state, table_name, "update", column_name, old_value_field, value, pk_column, pk_value) catch |err| blk: {
+        log.warn("journal entry failed: {s}", .{@errorName(err)});
+        break :blk @as(u64, 0);
+    };
 
     var resp_buf: [128]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"success\":true,\"journal_id\":{d}}}", .{journal_id}) catch "{\"success\":true}";
@@ -856,15 +839,15 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
     defer allocator.free(escaped_pk);
 
     // Build SQL: DELETE with ctid or PK column
-    var sql_buf = std.ArrayList(u8).init(allocator);
-    defer sql_buf.deinit();
-    const w = sql_buf.writer();
+    var sql_buf = std.ArrayList(u8){};
+    defer sql_buf.deinit(allocator);
+    const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
         try w.print("DELETE FROM \"{s}\" WHERE ctid = '{s}'::tid", .{ table_name, escaped_pk });
     } else {
         try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = '{s}'", .{ table_name, pk_column, escaped_pk });
     }
-    try sql_buf.append(0);
+    try sql_buf.append(allocator, 0);
 
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
@@ -880,15 +863,15 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
     var old_row_buf: ?[]u8 = null;
     defer if (old_row_buf) |b| allocator.free(b);
     {
-        var sel_buf = std.ArrayList(u8).init(allocator);
-        defer sel_buf.deinit();
-        const sel_w = sel_buf.writer();
+        var sel_buf = std.ArrayList(u8){};
+        defer sel_buf.deinit(allocator);
+        const sel_w = sel_buf.writer(allocator);
         if (is_ctid_mode) {
             sel_w.print("SELECT * FROM \"{s}\" WHERE ctid = '{s}'::tid LIMIT 1", .{ table_name, escaped_pk }) catch {};
         } else {
             sel_w.print("SELECT * FROM \"{s}\" WHERE \"{s}\" = '{s}' LIMIT 1", .{ table_name, pk_column, escaped_pk }) catch {};
         }
-        sel_buf.append(0) catch {};
+        sel_buf.append(allocator, 0) catch {};
         if (sel_buf.items.len > 1) {
             const sel_z: [*:0]const u8 = sel_buf.items[0 .. sel_buf.items.len - 1 :0];
             if (pg_conn.runQuery(allocator, sel_z)) |sel_res| {
@@ -917,7 +900,9 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
     defer pg_result.deinit();
 
     // Record journal entry for delete with old row data
-    _ = addJournalEntry(state, table_name, "delete", "", old_row_json, "", pk_column, pk_value);
+    if (addJournalEntry(state, table_name, "delete", "", old_row_json, "", pk_column, pk_value)) |_| {} else |err| {
+        log.warn("journal entry failed: {s}", .{@errorName(err)});
+    }
 
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
 }
@@ -971,9 +956,9 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
     }
 
     // Build SQL
-    var sql_builder = std.ArrayList(u8).init(allocator);
-    defer sql_builder.deinit();
-    const sw = sql_builder.writer();
+    var sql_builder = std.ArrayList(u8){};
+    defer sql_builder.deinit(allocator);
+    const sw = sql_builder.writer(allocator);
 
     if (values) |pairs| {
         if (pairs.len > 0) {
@@ -1037,13 +1022,15 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
     if (pg_result.n_rows > 0 and pg_result.col_names.len > 0) {
         const insert_pk_col = pg_result.col_names[0];
         const insert_pk_val = if (pg_result.rows[0].len > 0) pg_result.rows[0][0] else "";
-        _ = addJournalEntry(state, table_name, "insert", "", "", "", insert_pk_col, insert_pk_val);
+        if (addJournalEntry(state, table_name, "insert", "", "", "", insert_pk_col, insert_pk_val)) |_| {} else |err| {
+            log.warn("journal entry failed: {s}", .{@errorName(err)});
+        }
     }
 
     // Build response with the new row
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const jw = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const jw = json_buf.writer(allocator);
 
     try jw.writeAll("{\"success\":true,\"columns\":[");
     for (pg_result.col_names, 0..) |name, i| {
@@ -1134,9 +1121,9 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
     if (fk_limit > 100) fk_limit = 100;
 
     // Build query
-    var sql_buf = std.ArrayList(u8).init(allocator);
-    defer sql_buf.deinit();
-    const sw = sql_buf.writer();
+    var sql_buf = std.ArrayList(u8){};
+    defer sql_buf.deinit(allocator);
+    const sw = sql_buf.writer(allocator);
 
     if (search.len > 0) {
         const esc_search = utils.escapeStringValue(allocator, search) catch {
@@ -1148,7 +1135,7 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
     } else {
         try sw.print("SELECT \"{s}\" FROM \"{s}\" LIMIT {d}", .{ target_col, target_table, fk_limit });
     }
-    try sql_buf.append(0);
+    try sql_buf.append(allocator, 0);
 
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
@@ -1165,9 +1152,9 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
     defer pg_result.deinit();
 
     // Serialize results as JSON array
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const jw = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const jw = json_buf.writer(allocator);
     try jw.writeAll("{\"values\":[");
     for (pg_result.rows, 0..) |row, ri| {
         if (ri > 0) try jw.writeByte(',');
@@ -1255,10 +1242,10 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
 
     if (!force) {
         // Preview mode: count affected rows
-        var cnt_sql = std.ArrayList(u8).init(allocator);
-        defer cnt_sql.deinit();
-        try cnt_sql.writer().print("SELECT COUNT(*) FROM \"{s}\" WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_find });
-        try cnt_sql.append(0);
+        var cnt_sql = std.ArrayList(u8){};
+        defer cnt_sql.deinit(allocator);
+        try cnt_sql.writer(allocator).print("SELECT COUNT(*) FROM \"{s}\" WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_find });
+        try cnt_sql.append(allocator, 0);
         const cnt_z: [*:0]const u8 = @ptrCast(cnt_sql.items[0 .. cnt_sql.items.len - 1 :0]);
         var cnt_result = pg_conn.runQuery(allocator, cnt_z) catch {
             try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Count query failed\"}");
@@ -1279,10 +1266,10 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
             return;
         };
         defer allocator.free(esc_replace);
-        var upd_sql = std.ArrayList(u8).init(allocator);
-        defer upd_sql.deinit();
-        try upd_sql.writer().print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_replace, column, esc_find });
-        try upd_sql.append(0);
+        var upd_sql = std.ArrayList(u8){};
+        defer upd_sql.deinit(allocator);
+        try upd_sql.writer(allocator).print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_replace, column, esc_find });
+        try upd_sql.append(allocator, 0);
         const upd_z: [*:0]const u8 = @ptrCast(upd_sql.items[0 .. upd_sql.items.len - 1 :0]);
         var upd_result = pg_conn.runQuery(allocator, upd_z) catch {
             var err_buf: [512]u8 = undefined;
@@ -1297,7 +1284,9 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
         defer upd_result.deinit();
 
         // Record journal entries
-        _ = addJournalEntry(state, table_name, "update", column, find_val, replace_val, "bulk", "");
+        if (addJournalEntry(state, table_name, "update", column, find_val, replace_val, "bulk", "")) |_| {} else |err| {
+            log.warn("journal entry failed: {s}", .{@errorName(err)});
+        }
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
     }
 }
@@ -1365,7 +1354,9 @@ pub fn handleTruncateTable(stream: std.net.Stream, path: []const u8, state: *Ser
     defer pg_result.deinit();
 
     // Record in journal
-    _ = addJournalEntry(state, table_name, "truncate", "", "", "", "ALL", "");
+    if (addJournalEntry(state, table_name, "truncate", "", "", "", "ALL", "")) |_| {} else |err| {
+        log.warn("journal entry failed: {s}", .{@errorName(err)});
+    }
 
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
 }
@@ -1453,8 +1444,8 @@ test "validateCtid: rejects injection and nesting" {
 
 test "addJournalEntry: adds to journal" {
     var state = ServerState.init(std.testing.allocator);
-    defer state.change_journal.deinit();
-    const id = addJournalEntry(&state, "users", "update", "name", "old", "new", "id", "1");
+    defer state.change_journal.deinit(std.testing.allocator);
+    const id = try addJournalEntry(&state, "users", "update", "name", "old", "new", "id", "1");
     try std.testing.expect(id > 0);
     try std.testing.expectEqual(@as(usize, 1), state.change_journal.items.len);
     // Free the duped strings
@@ -1471,10 +1462,10 @@ test "addJournalEntry: adds to journal" {
 
 test "addJournalEntry: multiple entries increment id" {
     var state = ServerState.init(std.testing.allocator);
-    defer state.change_journal.deinit();
-    const id1 = addJournalEntry(&state, "t", "update", "c", "old1", "new1", "id", "1");
-    const id2 = addJournalEntry(&state, "t", "update", "c", "old2", "new2", "id", "2");
-    const id3 = addJournalEntry(&state, "t", "update", "c", "old3", "new3", "id", "3");
+    defer state.change_journal.deinit(std.testing.allocator);
+    const id1 = try addJournalEntry(&state, "t", "update", "c", "old1", "new1", "id", "1");
+    const id2 = try addJournalEntry(&state, "t", "update", "c", "old2", "new2", "id", "2");
+    const id3 = try addJournalEntry(&state, "t", "update", "c", "old3", "new3", "id", "3");
     try std.testing.expect(id1 < id2);
     try std.testing.expect(id2 < id3);
     try std.testing.expectEqual(@as(usize, 3), state.change_journal.items.len);
@@ -1489,19 +1480,10 @@ test "addJournalEntry: multiple entries increment id" {
     }
 }
 
-test "addJournalEntry: uninitialized journal returns 0" {
-    var state = ServerState.init(std.testing.allocator);
-    defer state.change_journal.deinit();
-    state.journal_initialized = false;
-    const id = addJournalEntry(&state, "t", "update", "c", "old", "new", "id", "1");
-    try std.testing.expectEqual(@as(u64, 0), id);
-    try std.testing.expectEqual(@as(usize, 0), state.change_journal.items.len);
-}
-
 test "addJournalEntry: delete operation stores table and pk" {
     var state = ServerState.init(std.testing.allocator);
-    defer state.change_journal.deinit();
-    _ = addJournalEntry(&state, "orders", "delete", "", "", "", "order_id", "42");
+    defer state.change_journal.deinit(std.testing.allocator);
+    _ = try addJournalEntry(&state, "orders", "delete", "", "", "", "order_id", "42");
     try std.testing.expectEqual(@as(usize, 1), state.change_journal.items.len);
     const entry = state.change_journal.items[0];
     try std.testing.expectEqualStrings("orders", entry.table_name);
@@ -1585,3 +1567,6 @@ test "extractJsonObject: non-object value returns null" {
     try std.testing.expect(pairs == null);
 }
 
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
+}

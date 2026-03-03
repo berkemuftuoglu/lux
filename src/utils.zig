@@ -1,6 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const log = std.log.scoped(.utils);
+
 pub const IdentifierError = error{
     InvalidIdentifier,
     OutOfMemory,
@@ -12,8 +14,8 @@ pub const StringEscapeError = error{
 };
 
 pub fn sendResponse(stream: std.net.Stream, status: []const u8, content_type: []const u8, body: []const u8) !void {
-    var header_buf: [512]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", .{
+    var header_buf: [640]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n", .{
         status,
         content_type,
         body.len,
@@ -25,8 +27,8 @@ pub fn sendResponse(stream: std.net.Stream, status: []const u8, content_type: []
 
 pub fn sendHtmlResponseWithCsp(stream: std.net.Stream, body: []const u8) !void {
     const csp = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
-    var header_buf: [768]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Security-Policy: {s}\r\n\r\n", .{
+    var header_buf: [896]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Security-Policy: {s}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n", .{
         body.len,
         csp,
     }) catch return;
@@ -42,8 +44,8 @@ pub fn sendResponseWithDownload(
     filename: []const u8,
     body: []const u8,
 ) !void {
-    var header_buf: [1024]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Disposition: attachment; filename=\"{s}\"\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", .{
+    var header_buf: [1152]u8 = undefined;
+    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Disposition: attachment; filename=\"{s}\"\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n", .{
         status,
         content_type,
         body.len,
@@ -728,7 +730,6 @@ test "parseQueryParam: multiple same params uses first" {
     try std.testing.expectEqual(@as(usize, 10), result);
 }
 
-
 // extractJsonField edge cases
 
 test "extractJsonField: connection string with special chars" {
@@ -973,34 +974,33 @@ test "escapeStringValue: null bytes rejected at any position" {
 }
 
 test "writeJsonEscaped: null byte is escaped per RFC 8259" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try writeJsonEscaped(buf.writer(), "ab\x00cd");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try writeJsonEscaped(buf.writer(std.testing.allocator), "ab\x00cd");
     try std.testing.expectEqualStrings("ab\\u0000cd", buf.items);
 }
 
 test "writeJsonEscaped: backslash followed by quote" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try writeJsonEscaped(buf.writer(), "\\\"");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try writeJsonEscaped(buf.writer(std.testing.allocator), "\\\"");
     try std.testing.expectEqualStrings("\\\\\\\"", buf.items);
 }
 
 test "writeJsonEscaped: very long string" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
     const long = "a" ** 2000;
-    try writeJsonEscaped(buf.writer(), long);
+    try writeJsonEscaped(buf.writer(std.testing.allocator), long);
     try std.testing.expectEqual(@as(usize, 2000), buf.items.len);
 }
 
 test "writeJsonEscaped: all whitespace escapes" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try writeJsonEscaped(buf.writer(), "\n\r\t");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try writeJsonEscaped(buf.writer(std.testing.allocator), "\n\r\t");
     try std.testing.expectEqualStrings("\\n\\r\\t", buf.items);
 }
-
 
 // --- indexOfIgnoreCase ---
 
@@ -1246,4 +1246,65 @@ test "extractJsonField: field not found in deeply nested body" {
     const body = "{\"outer\": {\"inner\": \"val\"}, \"other\": \"test\"}";
     const result = extractJsonField(body, "missing");
     try std.testing.expect(result == null);
+}
+
+// --- OOM tests (checkAllAllocationFailures) ---
+
+fn testEscapeIdentifierAlloc(allocator: std.mem.Allocator) !void {
+    const result = try escapeIdentifier(allocator, "test_table");
+    defer allocator.free(result);
+}
+
+test "escapeIdentifier: allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testEscapeIdentifierAlloc, .{});
+}
+
+fn testEscapeStringValueAlloc(allocator: std.mem.Allocator) !void {
+    const result = try escapeStringValue(allocator, "test's value");
+    defer allocator.free(result);
+}
+
+test "escapeStringValue: allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, testEscapeStringValueAlloc, .{});
+}
+
+// --- Fuzz tests ---
+
+fn fuzzEscapeIdentifier(_: void, input: []const u8) anyerror!void {
+    // Verify escapeIdentifier never crashes on arbitrary input.
+    // Null bytes return error.InvalidIdentifier; all other bytes must produce valid output.
+    const result = escapeIdentifier(std.testing.allocator, input) catch return;
+    defer std.testing.allocator.free(result);
+    // Invariant: output length is >= input length (doubling can only grow the result)
+    try std.testing.expect(result.len >= input.len);
+}
+
+test "escapeIdentifier: fuzz" {
+    try std.testing.fuzz({}, fuzzEscapeIdentifier, .{});
+}
+
+fn fuzzEscapeStringValue(_: void, input: []const u8) anyerror!void {
+    // Verify escapeStringValue never crashes on arbitrary input.
+    // Null bytes return error.InvalidCharacter; all other bytes must produce valid output.
+    const result = escapeStringValue(std.testing.allocator, input) catch return;
+    defer std.testing.allocator.free(result);
+    // Invariant: output length is >= input length (doubling can only grow the result)
+    try std.testing.expect(result.len >= input.len);
+}
+
+test "escapeStringValue: fuzz" {
+    try std.testing.fuzz({}, fuzzEscapeStringValue, .{});
+}
+
+fn fuzzParseStringQueryParam(_: void, input: []const u8) anyerror!void {
+    var buf: [256]u8 = undefined;
+    _ = parseStringQueryParam(input, "q", &buf);
+}
+
+test "parseStringQueryParam: fuzz" {
+    try std.testing.fuzz({}, fuzzParseStringQueryParam, .{});
+}
+
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
 }

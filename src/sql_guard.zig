@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.sql_guard);
+
 pub const SqlGuardResult = struct {
     is_destructive: bool,
     operation: []const u8,
@@ -635,4 +637,18 @@ test "isSqlReadSafe: lowercase select" {
 
 test "isSqlReadSafe: WITH UPDATE blocked" {
     try std.testing.expect(!isSqlReadSafe("WITH upd AS (UPDATE users SET name='x' RETURNING *) SELECT * FROM upd"));
+}
+
+// --- Fuzz test ---
+
+fn fuzzHasMultipleStatements(_: void, input: []const u8) anyerror!void {
+    _ = hasMultipleStatements(input);
+}
+
+test "hasMultipleStatements: fuzz" {
+    try std.testing.fuzz({}, fuzzHasMultipleStatements, .{});
+}
+
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
 }

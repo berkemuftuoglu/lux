@@ -2,9 +2,14 @@ const std = @import("std");
 const web = @import("web.zig");
 const postgres = @import("postgres.zig");
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
+const log = std.log.scoped(.main);
+
 pub fn main() !void {
-    const stderr = std.io.getStdErr().writer();
-    const stdout = std.io.getStdOut().writer();
+    const stdout = std.fs.File.stdout().deprecatedWriter();
 
     // --- Parse CLI args ---
     var args = std.process.args();
@@ -17,66 +22,70 @@ pub fn main() !void {
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--port") or std.mem.eql(u8, arg, "-p")) {
             const port_str = args.next() orelse {
-                try stderr.print("Error: --port requires a port number\n", .{});
+                log.err("--port requires a port number", .{});
                 std.process.exit(1);
             };
             port = std.fmt.parseInt(u16, port_str, 10) catch {
-                try stderr.print("Error: invalid port '{s}'\n", .{port_str});
+                log.err("invalid port '{s}'", .{port_str});
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--bind") or std.mem.eql(u8, arg, "-b")) {
             bind_addr = args.next() orelse {
-                try stderr.print("Error: --bind requires an address (e.g. 0.0.0.0)\n", .{});
+                log.err("--bind requires an address (e.g. 0.0.0.0)", .{});
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--pg")) {
             pg_conninfo = args.next() orelse {
-                try stderr.print("Error: --pg requires a connection string\n", .{});
+                log.err("--pg requires a connection string", .{});
                 std.process.exit(1);
             };
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             try printUsage(stdout);
             return;
         } else {
-            try stderr.print("Error: unknown argument '{s}'\n", .{arg});
-            try stderr.print("Run with --help for usage information.\n", .{});
+            log.err("unknown argument '{s}'", .{arg});
+            log.err("run with --help for usage information", .{});
             std.process.exit(1);
         }
     }
 
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var da = std.heap.DebugAllocator(.{}).init;
+    defer {
+        if (da.deinit() == .leak) {
+            log.err("memory leak detected", .{});
+            std.process.exit(1);
+        }
+    }
+    const allocator = da.allocator();
 
     var state = web.ServerState.init(allocator);
 
     // Auto-connect to Postgres if --pg provided
     if (pg_conninfo) |conninfo| {
-        try stdout.print("Connecting to PostgreSQL...\n", .{});
+        log.info("connecting to PostgreSQL", .{});
 
-        const conninfo_z = allocator.allocSentinel(u8, conninfo.len, 0) catch {
-            try stderr.print("Error: out of memory\n", .{});
+        const conninfo_z = allocator.dupeZ(u8, conninfo) catch {
+            log.err("out of memory", .{});
             std.process.exit(1);
         };
-        @memcpy(conninfo_z[0..conninfo.len], conninfo);
         state.conninfo_z = conninfo_z;
 
         // Fetch schema
         var pg_conn = postgres.PgConnection.connect(conninfo_z) catch {
-            try stderr.print("Error: failed to connect to PostgreSQL\n", .{});
+            log.err("failed to connect to PostgreSQL", .{});
             std.process.exit(1);
         };
         defer pg_conn.deinit();
 
-        try stdout.print("Connected to PostgreSQL.\n", .{});
+        log.info("connected to PostgreSQL", .{});
 
         var schema = pg_conn.fetchSchema(allocator) catch {
-            try stderr.print("Error: failed to fetch schema\n", .{});
+            log.err("failed to fetch schema", .{});
             std.process.exit(1);
         };
 
         const schema_text = schema.format(allocator) catch {
-            try stderr.print("Error: failed to format schema\n", .{});
+            log.err("failed to format schema", .{});
             std.process.exit(1);
         };
         state.schema_text = schema_text;
@@ -96,7 +105,7 @@ pub fn main() !void {
         try stdout.print("{s}", .{schema_text});
     }
 
-    try web.serve(stderr, stdout, &state, port, bind_addr);
+    try web.serve(&state, port, bind_addr);
 }
 
 fn printUsage(writer: anytype) !void {
@@ -121,3 +130,6 @@ fn printUsage(writer: anytype) !void {
     , .{});
 }
 
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
+}

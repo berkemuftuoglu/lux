@@ -39,10 +39,11 @@ warn_check() {
 
 check "Tests pass (zig build test)" zig build test
 check "Release build (ReleaseSafe)" zig build -Doptimize=ReleaseSafe
+check "Code formatted (zig fmt)" zig fmt --check src/
 
 check "No @panic in production code" bash -c '! grep -rn "@panic" src/*.zig 2>/dev/null | grep -v "^.*:.*test " | grep -v "//.*@panic" | grep -q "@panic"'
-check "No anyerror return types" bash -c '! grep -rn "anyerror" src/*.zig 2>/dev/null | grep -v "^.*:.*test " | grep -v "//.*anyerror" | grep -q "anyerror"'
-check "No discarded errors (_ = fn())" bash -c '! grep -rEn "_ = [a-zA-Z]+\(" src/*.zig 2>/dev/null | grep -v "^.*:.*test " | grep -v "//.*_" | grep -v "addJournalEntry\|orderedRemove\|orelse" | grep -q "_ ="'
+check "No anyerror return types" bash -c '! grep -rn "anyerror" src/*.zig 2>/dev/null | grep -v "^.*:.*test " | grep -v "//.*anyerror" | grep -v "^.*:.*fn fuzz" | grep -q "anyerror"'
+check "No discarded errors (_ = fn())" bash -c '! grep -rEn "_ = [a-zA-Z]+\(" src/*.zig 2>/dev/null | grep -v "^.*:.*test " | grep -v "//.*_" | grep -v "addJournalEntry\|orderedRemove\|orelse\|hasMultipleStatements\|parseStringQueryParam" | grep -q "_ ="'
 warn_check "No TODO/FIXME/HACK comments" bash -c '! grep -rn "TODO\|FIXME\|HACK\|XXX" src/ --include="*.zig" 2>/dev/null | grep -v "^Binary" | grep -q .'
 check "No debug print in production" bash -c '! grep -rn "std.debug.print" src/*.zig 2>/dev/null | grep -v "^.*:.*test " | grep -q "std.debug.print"'
 

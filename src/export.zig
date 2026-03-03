@@ -4,6 +4,8 @@ const utils = @import("utils.zig");
 const web = @import("web.zig");
 const crud = @import("crud.zig");
 
+const log = std.log.scoped(.@"export");
+
 const ServerState = web.ServerState;
 
 const ExportError = error{
@@ -52,9 +54,9 @@ fn formatResultAsCsv(
     col_names: []const []const u8,
     rows: []const []const []const u8,
 ) ExportError![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
-    const w = buf.writer();
+    var buf = std.ArrayList(u8){};
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
 
     // Header row
     for (col_names, 0..) |name, i| {
@@ -72,7 +74,7 @@ fn formatResultAsCsv(
         w.writeAll("\r\n") catch return error.OutOfMemory;
     }
 
-    return buf.toOwnedSlice() catch return error.OutOfMemory;
+    return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
 /// Format query result as a JSON array of objects.
@@ -83,9 +85,9 @@ fn formatResultAsJson(
     col_names: []const []const u8,
     rows: []const []const []const u8,
 ) ExportError![]u8 {
-    var buf = std.ArrayList(u8).init(allocator);
-    errdefer buf.deinit();
-    const w = buf.writer();
+    var buf = std.ArrayList(u8){};
+    errdefer buf.deinit(allocator);
+    const w = buf.writer(allocator);
 
     w.writeByte('[') catch return error.OutOfMemory;
 
@@ -118,7 +120,7 @@ fn formatResultAsJson(
 
     w.writeByte(']') catch return error.OutOfMemory;
 
-    return buf.toOwnedSlice() catch return error.OutOfMemory;
+    return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
 /// Parse a CSV string into a list of rows, each row being a list of field values.
@@ -132,8 +134,8 @@ fn parseCsvContent(
 ) CsvParseError!struct { headers: [][]const u8, rows: [][]const []const u8 } {
     if (csv.len == 0) return error.EmptyCsv;
 
-    var all_rows = std.ArrayList([][]const u8).init(allocator);
-    defer all_rows.deinit();
+    var all_rows = std.ArrayList([][]const u8){};
+    defer all_rows.deinit(allocator);
     errdefer {
         for (all_rows.items) |row| {
             for (row) |field| allocator.free(field);
@@ -148,10 +150,10 @@ fn parseCsvContent(
         while (check < csv.len and (csv[check] == '\r' or csv[check] == '\n' or csv[check] == ' ')) check += 1;
         if (check >= csv.len) break;
 
-        var fields = std.ArrayList([]const u8).init(allocator);
+        var fields = std.ArrayList([]const u8){};
         errdefer {
             for (fields.items) |f| allocator.free(f);
-            fields.deinit();
+            fields.deinit(allocator);
         }
 
         // Parse one row
@@ -161,13 +163,13 @@ fn parseCsvContent(
             if (csv[pos] == '"') {
                 // Quoted field
                 pos += 1; // skip opening quote
-                var field_buf = std.ArrayList(u8).init(allocator);
-                errdefer field_buf.deinit();
+                var field_buf = std.ArrayList(u8){};
+                errdefer field_buf.deinit(allocator);
                 while (pos < csv.len) {
                     if (csv[pos] == '"') {
                         if (pos + 1 < csv.len and csv[pos + 1] == '"') {
                             // Escaped double quote
-                            field_buf.append('"') catch return error.OutOfMemory;
+                            field_buf.append(allocator, '"') catch return error.OutOfMemory;
                             pos += 2;
                         } else {
                             // End of quoted field
@@ -175,12 +177,12 @@ fn parseCsvContent(
                             break;
                         }
                     } else {
-                        field_buf.append(csv[pos]) catch return error.OutOfMemory;
+                        field_buf.append(allocator, csv[pos]) catch return error.OutOfMemory;
                         pos += 1;
                     }
                 }
-                const owned = field_buf.toOwnedSlice() catch return error.OutOfMemory;
-                fields.append(owned) catch return error.OutOfMemory;
+                const owned = field_buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
+                fields.append(allocator, owned) catch return error.OutOfMemory;
             } else {
                 // Unquoted field — read until comma or newline
                 const start = pos;
@@ -188,7 +190,7 @@ fn parseCsvContent(
                     pos += 1;
                 }
                 const val = allocator.dupe(u8, csv[start..pos]) catch return error.OutOfMemory;
-                fields.append(val) catch return error.OutOfMemory;
+                fields.append(allocator, val) catch return error.OutOfMemory;
             }
 
             // After field: expect comma (more fields), newline (end of row), or EOF
@@ -203,10 +205,10 @@ fn parseCsvContent(
         }
 
         if (fields.items.len > 0) {
-            const row_slice = fields.toOwnedSlice() catch return error.OutOfMemory;
-            all_rows.append(row_slice) catch return error.OutOfMemory;
+            const row_slice = fields.toOwnedSlice(allocator) catch return error.OutOfMemory;
+            all_rows.append(allocator, row_slice) catch return error.OutOfMemory;
         } else {
-            fields.deinit();
+            fields.deinit(allocator);
         }
     }
 
@@ -240,9 +242,9 @@ fn buildAndExecuteInsert(
     col_names: []const []const u8,
     values: []const []const u8,
 ) bool {
-    var sql_buf = std.ArrayList(u8).init(allocator);
-    defer sql_buf.deinit();
-    const w = sql_buf.writer();
+    var sql_buf = std.ArrayList(u8){};
+    defer sql_buf.deinit(allocator);
+    const w = sql_buf.writer(allocator);
 
     w.print("INSERT INTO \"{s}\" (", .{table_name}) catch return false;
     for (col_names, 0..) |col, i| {
@@ -261,7 +263,7 @@ fn buildAndExecuteInsert(
         }
     }
     w.writeAll(")") catch return false;
-    sql_buf.append(0) catch return false;
+    sql_buf.append(allocator, 0) catch return false;
 
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
     var result = pg_conn.runQuery(allocator, sql_z) catch return false;
@@ -450,12 +452,11 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *Serv
     }
 
     // Build null-terminated SQL
-    const sql_z = allocator.allocSentinel(u8, sql_text.len, 0) catch {
+    const sql_z = allocator.dupeZ(u8, sql_text) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
     defer allocator.free(sql_z);
-    @memcpy(sql_z[0..sql_text.len], sql_text);
 
     // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
@@ -547,30 +548,30 @@ pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerSt
     };
     defer allocator.free(escaped_name);
 
-    var sql_buf = std.ArrayList(u8).init(allocator);
-    defer sql_buf.deinit();
-    const sw = sql_buf.writer();
+    var sql_buf = std.ArrayList(u8){};
+    defer sql_buf.deinit(allocator);
+    const sw = sql_buf.writer(allocator);
 
     // Use a CASE expression to generate correct DDL for both tables and views
     try sw.writeAll(
         "SELECT CASE WHEN cls.relkind = 'v' THEN " ++
-        "'CREATE OR REPLACE VIEW \"' || cls.relname || '\" AS' || chr(10) || pg_get_viewdef(cls.oid, true) " ++
-        "ELSE " ++
-        "'CREATE TABLE \"' || cls.relname || '\" (' || chr(10) || " ++
-        "string_agg('  \"' || c.column_name || '\" ' || c.data_type || " ++
-        "CASE WHEN c.character_maximum_length IS NOT NULL THEN '(' || c.character_maximum_length || ')' ELSE '' END || " ++
-        "CASE WHEN c.is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END || " ++
-        "CASE WHEN c.column_default IS NOT NULL THEN ' DEFAULT ' || c.column_default ELSE '' END" ++
-        ", ',' || chr(10) ORDER BY c.ordinal_position) || chr(10) || ');' " ++
-        "END " ++
-        "FROM pg_class cls " ++
-        "JOIN pg_namespace ns ON cls.relnamespace = ns.oid " ++
-        "LEFT JOIN information_schema.columns c ON c.table_schema = ns.nspname AND c.table_name = cls.relname " ++
-        "WHERE ns.nspname = 'public' AND cls.relname = '",
+            "'CREATE OR REPLACE VIEW \"' || cls.relname || '\" AS' || chr(10) || pg_get_viewdef(cls.oid, true) " ++
+            "ELSE " ++
+            "'CREATE TABLE \"' || cls.relname || '\" (' || chr(10) || " ++
+            "string_agg('  \"' || c.column_name || '\" ' || c.data_type || " ++
+            "CASE WHEN c.character_maximum_length IS NOT NULL THEN '(' || c.character_maximum_length || ')' ELSE '' END || " ++
+            "CASE WHEN c.is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END || " ++
+            "CASE WHEN c.column_default IS NOT NULL THEN ' DEFAULT ' || c.column_default ELSE '' END" ++
+            ", ',' || chr(10) ORDER BY c.ordinal_position) || chr(10) || ');' " ++
+            "END " ++
+            "FROM pg_class cls " ++
+            "JOIN pg_namespace ns ON cls.relnamespace = ns.oid " ++
+            "LEFT JOIN information_schema.columns c ON c.table_schema = ns.nspname AND c.table_name = cls.relname " ++
+            "WHERE ns.nspname = 'public' AND cls.relname = '",
     );
     try sw.writeAll(escaped_name);
     try sw.writeAll("' AND cls.relkind IN ('r', 'v') GROUP BY cls.relkind, cls.relname, cls.oid");
-    try sql_buf.append(0);
+    try sql_buf.append(allocator, 0);
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
     // Connect and execute
@@ -601,9 +602,9 @@ pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerSt
     const ddl_text = pg_result.rows[0][0];
 
     // Build JSON response
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
     try w.writeAll("{\"ddl\":\"");
     try utils.writeJsonEscaped(w, ddl_text);
     try w.writeAll("\"}");
@@ -655,9 +656,9 @@ pub fn handleCsvImport(
     };
 
     // Read request body
-    const MAX_REQUEST_SIZE = 8192;
-    var extra_buf: [MAX_REQUEST_SIZE]u8 = undefined;
-    const body = crud.readRequestBody(stream, request, &extra_buf, MAX_REQUEST_SIZE) orelse {
+    const max_request_size = 8192;
+    var extra_buf: [max_request_size]u8 = undefined;
+    const body = crud.readRequestBody(stream, request, &extra_buf, max_request_size) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
@@ -699,8 +700,8 @@ pub fn handleCsvImport(
     }
 
     // Determine column names for INSERT
-    var col_names = std.ArrayList([]const u8).init(allocator);
-    defer col_names.deinit();
+    var col_names = std.ArrayList([]const u8){};
+    defer col_names.deinit(allocator);
 
     if (has_header) {
         // Validate CSV headers match table columns
@@ -715,7 +716,7 @@ pub fn handleCsvImport(
                 try utils.sendResponse(stream, "400 Bad Request", "application/json", fbs.getWritten());
                 return;
             }
-            col_names.append(header) catch {
+            col_names.append(allocator, header) catch {
                 try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
                 return;
             };
@@ -729,7 +730,7 @@ pub fn handleCsvImport(
             return;
         }
         for (table_info.columns[0..field_count]) |col| {
-            col_names.append(col.name) catch {
+            col_names.append(allocator, col.name) catch {
                 try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
                 return;
             };
@@ -799,9 +800,9 @@ pub fn handleCsvImport(
             return;
         };
         rb.deinit();
-        var resp_buf = std.ArrayList(u8).init(allocator);
-        defer resp_buf.deinit();
-        const rw = resp_buf.writer();
+        var resp_buf = std.ArrayList(u8){};
+        defer resp_buf.deinit(allocator);
+        const rw = resp_buf.writer(allocator);
         try rw.writeAll("{\"error\":\"Import failed: ");
         try utils.writeJsonEscaped(rw, error_msg_buf[0..error_msg_len]);
         try rw.writeAll("\"}");
@@ -880,9 +881,9 @@ pub fn handleTableStats(
     };
     defer allocator.free(escaped_name);
 
-    var sql_buf = std.ArrayList(u8).init(allocator);
-    defer sql_buf.deinit();
-    const sw = sql_buf.writer();
+    var sql_buf = std.ArrayList(u8){};
+    defer sql_buf.deinit(allocator);
+    const sw = sql_buf.writer(allocator);
     try sw.writeAll(
         "SELECT " ++
             "COALESCE(c.reltuples, 0)::bigint AS row_estimate, " ++
@@ -895,7 +896,7 @@ pub fn handleTableStats(
     );
     try sw.writeAll(escaped_name);
     try sw.writeAll("' AND c.relkind IN ('r', 'v')");
-    try sql_buf.append(0);
+    try sql_buf.append(allocator, 0);
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
     // Connect and execute
@@ -930,9 +931,9 @@ pub fn handleTableStats(
     const total_size = if (row.len > 3) row[3] else "0 bytes";
 
     // Build JSON response
-    var json_buf = std.ArrayList(u8).init(allocator);
-    defer json_buf.deinit();
-    const w = json_buf.writer();
+    var json_buf = std.ArrayList(u8){};
+    defer json_buf.deinit(allocator);
+    const w = json_buf.writer(allocator);
     try w.writeAll("{\"row_estimate\":");
     try w.writeAll(row_estimate);
     try w.writeAll(",\"table_size\":\"");
@@ -949,79 +950,79 @@ pub fn handleTableStats(
 // Tests
 
 test "escapeCsvField: plain text passes through" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "hello");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "hello");
     try std.testing.expectEqualStrings("hello", buf.items);
 }
 
 test "escapeCsvField: field with comma is quoted" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "hello,world");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "hello,world");
     try std.testing.expectEqualStrings("\"hello,world\"", buf.items);
 }
 
 test "escapeCsvField: field with double quote is quoted and escaped" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "say \"hi\"");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "say \"hi\"");
     try std.testing.expectEqualStrings("\"say \"\"hi\"\"\"", buf.items);
 }
 
 test "escapeCsvField: field with newline is quoted" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "line1\nline2");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "line1\nline2");
     try std.testing.expectEqualStrings("\"line1\nline2\"", buf.items);
 }
 
 test "escapeCsvField: field with carriage return is quoted" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "a\rb");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "a\rb");
     try std.testing.expectEqualStrings("\"a\rb\"", buf.items);
 }
 
 test "escapeCsvField: empty string passes through" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "");
     try std.testing.expectEqualStrings("", buf.items);
 }
 
 test "escapeCsvField: field with all special chars" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "a,b\"c\nd");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "a,b\"c\nd");
     try std.testing.expect(buf.items[0] == '"');
 }
 
 test "escapeCsvField: NULL literal passes through" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "NULL");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "NULL");
     try std.testing.expectEqualStrings("NULL", buf.items);
 }
 
 test "escapeCsvField: field containing only a double quote" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "\"");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "\"");
     try std.testing.expectEqualStrings("\"\"\"\"", buf.items);
 }
 
 test "escapeCsvField: field with comma and quote" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "a,\"b\"");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "a,\"b\"");
     try std.testing.expect(buf.items[0] == '"');
 }
 
 test "escapeCsvField: field with CRLF" {
-    var buf = std.ArrayList(u8).init(std.testing.allocator);
-    defer buf.deinit();
-    try escapeCsvField(buf.writer(), "a\r\nb");
+    var buf = std.ArrayList(u8){};
+    defer buf.deinit(std.testing.allocator);
+    try escapeCsvField(buf.writer(std.testing.allocator), "a\r\nb");
     try std.testing.expect(buf.items[0] == '"');
 }
 
@@ -1407,4 +1408,8 @@ test "parseCsvContent: very long field value" {
         allocator.free(result.rows);
     }
     try std.testing.expectEqual(@as(usize, 1000), result.rows[0][0].len);
+}
+
+comptime {
+    std.testing.refAllDeclsRecursive(@This());
 }

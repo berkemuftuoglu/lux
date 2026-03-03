@@ -1,7 +1,8 @@
 .{
-    .name = "lux",
+    .name = .lux,
+    .fingerprint = 0xb21a9feb299d728d,
     .version = "0.1.0",
-    .minimum_zig_version = "0.13.0",
+    .minimum_zig_version = "0.15.2",
     .dependencies = .{},
     .paths = .{
         "build.zig",
