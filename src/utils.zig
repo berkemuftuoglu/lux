@@ -348,6 +348,37 @@ pub fn extractJsonQuery(body: []const u8) ?[]const u8 {
     return extractJsonField(body, "query");
 }
 
+/// Read the HTTP request body, handling partial reads.
+/// Returns the body slice (may point into extra_buf or into request).
+pub fn readRequestBody(
+    stream: std.net.Stream,
+    request: []const u8,
+    extra_buf: []u8,
+    max_content_length: usize,
+) ?[]const u8 {
+    const content_length = findContentLength(request) orelse return null;
+    if (content_length > max_content_length) return null;
+
+    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return null;
+    const body_start = header_end + 4;
+    var body = request[body_start..];
+
+    if (body.len < content_length) {
+        if (content_length > extra_buf.len) return null;
+        const already_have = body.len;
+        @memcpy(extra_buf[0..already_have], body);
+        var read_so_far = already_have;
+        while (read_so_far < content_length) {
+            const n = stream.read(extra_buf[read_so_far..content_length]) catch return null;
+            if (n == 0) break;
+            read_so_far += n;
+        }
+        return extra_buf[0..read_so_far];
+    } else {
+        return body[0..content_length];
+    }
+}
+
 // Tests
 
 test "extractJsonQuery: simple query" {

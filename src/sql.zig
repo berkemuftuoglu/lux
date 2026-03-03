@@ -52,8 +52,8 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
         return;
     };
 
-    const MAX_SQL_BODY = 65536; // 64KB — enough for multi-statement scripts
-    if (content_length > MAX_SQL_BODY) {
+    const max_sql_body = 65536; // 64KB — enough for multi-statement scripts
+    if (content_length > max_sql_body) {
         try utils.sendResponse(stream, "413 Payload Too Large", "application/json", "{\"error\":\"SQL too large (max 64KB)\"}");
         return;
     }
@@ -66,7 +66,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     var body = request[body_start..];
 
     // Use heap allocation for the body buffer to support large SQL scripts
-    const extra_buf = allocator.alloc(u8, MAX_SQL_BODY) catch {
+    const extra_buf = allocator.alloc(u8, max_sql_body) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };

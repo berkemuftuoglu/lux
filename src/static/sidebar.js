@@ -136,7 +136,7 @@ async function loadTableData() {
     renderGrid();
     renderPagination();
     updateBulkBar();
-  } catch(e) { hideLoading('grid-wrap'); toast('Failed to load data', 'error'); }
+  } catch(e) { hideLoading('grid-wrap'); toast('Failed to load data: ' + e.message, 'error'); }
 }
 
 function getTableMeta(name) {

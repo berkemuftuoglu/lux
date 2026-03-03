@@ -324,7 +324,7 @@ $('fnr-preview-btn').onclick = async () => {
     $('fnr-preview').style.display = 'block';
     $('fnr-preview').textContent = data.affected_rows + ' rows will be affected';
     $('fnr-preview').style.color = data.affected_rows > 0 ? 'var(--warning)' : 'var(--text-muted)';
-  } catch(e) { toast('Preview failed', 'error'); }
+  } catch(e) { toast('Preview failed: ' + e.message, 'error'); }
 };
 
 $('fnr-ok').onclick = async () => {
@@ -344,7 +344,7 @@ $('fnr-ok').onclick = async () => {
     toast('Replaced in ' + currentTable, 'success');
     bumpJournal();
     loadTableData();
-  } catch(e) { toast('Replace failed', 'error'); }
+  } catch(e) { toast('Replace failed: ' + e.message, 'error'); }
 };
 
 $('fnr-cancel').onclick = () => { releaseFocus($('fnr-overlay')); $('fnr-overlay').classList.remove('open'); };
@@ -851,7 +851,7 @@ $('btn-truncate').onclick = async () => {
     toast('Table ' + currentTable + ' truncated', 'success');
     bumpJournal();
     loadTableData();
-  } catch(e) { toast('Truncate failed', 'error'); }
+  } catch(e) { toast('Truncate failed: ' + e.message, 'error'); }
 };
 
 // SQL Formatter
@@ -1249,7 +1249,7 @@ async function deleteSavedConnection(id) {
     await fetchJson('/api/connections/' + id, { method: 'DELETE' });
     toast('Connection removed', 'info');
     loadSavedConnections();
-  } catch(e) { toast('Failed to delete connection', 'error'); }
+  } catch(e) { toast('Failed to delete connection: ' + e.message, 'error'); }
 }
 
 $('save-conn-btn').onclick = () => {
@@ -1286,7 +1286,7 @@ $('save-conn-ok').onclick = async () => {
     $('save-conn-overlay').classList.remove('open');
     toast('Connection saved', 'success');
     loadSavedConnections();
-  } catch(e) { toast('Failed to save', 'error'); }
+  } catch(e) { toast('Failed to save: ' + e.message, 'error'); }
 };
 
 $('save-conn-cancel').onclick = () => { releaseFocus($('save-conn-overlay')); $('save-conn-overlay').classList.remove('open'); };
@@ -1519,7 +1519,7 @@ $('create-table-ok').onclick = async () => {
       toast('Table created', 'success');
       await loadSchema();
     }
-  } catch(e) { toast('Create failed', 'error'); }
+  } catch(e) { toast('Create failed: ' + e.message, 'error'); }
 };
 
 $('create-table-cancel').onclick = () => { releaseFocus($('create-table-overlay')); $('create-table-overlay').classList.remove('open'); };
@@ -1561,7 +1561,7 @@ $('reconnect-btn').onclick = async () => {
       await loadSchema();
       toast('Reconnected', 'success');
     }
-  } catch(e) { toast('Reconnect failed', 'error'); }
+  } catch(e) { toast('Reconnect failed: ' + e.message, 'error'); }
   $('reconnect-btn').textContent = 'Reconnect';
   $('reconnect-btn').disabled = false;
 };
@@ -1587,7 +1587,7 @@ async function exportSqlResults(format) {
     a.remove();
     URL.revokeObjectURL(url);
     toast('Exported as ' + format.toUpperCase(), 'success');
-  } catch(e) { toast('Export failed', 'error'); }
+  } catch(e) { toast('Export failed: ' + e.message, 'error'); }
 }
 
 // Import CSV
@@ -1619,7 +1619,7 @@ $('import-ok').onclick = async () => {
     });
     if (data.error) toast(data.error, 'error');
     else { toast('Imported ' + (data.imported || 0) + ' rows', 'success'); loadTableData(); }
-  } catch(e) { toast('Import failed', 'error'); }
+  } catch(e) { toast('Import failed: ' + e.message, 'error'); }
 };
 
 $('import-cancel').onclick = () => { releaseFocus($('import-overlay')); $('import-overlay').classList.remove('open'); };

@@ -148,12 +148,6 @@ fn handleConnection(
     stream: std.net.Stream,
     state: *ServerState,
 ) !void {
-    // Per-request arena: freed automatically after the response is sent.
-    // Handler functions use state.allocator for long-lived allocations (journal, history).
-    var arena = std.heap.ArenaAllocator.init(state.allocator);
-    defer arena.deinit();
-    _ = arena.allocator(); // available for future request-scoped allocations
-
     var buf: [max_request_size]u8 = undefined;
     var total_read: usize = 0;
 

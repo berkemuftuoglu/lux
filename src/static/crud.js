@@ -174,7 +174,7 @@ async function saveEdit() {
     setTimeout(() => td.classList.remove('saved-flash'), 500);
     toast('Updated', 'success');
     bumpJournal();
-  } catch(e) { toast('Update failed', 'error'); loadTableData(); }
+  } catch(e) { toast('Update failed: ' + e.message, 'error'); loadTableData(); }
 }
 
 // Delete Row
@@ -206,7 +206,7 @@ async function deleteRow(rowIdx) {
     });
     if (data.error) toast(data.error, 'error');
     else { toast('Row deleted from ' + currentTable, 'success'); bumpJournal(); loadTableData(); }
-  } catch(e) { toast('Delete failed', 'error'); }
+  } catch(e) { toast('Delete failed: ' + e.message, 'error'); }
 }
 
 // Insert Row (Modal)
@@ -243,7 +243,7 @@ async function submitInsert() {
     });
     if (data.error) toast(data.error, 'error');
     else { toast('Row inserted into ' + currentTable, 'success'); bumpJournal(); loadTableData(); }
-  } catch(e) { toast('Insert failed', 'error'); }
+  } catch(e) { toast('Insert failed: ' + e.message, 'error'); }
 }
 
 // Set to NULL
@@ -282,7 +282,7 @@ async function setToNull(rowIdx, colName, td) {
       toast('Set to NULL', 'success');
       bumpJournal();
     }
-  } catch(e) { toast('Update failed', 'error'); }
+  } catch(e) { toast('Update failed: ' + e.message, 'error'); }
 }
 
 // Read-Only Toggle

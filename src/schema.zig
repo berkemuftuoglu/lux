@@ -8,8 +8,8 @@ const log = std.log.scoped(.schema);
 
 const ServerState = web.ServerState;
 
-const CONNECTIONS_FILENAME = "connections.json";
-const MAX_CONNECTIONS = 100;
+const connections_filename = "connections.json";
+const max_connections = 100;
 
 const ConnectionEntry = struct {
     id: u64,
@@ -47,7 +47,6 @@ fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8,
 /// - Windows: %APPDATA%\lux\ or %USERPROFILE%\AppData\Roaming\lux\
 /// Creates the directory if it does not exist. Caller owns the returned memory.
 fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
-    const sep = comptime if (builtin.os.tag == .windows) '\\' else '/';
     const sep_str = comptime if (builtin.os.tag == .windows) "\\" else "/";
 
     // All platforms: XDG_CONFIG_HOME takes priority if set
@@ -92,17 +91,42 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
             return error.ReadFailed;
         },
     }
-    _ = sep; // suppress unused variable — sep used in format strings above
 }
 
 fn getEnvVar(key: []const u8) ?[]const u8 {
     return std.posix.getenv(key);
 }
 
+/// Free all schema-related state fields. Call before assigning new schema data.
+fn freeSchemaState(state: *web.ServerState) void {
+    const allocator = state.allocator;
+    if (state.conninfo_z) |old| allocator.free(old);
+    state.conninfo_z = null;
+    if (state.schema_text) |old| allocator.free(old);
+    state.schema_text = null;
+    if (state.schema_tables) |old| {
+        for (old) |table| {
+            for (table.columns) |col| {
+                if (col.name.len > 0) allocator.free(col.name);
+                if (col.data_type.len > 0) allocator.free(col.data_type);
+            }
+            allocator.free(table.columns);
+            if (table.name.len > 0) allocator.free(table.name);
+        }
+        allocator.free(old);
+    }
+    state.schema_tables = null;
+    if (state.enhanced_schema) |old| {
+        for (old) |*t| @constCast(t).deinit(allocator);
+        allocator.free(old);
+    }
+    state.enhanced_schema = null;
+}
+
 fn getConfigFilePath(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     const dir = try getConfigDir(allocator);
     defer allocator.free(dir);
-    const path = std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, CONNECTIONS_FILENAME }) catch return error.OutOfMemory;
+    const path = std.fmt.allocPrint(allocator, "{s}{s}", .{ dir, connections_filename }) catch return error.OutOfMemory;
     return path;
 }
 
@@ -121,7 +145,7 @@ fn readConnectionsFile(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     } else |_| {}
 
     // Backward compatibility: try CWD
-    if (std.fs.cwd().openFile(CONNECTIONS_FILENAME, .{})) |file| {
+    if (std.fs.cwd().openFile(connections_filename, .{})) |file| {
         defer file.close();
         const data = file.readToEndAlloc(allocator, 1024 * 1024) catch return error.ReadFailed;
         return data;
@@ -136,7 +160,7 @@ fn readConnectionsFile(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
 fn writeConnectionsFile(allocator: std.mem.Allocator, data: []const u8) ConnectionFileError!void {
     const config_path = getConfigFilePath(allocator) catch {
         // Fallback to CWD if XDG resolution fails
-        const file = std.fs.cwd().createFile(CONNECTIONS_FILENAME, .{ .mode = 0o600 }) catch return error.WriteFailed;
+        const file = std.fs.cwd().createFile(connections_filename, .{ .mode = 0o600 }) catch return error.WriteFailed;
         defer file.close();
         file.writeAll(data) catch return error.WriteFailed;
         return;
@@ -264,23 +288,7 @@ pub fn handleConnect(
     var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
 
     // Store connection info and schema in state (free old if any)
-    if (state.conninfo_z) |old| allocator.free(old);
-    if (state.schema_text) |old| allocator.free(old);
-    if (state.schema_tables) |old| {
-        for (old) |table| {
-            for (table.columns) |col| {
-                if (col.name.len > 0) allocator.free(col.name);
-                if (col.data_type.len > 0) allocator.free(col.data_type);
-            }
-            allocator.free(table.columns);
-            if (table.name.len > 0) allocator.free(table.name);
-        }
-        allocator.free(old);
-    }
-    if (state.enhanced_schema) |old| {
-        for (old) |*t| @constCast(t).deinit(allocator);
-        allocator.free(old);
-    }
+    freeSchemaState(state);
     state.conninfo_z = conninfo_z;
     // Store a copy of the connection string for reconnect
     if (state.last_conninfo) |old_ci| allocator.free(@constCast(old_ci));
@@ -337,23 +345,11 @@ pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
         };
         var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
 
-        // Free old state
-        if (state.schema_text) |old| allocator.free(old);
-        if (state.schema_tables) |old| {
-            for (old) |table| {
-                for (table.columns) |col| {
-                    if (col.name.len > 0) allocator.free(col.name);
-                    if (col.data_type.len > 0) allocator.free(col.data_type);
-                }
-                allocator.free(table.columns);
-                if (table.name.len > 0) allocator.free(table.name);
-            }
-            allocator.free(old);
-        }
-        if (state.enhanced_schema) |old| {
-            for (old) |*t| @constCast(t).deinit(allocator);
-            allocator.free(old);
-        }
+        // Free old state (preserve conninfo_z — we're reusing the existing connection)
+        const saved_conninfo = state.conninfo_z;
+        state.conninfo_z = null;
+        freeSchemaState(state);
+        state.conninfo_z = saved_conninfo;
 
         // Store new state
         state.schema_text = new_text;
@@ -505,23 +501,7 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
     var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
 
     // Store in state (free old)
-    if (state.conninfo_z) |old| allocator.free(old);
-    if (state.schema_text) |old| allocator.free(old);
-    if (state.schema_tables) |old| {
-        for (old) |table| {
-            for (table.columns) |col| {
-                if (col.name.len > 0) allocator.free(col.name);
-                if (col.data_type.len > 0) allocator.free(col.data_type);
-            }
-            allocator.free(table.columns);
-            if (table.name.len > 0) allocator.free(table.name);
-        }
-        allocator.free(old);
-    }
-    if (state.enhanced_schema) |old| {
-        for (old) |*t| @constCast(t).deinit(allocator);
-        allocator.free(old);
-    }
+    freeSchemaState(state);
     state.conninfo_z = conninfo_z;
     state.schema_text = schema_text;
     state.schema_tables = schema.tables;
@@ -585,7 +565,7 @@ pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState) !void {
 
 pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     var extra_buf: [1024]u8 = undefined;
-    const body = readRequestBodySimple(stream, request, &extra_buf, 1024) orelse {
+    const body = utils.readRequestBody(stream, request, &extra_buf, 1024) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
         return;
     };
@@ -861,35 +841,6 @@ pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, state: *
     };
 
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
-}
-
-fn readRequestBodySimple(
-    stream: std.net.Stream,
-    request: []const u8,
-    extra_buf: []u8,
-    max_content_length: usize,
-) ?[]const u8 {
-    const content_length = utils.findContentLength(request) orelse return null;
-    if (content_length > max_content_length) return null;
-
-    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return null;
-    const body_start = header_end + 4;
-    var body = request[body_start..];
-
-    if (body.len < content_length) {
-        if (content_length > extra_buf.len) return null;
-        const already_have = body.len;
-        @memcpy(extra_buf[0..already_have], body);
-        var read_so_far = already_have;
-        while (read_so_far < content_length) {
-            const n = stream.read(extra_buf[read_so_far..content_length]) catch return null;
-            if (n == 0) break;
-            read_so_far += n;
-        }
-        return extra_buf[0..read_so_far];
-    } else {
-        return body[0..content_length];
-    }
 }
 
 // Tests

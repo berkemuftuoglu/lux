@@ -306,7 +306,7 @@ pub const PgConnection = struct {
             var fk_table: ?[]const u8 = null;
             var fk_col: ?[]const u8 = null;
             for (fk_entries.items) |fk| {
-                if (std.mem.eql(u8, fk.table, if (current_table) |ct| ct else "") and std.mem.eql(u8, fk.column, cname)) {
+                if (std.mem.eql(u8, fk.table, current_table.?) and std.mem.eql(u8, fk.column, cname)) {
                     fk_table = allocator.dupe(u8, fk.target_table) catch return error.OutOfMemory;
                     fk_col = allocator.dupe(u8, fk.target_column) catch return error.OutOfMemory;
                     break;
@@ -316,7 +316,7 @@ pub const PgConnection = struct {
             // ENUM lookup
             var enum_vals: ?[][]const u8 = null;
             for (enum_entries.items) |entry| {
-                if (std.mem.eql(u8, entry.key.table, if (current_table) |ct| ct else "") and std.mem.eql(u8, entry.key.column, cname)) {
+                if (std.mem.eql(u8, entry.key.table, current_table.?) and std.mem.eql(u8, entry.key.column, cname)) {
                     // Dupe the values for ownership
                     const vals = allocator.alloc([]const u8, entry.values.items.len) catch return error.OutOfMemory;
                     for (entry.values.items, 0..) |v, vi| {
@@ -754,7 +754,7 @@ pub fn buildEnhancedSchemaFromRows(
         var fk_col_owned: ?[]const u8 = null;
         errdefer if (fk_col_owned) |tc| allocator.free(tc);
         for (fk_entries.items) |fk| {
-            if (std.mem.eql(u8, fk.table, if (current_table) |ct| ct else "") and std.mem.eql(u8, fk.column, cname)) {
+            if (std.mem.eql(u8, fk.table, current_table.?) and std.mem.eql(u8, fk.column, cname)) {
                 fk_table_owned = allocator.dupe(u8, fk.target_table) catch return error.OutOfMemory;
                 fk_col_owned = allocator.dupe(u8, fk.target_column) catch return error.OutOfMemory;
                 break;
@@ -768,7 +768,7 @@ pub fn buildEnhancedSchemaFromRows(
             allocator.free(vals);
         };
         enum_lookup: for (enum_entries.items) |entry| {
-            if (std.mem.eql(u8, entry.key.table, if (current_table) |ct| ct else "") and std.mem.eql(u8, entry.key.column, cname)) {
+            if (std.mem.eql(u8, entry.key.table, current_table.?) and std.mem.eql(u8, entry.key.column, cname)) {
                 const n = entry.values.items.len;
                 const vals = allocator.alloc([]const u8, n) catch return error.OutOfMemory;
                 var vals_filled: usize = 0;
