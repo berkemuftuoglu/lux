@@ -439,7 +439,6 @@ fn extractResult(allocator: std.mem.Allocator, res: *c.PGresult) PgError!QueryRe
     };
 }
 
-/// Get a raw string pointer from a PGresult without allocating (valid until PQclear).
 fn getStringFieldNoAlloc(res: *c.PGresult, row: usize, col_idx: usize) []const u8 {
     if (c.PQgetisnull(res, @intCast(row), @intCast(col_idx)) != 0) return "";
     const val_ptr = c.PQgetvalue(res, @intCast(row), @intCast(col_idx));

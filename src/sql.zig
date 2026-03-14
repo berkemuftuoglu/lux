@@ -167,7 +167,6 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     try crud.sendQueryResultJson(allocator, stream, &result);
 }
 
-/// Handle POST /api/sql/preview — wrap query in BEGIN/ROLLBACK to preview effects.
 pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -385,7 +384,6 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle GET /api/history — return recent query history entries (newest first).
 pub fn handleHistory(stream: std.net.Stream, state: *ServerState) !void {
     var arena = std.heap.ArenaAllocator.init(state.allocator);
     defer arena.deinit();

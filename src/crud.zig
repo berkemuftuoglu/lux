@@ -326,8 +326,6 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream,
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle GET /api/tables/:name/data — return paginated table data.
-/// Path format: /api/tables/<name>/data or /api/tables/<name>/data?limit=N&offset=N
 pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -1034,7 +1032,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle GET /api/tables/:name/fk-lookup?column=col&search=text&limit=20
 pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");

@@ -8,7 +8,6 @@ const sql_mod = @import("sql.zig");
 
 const log = std.log.scoped(.web);
 
-/// Atomic flag set by SIGINT/SIGTERM to trigger graceful shutdown.
 var shutdown_requested = std.atomic.Value(bool).init(false);
 
 fn handleSignal(_: c_int) callconv(.c) void {
@@ -81,7 +80,6 @@ pub const ServerState = struct {
     }
 };
 
-/// Start the web server and block forever serving requests.
 pub fn serve(
     state: *ServerState,
     port: u16,

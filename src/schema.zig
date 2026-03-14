@@ -99,7 +99,6 @@ fn getEnvVar(key: []const u8) ?[]const u8 {
     return std.posix.getenv(key);
 }
 
-/// Free all schema-related state fields. Call before assigning new schema data.
 fn freeSchemaState(state: *web.ServerState) void {
     const allocator = state.allocator;
     if (state.conninfo_z) |old| allocator.free(old);
@@ -323,9 +322,6 @@ pub fn handleConnect(
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-/// Handle GET /api/schema — return database schema as JSON.
-/// Re-fetches schema from PostgreSQL to ensure fresh data.
-/// Falls back to cached data if the refresh fails.
 pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");

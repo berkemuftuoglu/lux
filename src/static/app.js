@@ -13,7 +13,7 @@ function escHtml(s) {
 	d.textContent = s;
 	return d.innerHTML;
 }
-function _prettyName(name) {
+function prettyName(name) {
 	return name.replace(/_/g, ' ').replace(/\bid\b/gi, 'ID');
 }
 function copyToClipboard(text) {
