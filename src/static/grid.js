@@ -4,7 +4,7 @@ function displayCols() {
 		: currentColumns;
 }
 
-function _renderGrid() {
+function renderGrid() {
 	const meta = getTableMeta(currentTable);
 	const colMeta = {};
 	if (meta) meta.columns.forEach((c) => (colMeta[c.name] = c));
@@ -274,7 +274,7 @@ function updateCellFocus() {
 	}
 }
 
-function _renderPagination() {
+function renderPagination() {
 	if (totalRows <= pageLimit && pageOffset === 0) {
 		$('pagination').classList.add('hidden');
 		return;

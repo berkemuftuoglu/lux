@@ -1,5 +1,5 @@
 // Schema
-async function _loadSchema() {
+async function loadSchema() {
 	try {
 		schemaData = await fetchJson('/api/schema');
 		renderSidebar();
@@ -179,12 +179,12 @@ async function loadTableData() {
 	}
 }
 
-function _getTableMeta(name) {
+function getTableMeta(name) {
 	if (!schemaData || !schemaData.tables) return null;
 	return schemaData.tables.find((t) => t.name === name) || null;
 }
 
-function _isNumericType(type) {
+function isNumericType(type) {
 	if (!type) return false;
 	const t = type.toLowerCase();
 	return (
@@ -200,10 +200,10 @@ function _isNumericType(type) {
 	);
 }
 
-function _isBoolType(type) {
+function isBoolType(type) {
 	return type && type.toLowerCase() === 'boolean';
 }
-function _isDateType(type) {
+function isDateType(type) {
 	if (!type) return false;
 	const t = type.toLowerCase();
 	return (
@@ -213,30 +213,30 @@ function _isDateType(type) {
 		t.includes('interval')
 	);
 }
-function _isJsonType(type) {
+function isJsonType(type) {
 	if (!type) return false;
 	const t = type.toLowerCase();
 	return t === 'json' || t === 'jsonb';
 }
-function _isUuidType(type) {
+function isUuidType(type) {
 	return type && type.toLowerCase() === 'uuid';
 }
-function _isInetType(type) {
+function isInetType(type) {
 	if (!type) return false;
 	const t = type.toLowerCase();
 	return t === 'inet' || t === 'cidr' || t === 'macaddr';
 }
-function _isArrayType(type) {
+function isArrayType(type) {
 	if (!type) return false;
 	return type.includes('[]') || type.toLowerCase().startsWith('array');
 }
-function _isEnumType(type, colMeta) {
+function isEnumType(type, colMeta) {
 	if (!type) return false;
 	if (colMeta?.enum_values && colMeta.enum_values.length > 0) return true;
 	return type.toLowerCase() === 'user-defined';
 }
 // Map enum values to semantic color classes for pill rendering
-function _enumPillClass(val) {
+function enumPillClass(val) {
 	const v = val.toLowerCase();
 	// Status-like: done/complete/closed/resolved -> success
 	if (/done|complete|closed|resolved|active|enabled/.test(v))

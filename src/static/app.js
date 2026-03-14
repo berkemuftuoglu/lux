@@ -73,30 +73,31 @@ else setTheme('dark');
 
 // State
 let schemaData = null;
-const currentTable = null;
-const currentColumns = [];
-const currentRows = [];
-const _currentPkColumns = [];
-const _currentPkMode = 'column';
-const readOnlyMode = false;
+let currentTable = null;
+let currentColumns = [];
+let currentRows = [];
+let currentPkColumns = [];
+let currentPkMode = 'column';
+let readOnlyMode = false;
 let dbConnected = false;
-const _pageOffset = 0;
-const _pageLimit = 100;
-const _totalRows = 0;
-const _sortCol = null;
-const _sortDir = 'asc';
-const editingCell = null;
-const _journalCount = 0;
-const _erZoom = 1;
-const _erPanX = 0,
-	_erPanY = 0;
+let pageOffset = 0;
+let pageLimit = 100;
+let totalRows = 0;
+let sortCol = null;
+let sortDir = 'asc';
+let editingCell = null;
+let journalCount = 0;
+let erZoom = 1;
+let erPanX = 0,
+	erPanY = 0;
 let focusRow = -1,
 	focusCol = -1;
-const _columnFilters = {};
+let columnFilters = {};
 const columnWidths = {};
-const selectedRows = new Set();
-let _lastSelectedRow = -1;
+let selectedRows = new Set();
+let lastSelectedRow = -1;
 let lastSqlQuery = '';
+let healthCheckInterval = null;
 
 // Toast
 function toast(msg, type) {
@@ -357,7 +358,7 @@ $('btn-add-row').onclick = () => {
 	trapFocus($('insert-overlay'));
 };
 
-$('insert-ok').onclick = submitInsert;
+$('insert-ok').onclick = () => submitInsert();
 $('insert-cancel').onclick = () => {
 	releaseFocus($('insert-overlay'));
 	$('insert-overlay').classList.remove('open');
@@ -1237,8 +1238,8 @@ $('btn-stats').onclick = async () => {
 		tip.style.top = `${rect.bottom + 4}px`;
 		tip.style.right = `${window.innerWidth - rect.right}px`;
 		tip.innerHTML =
-			'<div class="stat-row"><span class="stat-label">Rows (est.)</span><span class="stat-val">' +
-			escHtml(String(data.row_estimate || '?')) +
+			'<div class="stat-row"><span class="stat-label">Rows</span><span class="stat-val">' +
+			escHtml(String(data.row_count ?? '?')) +
 			'</span></div>' +
 			'<div class="stat-row"><span class="stat-label">Table size</span><span class="stat-val">' +
 			escHtml(data.table_size || '?') +
@@ -1683,7 +1684,7 @@ document.addEventListener('keydown', (e) => {
 		}
 		if (selectedRows.size > 0) {
 			selectedRows.clear();
-			_lastSelectedRow = -1;
+			lastSelectedRow = -1;
 			updateRowSelection();
 		} else {
 			focusRow = -1;
@@ -2204,7 +2205,6 @@ $('create-table-overlay').onclick = (e) => {
 };
 
 // Health Check & Reconnect
-let healthCheckInterval = null;
 
 function startHealthCheck() {
 	if (healthCheckInterval) clearInterval(healthCheckInterval);

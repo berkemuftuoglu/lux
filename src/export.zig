@@ -884,7 +884,11 @@ pub fn handleTableStats(
     const sw = sql_buf.writer(allocator);
     try sw.writeAll(
         "SELECT " ++
-            "COALESCE(c.reltuples, 0)::bigint AS row_estimate, " ++
+            "(SELECT count(*) FROM \"",
+    );
+    try sw.writeAll(escaped_name);
+    try sw.writeAll(
+        "\") AS row_count, " ++
             "CASE WHEN c.relkind = 'v' THEN 'N/A (view)' ELSE pg_size_pretty(pg_relation_size(c.oid)) END AS table_size, " ++
             "CASE WHEN c.relkind = 'v' THEN 'N/A (view)' ELSE pg_size_pretty(pg_indexes_size(c.oid)) END AS index_size, " ++
             "CASE WHEN c.relkind = 'v' THEN 'N/A (view)' ELSE pg_size_pretty(pg_total_relation_size(c.oid)) END AS total_size " ++

@@ -78,7 +78,7 @@ function hideFkDropdown() {
 }
 
 // Inline Cell Editing
-function _startEdit(td) {
+function startEdit(td) {
 	if (readOnlyMode) {
 		toast('Read-only mode', 'error');
 		return;
@@ -237,7 +237,7 @@ async function saveEdit() {
 }
 
 // Delete Row
-async function _deleteRow(rowIdx) {
+async function deleteRow(rowIdx) {
 	if (readOnlyMode) {
 		toast('Read-only mode', 'error');
 		return;
@@ -289,7 +289,7 @@ async function _deleteRow(rowIdx) {
 }
 
 // Insert Row (Modal)
-async function _submitInsert() {
+async function submitInsert() {
 	const meta = getTableMeta(currentTable);
 	if (!meta) return;
 	const values = {};
@@ -335,7 +335,7 @@ async function _submitInsert() {
 }
 
 // Set to NULL
-async function _setToNull(rowIdx, colName, td) {
+async function setToNull(rowIdx, colName, td) {
 	if (readOnlyMode) {
 		toast('Read-only mode', 'error');
 		return;
@@ -394,7 +394,7 @@ $('btn-readonly').onclick = async () => {
 	}
 };
 
-async function _loadReadOnly() {
+async function loadReadOnly() {
 	try {
 		const data = await fetchJson('/api/settings/read-only');
 		readOnlyMode = data.read_only;
@@ -416,7 +416,7 @@ function bumpJournal() {
 	badge.textContent = journalCount;
 	badge.classList.add('show');
 }
-function _clearJournalBadge() {
+function clearJournalBadge() {
 	journalCount = 0;
 	$('journal-badge').classList.remove('show');
 }
