@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const postgres = @import("postgres.zig");
 const utils = @import("utils.zig");
 const crud = @import("crud.zig");
@@ -20,6 +21,21 @@ const app_js = @embedFile("static/app.js");
 const grid_js = @embedFile("static/grid.js");
 const sidebar_js = @embedFile("static/sidebar.js");
 const crud_js = @embedFile("static/crud.js");
+
+const StaticResult = struct { data: []const u8, is_heap: bool };
+
+/// In Debug builds, reads the file fresh from disk on each request (dev hot-reload).
+/// In release builds, returns the compile-time embedded bytes.
+/// Falls back to embedded if the disk file is missing (wrong CWD, deleted file).
+fn readStaticFile(allocator: std.mem.Allocator, disk_path: []const u8, embedded: []const u8) StaticResult {
+    if (comptime builtin.mode != .Debug) return .{ .data = embedded, .is_heap = false };
+    // Debug: read from disk for hot-reload
+    const data = std.fs.cwd().readFileAlloc(allocator, disk_path, 4 * 1024 * 1024) catch |err| {
+        log.warn("dev: could not read '{s}' ({s}), using embedded", .{ disk_path, @errorName(err) });
+        return .{ .data = embedded, .is_heap = false };
+    };
+    return .{ .data = data, .is_heap = true };
+}
 
 pub const ChangeEntry = struct {
     id: u64,
@@ -102,6 +118,10 @@ pub fn serve(
 
     log.info("Lux web UI running at http://{s}:{d}", .{ bind_addr, port });
     log.info("open this URL in your browser, press Ctrl-C to stop", .{});
+    if (comptime builtin.mode == .Debug) {
+        log.warn("DEV MODE: static assets served from disk (src/static/), not embedded", .{});
+        log.warn("edit CSS/JS/HTML and refresh browser — no rebuild needed", .{});
+    }
 
     // Install signal handlers for graceful shutdown
     var sa = std.posix.Sigaction{
@@ -179,19 +199,31 @@ fn handleConnection(
     }
 
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/")) {
-        try utils.sendHtmlResponseWithCsp(stream, index_html);
+        const r = readStaticFile(state.allocator, "src/static/index.html", index_html);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendHtmlResponseWithCsp(stream, r.data);
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/favicon.ico")) {
         try utils.sendResponse(stream, "204 No Content", "image/x-icon", "");
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/styles.css")) {
-        try utils.sendResponse(stream, "200 OK", "text/css", styles_css);
+        const r = readStaticFile(state.allocator, "src/static/styles.css", styles_css);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "text/css", r.data);
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/app.js")) {
-        try utils.sendResponse(stream, "200 OK", "application/javascript", app_js);
+        const r = readStaticFile(state.allocator, "src/static/app.js", app_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/grid.js")) {
-        try utils.sendResponse(stream, "200 OK", "application/javascript", grid_js);
+        const r = readStaticFile(state.allocator, "src/static/grid.js", grid_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/sidebar.js")) {
-        try utils.sendResponse(stream, "200 OK", "application/javascript", sidebar_js);
+        const r = readStaticFile(state.allocator, "src/static/sidebar.js", sidebar_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/crud.js")) {
-        try utils.sendResponse(stream, "200 OK", "application/javascript", crud_js);
+        const r = readStaticFile(state.allocator, "src/static/crud.js", crud_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
     } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/connect")) {
         try schema_mod.handleConnect(stream, request, state);
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/api/schema")) {
@@ -258,6 +290,45 @@ test "ServerState: init defaults" {
     try std.testing.expect(!state.hasDbConnection());
     try std.testing.expect(state.schema_text == null);
     try std.testing.expect(!state.read_only);
+}
+
+// readStaticFile tests
+
+test "readStaticFile: disk read succeeds returns is_heap=true" {
+    // Only meaningful in debug builds (which is how `zig build test` runs)
+    if (comptime builtin.mode != .Debug) return;
+
+    const allocator = std.testing.allocator;
+    const content = "hello from disk";
+
+    // Write a temp file
+    const tmp_path = "/tmp/lux_test_static_file.txt";
+    {
+        const f = try std.fs.createFileAbsolute(tmp_path, .{});
+        defer f.close();
+        try f.writeAll(content);
+    }
+    defer std.fs.deleteFileAbsolute(tmp_path) catch {};
+
+    const embedded: []const u8 = "embedded fallback";
+    const result = readStaticFile(allocator, tmp_path, embedded);
+    defer if (result.is_heap) allocator.free(result.data);
+
+    try std.testing.expect(result.is_heap);
+    try std.testing.expectEqualStrings(content, result.data);
+}
+
+test "readStaticFile: missing disk file falls back to embedded" {
+    if (comptime builtin.mode != .Debug) return;
+
+    const allocator = std.testing.allocator;
+    const embedded: []const u8 = "embedded fallback";
+
+    const result = readStaticFile(allocator, "/tmp/lux_nonexistent_file_xyz.txt", embedded);
+    defer if (result.is_heap) allocator.free(result.data);
+
+    try std.testing.expect(!result.is_heap);
+    try std.testing.expectEqualStrings(embedded, result.data);
 }
 
 comptime {
