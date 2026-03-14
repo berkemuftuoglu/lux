@@ -1,3 +1,6 @@
+# Node modules (Biome dev dependency)
+node_modules/
+
 # Build artifacts
 .zig-cache/
 zig-out/

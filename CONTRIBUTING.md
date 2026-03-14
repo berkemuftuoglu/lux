@@ -10,10 +10,28 @@ cd lux
 zig build test      # verify everything works
 ```
 
+### Linter setup
+
+`zig build lint` runs all linters in one command — Zig and frontend:
+
+```
+zig build lint
+  ├── zlint        (Zig linting)
+  ├── zig fmt      (Zig formatting)
+  └── biome check  (JS/CSS linting + formatting)
+```
+
+Both external tools must be installed or the lint gate will fail:
+
 ```bash
-# Optional: install zlint for the lint gate
-# Download prebuilt binary from https://github.com/DonIsaac/zlint/releases
-# and place it on your PATH.
+# 1. zlint — Zig linter
+#    https://github.com/DonIsaac/zlint/releases
+#    Download the prebuilt binary and place it on your PATH.
+
+# 2. Biome — JS/CSS linter and formatter
+#    https://github.com/biomejs/biome/releases
+#    Installed as an npm dev dependency — just run:
+npm install
 ```
 
 ## Build Gates
@@ -23,7 +41,7 @@ Every change must pass all three gates before it's considered done:
 ```bash
 zig build test                      # all tests pass
 zig build -Doptimize=ReleaseSafe    # release build succeeds
-zig build lint                      # zlint + format check
+zig build lint                      # zlint + zig fmt + biome (see above)
 ```
 
 ## Code Style
