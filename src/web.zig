@@ -1,11 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const postgres = @import("postgres.zig");
-const utils = @import("utils.zig");
-const crud = @import("crud.zig");
-const schema_mod = @import("schema.zig");
-const export_mod = @import("export.zig");
-const sql_mod = @import("sql.zig");
+const postgres = @import("postgres");
+const utils = @import("utils");
+const crud = @import("crud");
+const schema_mod = @import("schema");
+const export_mod = @import("export");
+const sql_mod = @import("sql");
 
 const log = std.log.scoped(.web);
 
@@ -16,11 +16,20 @@ fn handleSignal(_: c_int) callconv(.c) void {
 }
 
 const index_html = @embedFile("static/index.html");
-const styles_css = @embedFile("static/styles.css");
-const app_js = @embedFile("static/app.js");
-const grid_js = @embedFile("static/grid.js");
-const sidebar_js = @embedFile("static/sidebar.js");
-const crud_js = @embedFile("static/crud.js");
+const styles_css = @embedFile("static/css/styles.css");
+const state_js = @embedFile("static/js/state.js");
+const utils_js = @embedFile("static/js/utils.js");
+const connection_js = @embedFile("static/js/connection.js");
+const sql_tabs_js = @embedFile("static/js/sql-tabs.js");
+const sql_js_file = @embedFile("static/js/sql.js");
+const saved_queries_js = @embedFile("static/js/saved-queries.js");
+const cmd_palette_js = @embedFile("static/js/cmd-palette.js");
+const table_create_js = @embedFile("static/js/table-create.js");
+const table_ops_js = @embedFile("static/js/table-ops.js");
+const app_js = @embedFile("static/js/app.js");
+const grid_js = @embedFile("static/js/grid.js");
+const sidebar_js = @embedFile("static/js/sidebar.js");
+const crud_js = @embedFile("static/js/crud.js");
 
 const StaticResult = struct { data: []const u8, is_heap: bool };
 
@@ -204,24 +213,60 @@ fn handleConnection(
         try utils.sendHtmlResponseWithCsp(stream, r.data);
     } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/favicon.ico")) {
         try utils.sendResponse(stream, "204 No Content", "image/x-icon", "");
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/styles.css")) {
-        const r = readStaticFile(state.allocator, "src/static/styles.css", styles_css);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/css/styles.css")) {
+        const r = readStaticFile(state.allocator, "src/static/css/styles.css", styles_css);
         defer if (r.is_heap) state.allocator.free(r.data);
         try utils.sendResponse(stream, "200 OK", "text/css", r.data);
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/app.js")) {
-        const r = readStaticFile(state.allocator, "src/static/app.js", app_js);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/state.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/state.js", state_js);
         defer if (r.is_heap) state.allocator.free(r.data);
         try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/grid.js")) {
-        const r = readStaticFile(state.allocator, "src/static/grid.js", grid_js);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/utils.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/utils.js", utils_js);
         defer if (r.is_heap) state.allocator.free(r.data);
         try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/sidebar.js")) {
-        const r = readStaticFile(state.allocator, "src/static/sidebar.js", sidebar_js);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/connection.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/connection.js", connection_js);
         defer if (r.is_heap) state.allocator.free(r.data);
         try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
-    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/crud.js")) {
-        const r = readStaticFile(state.allocator, "src/static/crud.js", crud_js);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/sql-tabs.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/sql-tabs.js", sql_tabs_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/sql.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/sql.js", sql_js_file);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/saved-queries.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/saved-queries.js", saved_queries_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/cmd-palette.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/cmd-palette.js", cmd_palette_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/table-create.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/table-create.js", table_create_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/table-ops.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/table-ops.js", table_ops_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/app.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/app.js", app_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/grid.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/grid.js", grid_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/sidebar.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/sidebar.js", sidebar_js);
+        defer if (r.is_heap) state.allocator.free(r.data);
+        try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
+    } else if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/js/crud.js")) {
+        const r = readStaticFile(state.allocator, "src/static/js/crud.js", crud_js);
         defer if (r.is_heap) state.allocator.free(r.data);
         try utils.sendResponse(stream, "200 OK", "application/javascript", r.data);
     } else if (std.mem.eql(u8, method, "POST") and std.mem.eql(u8, path, "/api/connect")) {

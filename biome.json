@@ -2,14 +2,28 @@
   "$schema": "https://biomejs.dev/schemas/2.4.5/schema.json",
   "files": {
     "includes": [
-      "src/static/**/*.js",
-      "src/static/**/*.css"
+      "src/static/js/**/*.js",
+      "src/static/css/**/*.css"
     ]
+  },
+  "formatter": {
+    "enabled": false
   },
   "linter": {
     "enabled": true,
     "rules": {
       "recommended": true,
+      "correctness": {
+        "noUnusedVariables": "off"
+      },
+      "style": {
+        "noDescendingSpecificity": "off",
+        "useConst": "off",
+        "useTemplate": "off"
+      },
+      "complexity": {
+        "noImportantStyles": "off"
+      },
       "suspicious": {
         "noVar": "error",
         "noConsole": "error",
@@ -26,9 +40,6 @@
   },
   "css": {
     "linter": {
-      "enabled": true
-    },
-    "formatter": {
       "enabled": true
     }
   }

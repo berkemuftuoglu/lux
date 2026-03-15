@@ -1,6 +1,6 @@
 const std = @import("std");
-const web = @import("web.zig");
-const postgres = @import("postgres.zig");
+const web = @import("web");
+const postgres = @import("postgres");
 
 pub const std_options: std.Options = .{
     .log_level = .info,

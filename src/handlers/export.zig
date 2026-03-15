@@ -1,8 +1,8 @@
 const std = @import("std");
-const postgres = @import("postgres.zig");
-const utils = @import("utils.zig");
-const web = @import("web.zig");
-const crud = @import("crud.zig");
+const postgres = @import("postgres");
+const utils = @import("utils");
+const web = @import("web");
+const crud = @import("crud");
 
 const ServerState = web.ServerState;
 
@@ -435,7 +435,7 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *Serv
     }
 
     // Block write operations in read-only mode
-    const sql_guard = @import("sql_guard.zig");
+    const sql_guard = @import("sql_guard");
     if (state.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
         try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to export write operations.\"}");
         return;

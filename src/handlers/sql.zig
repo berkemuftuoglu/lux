@@ -1,9 +1,9 @@
 const std = @import("std");
-const postgres = @import("postgres.zig");
-const utils = @import("utils.zig");
-const sql_guard = @import("sql_guard.zig");
-const web = @import("web.zig");
-const crud = @import("crud.zig");
+const postgres = @import("postgres");
+const utils = @import("utils");
+const sql_guard = @import("sql_guard");
+const web = @import("web");
+const crud = @import("crud");
 
 const log = std.log.scoped(.sql);
 

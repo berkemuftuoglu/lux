@@ -5,14 +5,93 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // --- Named modules (cross-directory imports) ---
+    const mod_utils = b.createModule(.{
+        .root_source_file = b.path("src/lib/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mod_sql_guard = b.createModule(.{
+        .root_source_file = b.path("src/lib/sql_guard.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mod_postgres = b.createModule(.{
+        .root_source_file = b.path("src/server/postgres.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // web.zig depends on utils, postgres, crud, schema, export, sql
+    // (handlers depend on web, so web is declared after handlers below via forward ref)
+    // We declare web + handlers together, then wire dependencies.
+
+    const mod_crud = b.createModule(.{
+        .root_source_file = b.path("src/handlers/crud.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mod_schema = b.createModule(.{
+        .root_source_file = b.path("src/handlers/schema.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mod_export = b.createModule(.{
+        .root_source_file = b.path("src/handlers/export.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mod_sql = b.createModule(.{
+        .root_source_file = b.path("src/handlers/sql.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mod_web = b.createModule(.{
+        .root_source_file = b.path("src/web.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mod_main = b.createModule(.{
+        .root_source_file = b.path("src/server/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // Wire module dependencies
+    mod_crud.addImport("postgres", mod_postgres);
+    mod_crud.addImport("utils", mod_utils);
+    mod_crud.addImport("web", mod_web);
+
+    mod_schema.addImport("postgres", mod_postgres);
+    mod_schema.addImport("utils", mod_utils);
+    mod_schema.addImport("web", mod_web);
+
+    mod_export.addImport("postgres", mod_postgres);
+    mod_export.addImport("utils", mod_utils);
+    mod_export.addImport("web", mod_web);
+    mod_export.addImport("crud", mod_crud);
+    mod_export.addImport("sql_guard", mod_sql_guard);
+
+    mod_sql.addImport("postgres", mod_postgres);
+    mod_sql.addImport("utils", mod_utils);
+    mod_sql.addImport("sql_guard", mod_sql_guard);
+    mod_sql.addImport("web", mod_web);
+    mod_sql.addImport("crud", mod_crud);
+
+    mod_web.addImport("postgres", mod_postgres);
+    mod_web.addImport("utils", mod_utils);
+    mod_web.addImport("crud", mod_crud);
+    mod_web.addImport("schema", mod_schema);
+    mod_web.addImport("export", mod_export);
+    mod_web.addImport("sql", mod_sql);
+
+    mod_main.addImport("web", mod_web);
+    mod_main.addImport("postgres", mod_postgres);
+
     // --- Main executable ---
     const exe = b.addExecutable(.{
         .name = "lux",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = mod_main,
     });
     addPostgres(exe);
     b.installArtifact(exe);
@@ -28,29 +107,20 @@ pub fn build(b: *std.Build) void {
 
     // --- Test step ---
     const test_step = b.step("test", "Run unit tests");
-    const test_files = [_][]const u8{
-        "src/main.zig",
-        "src/web.zig",
-        "src/postgres.zig",
-        "src/utils.zig",
-        "src/sql_guard.zig",
-        "src/crud.zig",
-        "src/schema.zig",
-        "src/export.zig",
-        "src/sql.zig",
-    };
-    for (test_files) |source| {
-        addTest(b, test_step, source, target, optimize);
-    }
+    addTestMod(b, test_step, mod_main, target, optimize);
+    addTestMod(b, test_step, mod_web, target, optimize);
+    addTestMod(b, test_step, mod_postgres, target, optimize);
+    addTestMod(b, test_step, mod_utils, target, optimize);
+    addTestMod(b, test_step, mod_sql_guard, target, optimize);
+    addTestMod(b, test_step, mod_crud, target, optimize);
+    addTestMod(b, test_step, mod_schema, target, optimize);
+    addTestMod(b, test_step, mod_export, target, optimize);
+    addTestMod(b, test_step, mod_sql, target, optimize);
 
     // --- Check step (ZLS build-on-save, compile without linking) ---
     const check_exe = b.addExecutable(.{
         .name = "lux",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = mod_main,
     });
     addPostgres(check_exe);
     const check_step = b.step("check", "Check compilation without linking");
@@ -63,7 +133,7 @@ pub fn build(b: *std.Build) void {
     const lint_step = b.step("lint", "Run zlint, format check, and Biome");
 
     const run_zlint = b.addSystemCommand(&.{
-        "bash", "-c", "find src -name '*.zig' | zlint --stdin",
+        "bash", "-c", "find src/server src/handlers src/lib -name '*.zig' | zlint --stdin",
     });
     run_zlint.stdio = .inherit;
     lint_step.dependOn(&run_zlint.step);
@@ -82,20 +152,18 @@ pub fn build(b: *std.Build) void {
     lint_step.dependOn(&run_biome.step);
 }
 
-/// Add a test compilation for a single source module.
-fn addTest(
+/// Add a test compilation for a module.
+fn addTestMod(
     b: *std.Build,
     test_step: *std.Build.Step,
-    source: []const u8,
+    module: *std.Build.Module,
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) void {
+    _ = target;
+    _ = optimize;
     const unit_test = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path(source),
-            .target = target,
-            .optimize = optimize,
-        }),
+        .root_module = module,
     });
     addPostgres(unit_test);
     const run_test = b.addRunArtifact(unit_test);

@@ -1,4 +1,42 @@
-/* Theme Variables */
+/* ==========================================================================
+   TABLE OF CONTENTS
+   ==========================================================================
+   1.  Variables & Custom Properties
+   2.  Reset & Base Styles
+   3.  Layout (Header, Main)
+   4.  Sidebar
+   5.  Tab Bar & Panels
+   6.  Toolbar
+   7.  Data Grid
+   8.  Cell Type Rendering
+   9.  Column Filters, Resize & Keyboard Navigation
+   10. Inline Editing & FK Autocomplete
+   11. Pagination
+   12. SQL Editor
+   13. SQL Autocomplete
+   14. ER Diagram
+   15. Journal
+   16. Status Bar
+   17. Modals (Base + Specific)
+   18. Toast Notifications
+   19. Context Menu
+   20. Multi-row Select & Bulk Actions
+   21. Loading Spinner
+   22. Resizable Panels
+   23. Connection Manager
+   24. SQL Tabs
+   25. Command Palette
+   26. Welcome Screen
+   27. Data Type Colorization
+   28. Reconnect Banner & Connection Stripe
+   29. Scrollbars & Utilities
+   30. Accessibility & Focus Indicators
+   31. Mobile & Responsive
+   ========================================================================== */
+
+/* ==========================================================================
+   1. VARIABLES & CUSTOM PROPERTIES
+   ========================================================================== */
 :root {
 	--font-ui:
 		-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
@@ -124,7 +162,9 @@
 	color-scheme: light;
 }
 
-/* Reset & Base */
+/* ==========================================================================
+   2. RESET & BASE STYLES
+   ========================================================================== */
 *,
 *::before,
 *::after {
@@ -166,7 +206,9 @@ body {
 	background: var(--border-focus);
 }
 
-/* Header */
+/* ==========================================================================
+   3. LAYOUT (HEADER, MAIN)
+   ========================================================================== */
 .header {
 	height: 48px;
 	background: var(--bg-surface);
@@ -275,7 +317,9 @@ body {
 	overflow: hidden;
 }
 
-/* Sidebar */
+/* ==========================================================================
+   4. SIDEBAR
+   ========================================================================== */
 .sidebar {
 	width: 260px;
 	min-width: 200px;
@@ -595,7 +639,7 @@ body {
 	opacity: 0.15;
 }
 
-/* Content */
+/* Content (sub-section within Sidebar) */
 .content {
 	flex: 1;
 	display: flex;
@@ -605,7 +649,9 @@ body {
 	transition: background var(--transition);
 }
 
-/* Tab Bar */
+/* ==========================================================================
+   5. TAB BAR & PANELS
+   ========================================================================== */
 .tab-bar {
 	height: 36px;
 	background: var(--bg-surface);
@@ -706,7 +752,9 @@ body {
 	animation: tabFadeIn 0.15s ease-out;
 }
 
-/* Toolbar */
+/* ==========================================================================
+   6. TOOLBAR
+   ========================================================================== */
 .toolbar {
 	height: 40px;
 	background: var(--bg-surface);
@@ -797,7 +845,9 @@ body {
 	margin: 0 2px;
 }
 
-/* Data Grid */
+/* ==========================================================================
+   7. DATA GRID
+   ========================================================================== */
 .grid-wrap {
 	flex: 1;
 	overflow: auto;
@@ -916,6 +966,10 @@ body {
 	font-weight: 500;
 	letter-spacing: 0.04em;
 }
+
+/* ==========================================================================
+   8. CELL TYPE RENDERING
+   ========================================================================== */
 
 /* Numbers — tabular, right-aligned, slightly dimmer */
 .grid tbody td.num-val {
@@ -1094,6 +1148,10 @@ body {
 	color: var(--error);
 }
 
+/* ==========================================================================
+   9. COLUMN FILTERS, RESIZE & KEYBOARD NAVIGATION
+   ========================================================================== */
+
 /* Column filter row */
 .grid thead tr.filter-row th {
 	height: 28px;
@@ -1247,6 +1305,10 @@ body {
 	color: var(--success);
 }
 
+/* ==========================================================================
+   10. INLINE EDITING & FK AUTOCOMPLETE
+   ========================================================================== */
+
 /* Inline cell editing */
 .grid tbody td.editing {
 	padding: 0;
@@ -1358,7 +1420,9 @@ body {
 	opacity: 0.18;
 }
 
-/* Pagination */
+/* ==========================================================================
+   11. PAGINATION
+   ========================================================================== */
 .pagination {
 	height: 32px;
 	background: var(--bg-surface);
@@ -1402,7 +1466,9 @@ body {
 	cursor: not-allowed;
 }
 
-/* SQL Editor */
+/* ==========================================================================
+   12. SQL EDITOR
+   ========================================================================== */
 .sql-area {
 	display: flex;
 	flex-direction: column;
@@ -1492,7 +1558,9 @@ body {
 	overflow: auto;
 }
 
-/* SQL Autocomplete */
+/* ==========================================================================
+   13. SQL AUTOCOMPLETE
+   ========================================================================== */
 .sql-autocomplete {
 	display: none;
 	position: absolute;
@@ -1585,7 +1653,9 @@ body {
 	font-family: var(--font-mono);
 }
 
-/* ER Diagram */
+/* ==========================================================================
+   14. ER DIAGRAM
+   ========================================================================== */
 .er-container {
 	flex: 1;
 	position: relative;
@@ -1615,7 +1685,9 @@ body {
 	opacity: 0.18;
 }
 
-/* Journal */
+/* ==========================================================================
+   15. JOURNAL
+   ========================================================================== */
 .journal-list {
 	flex: 1;
 	overflow-y: auto;
@@ -1753,7 +1825,9 @@ body {
 	opacity: 0.18;
 }
 
-/* Status Bar */
+/* ==========================================================================
+   16. STATUS BAR
+   ========================================================================== */
 .status-bar {
 	height: 26px;
 	background: var(--bg-surface);
@@ -1793,7 +1867,9 @@ body {
 	display: inline;
 }
 
-/* Modals */
+/* ==========================================================================
+   17. MODALS (BASE + SPECIFIC)
+   ========================================================================== */
 .modal-overlay {
 	display: none;
 	position: fixed;
@@ -2011,7 +2087,9 @@ body {
 	opacity: 0.9;
 }
 
-/* Toast */
+/* ==========================================================================
+   18. TOAST NOTIFICATIONS
+   ========================================================================== */
 .toast-container {
 	position: fixed;
 	top: 56px;
@@ -2082,7 +2160,9 @@ body {
 	}
 }
 
-/* Context Menu */
+/* ==========================================================================
+   19. CONTEXT MENU
+   ========================================================================== */
 .ctx-menu {
 	display: none;
 	position: fixed;
@@ -2138,7 +2218,9 @@ body {
 	margin: 3px 4px;
 }
 
-/* Multi-row Select */
+/* ==========================================================================
+   20. MULTI-ROW SELECT & BULK ACTIONS
+   ========================================================================== */
 .grid-wrap .grid tbody tr.selected {
 	background: var(--accent-muted);
 }
@@ -2156,7 +2238,9 @@ body {
 	margin: 0;
 }
 
-/* Loading Spinner */
+/* ==========================================================================
+   21. LOADING SPINNER
+   ========================================================================== */
 .loading-overlay {
 	position: absolute;
 	inset: 0;
@@ -2182,6 +2266,10 @@ body {
 		transform: rotate(360deg);
 	}
 }
+
+/* ==========================================================================
+   22. RESIZABLE PANELS
+   ========================================================================== */
 
 /* Resizable Sidebar */
 .sidebar-resize {
@@ -2359,7 +2447,9 @@ body {
 	font-weight: 500;
 }
 
-/* Connection Manager */
+/* ==========================================================================
+   23. CONNECTION MANAGER
+   ========================================================================== */
 .saved-conns {
 	padding: 0 14px 10px;
 	display: none;
@@ -2436,7 +2526,9 @@ body {
 	color: var(--accent);
 }
 
-/* SQL Tabs */
+/* ==========================================================================
+   24. SQL TABS
+   ========================================================================== */
 .sql-tab-bar {
 	display: flex;
 	align-items: center;
@@ -2608,6 +2700,10 @@ body {
 	color: var(--accent);
 }
 
+/* ==========================================================================
+   28. RECONNECT BANNER & CONNECTION STRIPE
+   ========================================================================== */
+
 /* Reconnect Banner */
 .reconnect-banner {
 	display: none;
@@ -2670,13 +2766,17 @@ body {
 	background: linear-gradient(90deg, var(--conn-purple), #8b5cf6);
 }
 
-/* Data Type Colorization (integers) */
+/* ==========================================================================
+   27. DATA TYPE COLORIZATION
+   ========================================================================== */
 .grid tbody td.type-int {
 	color: var(--sql-number);
 	font-variant-numeric: tabular-nums;
 }
 
-/* Command Palette */
+/* ==========================================================================
+   25. COMMAND PALETTE
+   ========================================================================== */
 .cmd-palette-overlay {
 	display: none;
 	position: fixed;
@@ -2799,7 +2899,9 @@ body {
 	font-size: 13px;
 }
 
-/* Welcome Screen */
+/* ==========================================================================
+   26. WELCOME SCREEN
+   ========================================================================== */
 .welcome-screen {
 	flex: 1;
 	display: flex;
@@ -2866,7 +2968,9 @@ body {
 	color: var(--text-secondary);
 }
 
-/* Focus Indicators (WCAG 2.1) */
+/* ==========================================================================
+   30. ACCESSIBILITY & FOCUS INDICATORS
+   ========================================================================== */
 :focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: 2px;
@@ -2886,6 +2990,10 @@ select:focus-visible {
 	outline: 2px solid var(--accent);
 	outline-offset: 0;
 }
+
+/* ==========================================================================
+   29. SCROLLBARS & UTILITIES
+   ========================================================================== */
 
 /* Firefox Scrollbar */
 * {
@@ -2960,6 +3068,10 @@ select:focus-visible {
 	max-height: 120px;
 	overflow: auto;
 }
+
+/* ==========================================================================
+   31. MOBILE & RESPONSIVE
+   ========================================================================== */
 
 /* Mobile Sidebar Toggle */
 .sidebar-toggle {
