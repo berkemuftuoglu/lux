@@ -57,10 +57,8 @@ pub fn findContentLength(request: []const u8) ?usize {
     var i: usize = 0;
     while (i + 16 < request.len) : (i += 1) {
         if (matchesIgnoreCase(request[i..], "content-length:")) {
-            var pos = i + 15; // skip "content-length:"
-            // Skip whitespace
+            var pos = i + 15;
             while (pos < request.len and request[pos] == ' ') pos += 1;
-            // Parse number
             var end = pos;
             while (end < request.len and request[end] >= '0' and request[end] <= '9') end += 1;
             if (end > pos) {
@@ -388,20 +386,16 @@ test "findContentLength: missing header" {
 }
 
 test "matchesIgnoreCase: matches case-insensitively with prefix semantics" {
-    // Exact matches at different cases
     try std.testing.expect(matchesIgnoreCase("SELECT", "SELECT"));
     try std.testing.expect(matchesIgnoreCase("Select", "SELECT"));
     try std.testing.expect(matchesIgnoreCase("sElEcT", "SELECT"));
-    // Prefix match (haystack longer than needle)
     try std.testing.expect(matchesIgnoreCase("SELECT * FROM", "SELECT"));
-    // Non-alpha chars match exactly
     try std.testing.expect(matchesIgnoreCase("content-length:", "Content-Length:"));
     try std.testing.expect(matchesIgnoreCase("abc123", "ABC123"));
 }
 
 test "matchesIgnoreCase: rejects non-matches" {
     try std.testing.expect(!matchesIgnoreCase("Content-Type:", "content-length:"));
-    // Haystack shorter than needle
     try std.testing.expect(!matchesIgnoreCase("ab", "abcdef"));
     try std.testing.expect(!matchesIgnoreCase("SEL", "SELECT"));
 }
@@ -1117,9 +1111,7 @@ test "findHeader: trims whitespace from value" {
 test "escapeIdentifier: null bytes rejected at any position" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "table\x00; DROP TABLE users"));
-    // Start position
     try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "\x00table"));
-    // End position
     try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "table\x00"));
 }
 

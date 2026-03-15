@@ -125,10 +125,8 @@ pub fn hasMultipleStatements(sql: []const u8) bool {
     return false;
 }
 
-/// Whitelist check for read-only mode. Only allows SELECT, SHOW, EXPLAIN, and
-/// safe WITH...SELECT queries. Blocks multi-statement SQL entirely.
-/// Scans for write keywords outside string literals to catch CTE bypass attacks
-/// like: WITH cte AS (DELETE FROM users RETURNING *) SELECT * FROM cte
+/// Whitelist approach: only SELECT, SHOW, EXPLAIN, and safe WITH...SELECT pass.
+/// Catches CTE write attacks like `WITH x AS (DELETE ...) SELECT * FROM x`.
 pub fn isSqlReadSafe(sql: []const u8) bool {
     if (hasMultipleStatements(sql)) return false;
 
@@ -156,16 +154,12 @@ pub fn isSqlReadSafe(sql: []const u8) bool {
     return false;
 }
 
-/// Scan SQL for write keywords (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE,
-/// CREATE, COPY, GRANT, REVOKE) outside of string literals, identifiers, and
-/// comments. Uses word-boundary detection to avoid false positives on identifiers
-/// like "delete_log" or strings like 'DELETE'.
+/// Word-boundary aware: "delete_log" and 'DELETE' inside strings don't trigger.
 pub fn containsWriteKeyword(sql: []const u8) bool {
     const keywords = [_][]const u8{ "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "COPY", "GRANT", "REVOKE" };
     var i: usize = 0;
     while (i < sql.len) {
         const ch = sql[i];
-        // Skip single-quoted strings
         if (ch == '\'') {
             i += 1;
             while (i < sql.len) {
@@ -180,14 +174,12 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
             if (i < sql.len) i += 1;
             continue;
         }
-        // Skip double-quoted identifiers
         if (ch == '"') {
             i += 1;
             while (i < sql.len and sql[i] != '"') i += 1;
             if (i < sql.len) i += 1;
             continue;
         }
-        // Skip dollar-quoted strings ($tag$ ... $tag$)
         if (ch == '$') {
             const tag_start = i;
             i += 1;
@@ -195,7 +187,6 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
             if (i < sql.len and sql[i] == '$') {
                 const tag = sql[tag_start .. i + 1];
                 i += 1;
-                // Find closing tag
                 while (i + tag.len <= sql.len) {
                     if (std.mem.eql(u8, sql[i .. i + tag.len], tag)) {
                         i += tag.len;
@@ -205,15 +196,12 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
                 }
                 continue;
             }
-            // Not a dollar-quote, just a $ character
             continue;
         }
-        // Skip line comments
         if (ch == '-' and i + 1 < sql.len and sql[i + 1] == '-') {
             while (i < sql.len and sql[i] != '\n') i += 1;
             continue;
         }
-        // Skip block comments
         if (ch == '/' and i + 1 < sql.len and sql[i + 1] == '*') {
             i += 2;
             while (i + 1 < sql.len) {
@@ -225,12 +213,10 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
             }
             continue;
         }
-        // Check for write keyword at word boundary
         const at_word_start = (i == 0) or !isAlphanumUnderscore(sql[i - 1]);
         if (at_word_start) {
             for (keywords) |kw| {
                 if (i + kw.len <= sql.len and matchesIgnoreCase(sql[i .. i + kw.len], kw)) {
-                    // Check trailing word boundary
                     const end = i + kw.len;
                     if (end >= sql.len or !isAlphanumUnderscore(sql[end])) {
                         return true;
@@ -259,7 +245,6 @@ pub fn containsIgnoreCaseWord(haystack: []const u8, needle: []const u8) bool {
     const limit = haystack.len - needle.len + 1;
     for (0..limit) |idx| {
         if (matchesIgnoreCase(haystack[idx..], needle)) {
-            // Check that it's a word boundary (not part of a longer word)
             const before_ok = idx == 0 or !isAlpha(haystack[idx - 1]);
             const after_idx = idx + needle.len;
             const after_ok = after_idx >= haystack.len or !isAlpha(haystack[after_idx]);
@@ -276,10 +261,6 @@ fn isAlpha(ch: u8) bool {
 fn isAlphanumUnderscore(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
 }
-
-// Tests
-
-// isSqlReadSafe EXPLAIN ANALYZE tests
 
 test "isSqlReadSafe: plain EXPLAIN is safe" {
     try std.testing.expect(isSqlReadSafe("EXPLAIN SELECT 1"));
@@ -300,8 +281,6 @@ test "isSqlReadSafe: EXPLAIN ANALYZE UPDATE is blocked" {
 test "isSqlReadSafe: EXPLAIN ANALYZE INSERT is blocked" {
     try std.testing.expect(!isSqlReadSafe("EXPLAIN ANALYZE INSERT INTO users VALUES (1)"));
 }
-
-// analyzeSql tests
 
 test "analyzeSql: SELECT is safe" {
     const r = analyzeSql("SELECT * FROM users");
@@ -353,8 +332,6 @@ test "analyzeSql: empty is safe" {
     try std.testing.expect(!r.is_destructive);
 }
 
-// analyzeSql edge cases
-
 test "analyzeSql: case insensitive DROP" {
     const r = analyzeSql("drop table users");
     try std.testing.expect(r.is_destructive);
@@ -372,7 +349,6 @@ test "analyzeSql: leading tabs and newlines" {
 }
 
 test "analyzeSql: WHERE in subquery does not save DELETE" {
-    // DELETE FROM users (no WHERE at top level, WHERE is in a comment or unrelated)
     const r = analyzeSql("DELETE FROM users");
     try std.testing.expect(r.is_destructive);
 }
@@ -393,12 +369,9 @@ test "analyzeSql: whitespace only" {
 }
 
 test "analyzeSql: CREATE is not destructive" {
-    // CREATE is DDL but not flagged as destructive in current impl
     const r = analyzeSql("CREATE TABLE new_table (id int)");
     try std.testing.expect(!r.is_destructive);
 }
-
-// containsIgnoreCaseWord edge cases
 
 test "containsIgnoreCaseWord: word at start" {
     try std.testing.expect(containsIgnoreCaseWord("WHERE id = 1", "WHERE"));
@@ -425,15 +398,12 @@ test "containsIgnoreCaseWord: empty haystack" {
 }
 
 test "containsIgnoreCaseWord: empty needle" {
-    // Empty needle does not constitute a word match
     try std.testing.expect(!containsIgnoreCaseWord("anything", ""));
 }
 
 test "containsIgnoreCaseWord: needle longer than haystack" {
     try std.testing.expect(!containsIgnoreCaseWord("HI", "HELLO"));
 }
-
-// isAlpha tests
 
 test "isAlpha: letters and underscore" {
     try std.testing.expect(isAlpha('a'));
@@ -449,8 +419,6 @@ test "isAlpha: non-alpha" {
     try std.testing.expect(!isAlpha('-'));
     try std.testing.expect(!isAlpha('.'));
 }
-
-// --- SQL safety edge cases ---
 
 test "analyzeSql: mixed case DROP TABLE" {
     const result = analyzeSql("dRoP TABLE users;");
@@ -476,7 +444,6 @@ test "analyzeSql: UPDATE with WHERE in mixed case" {
 }
 
 test "analyzeSql: DELETE with WHERE as subword rejected" {
-    // WHERE embedded in NOWHERE should not count — but containsIgnoreCaseWord checks boundaries
     const result = analyzeSql("DELETE FROM t NOWHERE;");
     try std.testing.expect(result.is_destructive);
     try std.testing.expectEqualStrings("DELETE", result.operation);
@@ -487,11 +454,8 @@ test "containsIgnoreCaseWord: WHERE at very end" {
 }
 
 test "containsIgnoreCaseWord: WHERE preceded by underscore" {
-    // underscore counts as alpha in isAlpha, so _WHERE is not a word boundary
     try std.testing.expect(!containsIgnoreCaseWord("DO_WHERE", "WHERE"));
 }
-
-// hasMultipleStatements tests
 
 test "hasMultipleStatements: single SELECT" {
     try std.testing.expect(!hasMultipleStatements("SELECT * FROM users"));
@@ -548,8 +512,6 @@ test "hasMultipleStatements: semicolon in tagged dollar-quoted string" {
 test "hasMultipleStatements: tagged dollar-quote with real multi" {
     try std.testing.expect(hasMultipleStatements("SELECT $fn$hello$fn$; DROP TABLE x"));
 }
-
-// --- isSqlReadSafe tests ---
 
 test "isSqlReadSafe: simple SELECT" {
     try std.testing.expect(isSqlReadSafe("SELECT * FROM users"));
@@ -622,8 +584,6 @@ test "isSqlReadSafe: lowercase select" {
 test "isSqlReadSafe: WITH UPDATE blocked" {
     try std.testing.expect(!isSqlReadSafe("WITH upd AS (UPDATE users SET name='x' RETURNING *) SELECT * FROM upd"));
 }
-
-// --- Fuzz test ---
 
 fn fuzzHasMultipleStatements(_: void, input: []const u8) anyerror!void {
     _ = hasMultipleStatements(input);
