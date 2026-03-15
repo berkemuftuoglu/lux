@@ -105,23 +105,12 @@ fn freeSchemaState(state: *web.ServerState) void {
     state.conninfo_z = null;
     if (state.schema_text) |old| allocator.free(old);
     state.schema_text = null;
-    if (state.schema_tables) |old| {
-        for (old) |table| {
-            for (table.columns) |col| {
-                if (col.name.len > 0) allocator.free(col.name);
-                if (col.data_type.len > 0) allocator.free(col.data_type);
-            }
-            allocator.free(table.columns);
-            if (table.name.len > 0) allocator.free(table.name);
-        }
-        allocator.free(old);
-    }
     state.schema_tables = null;
-    if (state.enhanced_schema) |old| {
-        for (old) |*t| @constCast(t).deinit(allocator);
-        allocator.free(old);
-    }
+    if (state.schema_arena) |*a| a.deinit();
+    state.schema_arena = null;
     state.enhanced_schema = null;
+    if (state.enhanced_arena) |*a| a.deinit();
+    state.enhanced_arena = null;
 }
 
 fn getConfigFilePath(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
@@ -296,15 +285,11 @@ pub fn handleConnect(
     state.last_conninfo = allocator.dupe(u8, conninfo_str) catch null;
     state.schema_text = schema_text;
     state.schema_tables = schema.tables;
+    state.schema_arena = schema.arena;
     if (enhanced) |*es| {
         state.enhanced_schema = es.tables;
-        // Prevent deinit from freeing tables we now own
-        es.tables = &.{};
-        es.deinit();
+        state.enhanced_arena = es.arena;
     }
-    // Prevent schema.deinit from freeing tables we now own
-    schema.tables = &.{};
-    schema.deinit();
 
     // Build response with schema info
     var json_buf = std.ArrayList(u8){};
@@ -352,13 +337,11 @@ pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
         // Store new state
         state.schema_text = new_text;
         state.schema_tables = schema.tables;
+        state.schema_arena = schema.arena;
         if (enhanced) |*es| {
             state.enhanced_schema = es.tables;
-            es.tables = &.{};
-            es.deinit();
+            state.enhanced_arena = es.arena;
         }
-        schema.tables = &.{};
-        schema.deinit();
     }
 
     const tables = state.schema_tables orelse {
@@ -503,13 +486,11 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
     state.conninfo_z = conninfo_z;
     state.schema_text = schema_text;
     state.schema_tables = schema.tables;
+    state.schema_arena = schema.arena;
     if (enhanced) |*es| {
         state.enhanced_schema = es.tables;
-        es.tables = &.{};
-        es.deinit();
+        state.enhanced_arena = es.arena;
     }
-    schema.tables = &.{};
-    schema.deinit();
 
     // Build response
     var json_buf = std.ArrayList(u8){};

@@ -78,8 +78,12 @@ pub const ServerState = struct {
     /// Schema column info for table/column resolution.
     schema_tables: ?[]postgres.TableInfo = null,
     schema_text: ?[]u8 = null,
+    /// Arena backing schema_tables memory. Freed by freeSchemaState.
+    schema_arena: ?std.heap.ArenaAllocator = null,
     /// Enhanced schema with PK, FK, ENUM, nullability info.
     enhanced_schema: ?[]postgres.EnhancedTableInfo = null,
+    /// Arena backing enhanced_schema memory. Freed by freeSchemaState.
+    enhanced_arena: ?std.heap.ArenaAllocator = null,
     /// Read-only mode — blocks DML/DDL operations.
     read_only: bool = false,
     change_journal: std.ArrayList(ChangeEntry) = .{},

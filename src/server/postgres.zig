@@ -3,6 +3,8 @@ const c = @cImport({
     @cInclude("libpq-fe.h");
 });
 
+const log = std.log.scoped(.postgres);
+
 pub const PgError = error{
     ConnectionFailed,
     QueryFailed,
@@ -27,12 +29,30 @@ pub const PgConnection = struct {
     /// Caller must call deinit() on the returned connection regardless of success.
     pub fn connectVerbose(conninfo: [*:0]const u8) PgError!PgConnection {
         const conn = c.PQconnectdb(conninfo) orelse return error.ConnectionFailed;
-        // Return the connection even if status is bad — caller reads errorMessage() then deinit()s
         return PgConnection{ .conn = conn };
     }
 
     pub fn isOk(self: *const PgConnection) bool {
         return c.PQstatus(self.conn) == c.CONNECTION_OK;
+    }
+
+    /// Check connection and transaction state. Returns true only if the
+    /// connection is up and idle (not in a failed transaction).
+    pub fn isHealthy(self: *const PgConnection) bool {
+        if (c.PQstatus(self.conn) != c.CONNECTION_OK) return false;
+        const txn = c.PQtransactionStatus(self.conn);
+        return txn == c.PQTRANS_IDLE;
+    }
+
+    /// If the connection is stuck in a failed transaction, issue ROLLBACK
+    /// to return it to an idle state so subsequent queries can proceed.
+    pub fn resetIfNeeded(self: *PgConnection) void {
+        const txn = c.PQtransactionStatus(self.conn);
+        if (txn == c.PQTRANS_INERROR) {
+            log.info("connection in failed transaction state, sending ROLLBACK", .{});
+            const res = c.PQexec(self.conn, "ROLLBACK");
+            if (res) |r| c.PQclear(r);
+        }
     }
 
     pub fn deinit(self: *PgConnection) void {
@@ -52,12 +72,12 @@ pub const PgConnection = struct {
         const res = c.PQexecParams(
             self.conn,
             sql,
-            0, // nParams
-            null, // paramTypes
-            null, // paramValues
-            null, // paramLengths
-            null, // paramFormats
-            0, // resultFormat (text)
+            0,
+            null,
+            null,
+            null,
+            null,
+            0,
         ) orelse return error.QueryFailed;
         return extractResult(allocator, res);
     }
@@ -70,78 +90,59 @@ pub const PgConnection = struct {
         return extractResult(allocator, res);
     }
 
-    pub fn fetchSchema(self: *PgConnection, allocator: std.mem.Allocator) PgError!SchemaInfo {
+    pub fn fetchSchema(self: *PgConnection, backing: std.mem.Allocator) PgError!SchemaInfo {
         const sql =
             "SELECT table_name, column_name, data_type " ++
             "FROM information_schema.columns " ++
             "WHERE table_schema = 'public' " ++
             "ORDER BY table_name, ordinal_position";
 
-        const res = c.PQexecParams(
-            self.conn,
-            sql,
-            0,
-            null,
-            null,
-            null,
-            null,
-            0,
-        ) orelse return error.QueryFailed;
+        const res = c.PQexecParams(self.conn, sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
         defer c.PQclear(res);
-
         if (c.PQresultStatus(res) != c.PGRES_TUPLES_OK) return error.QueryFailed;
 
+        var arena = std.heap.ArenaAllocator.init(backing);
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
+
         const n_rows: usize = @intCast(c.PQntuples(res));
-
         var tables = std.ArrayList(TableInfo){};
-        errdefer tables.deinit(allocator);
-
         var current_table: ?[]const u8 = null;
         var current_columns = std.ArrayList(ColumnInfo){};
-        errdefer current_columns.deinit(allocator);
 
         for (0..n_rows) |row_idx| {
-            const tname = getStringField(allocator, res, row_idx, 0) catch return error.OutOfMemory;
-            const cname = getStringField(allocator, res, row_idx, 1) catch return error.OutOfMemory;
-            const dtype = getStringField(allocator, res, row_idx, 2) catch return error.OutOfMemory;
+            const tname = getStringField(alloc, res, row_idx, 0) catch return error.OutOfMemory;
+            const cname = getStringField(alloc, res, row_idx, 1) catch return error.OutOfMemory;
+            const dtype = getStringField(alloc, res, row_idx, 2) catch return error.OutOfMemory;
 
             if (current_table == null or !std.mem.eql(u8, current_table.?, tname)) {
-                // New table — flush previous
                 if (current_table != null) {
-                    tables.append(allocator, .{
+                    tables.append(alloc, .{
                         .name = current_table.?,
-                        .columns = current_columns.toOwnedSlice(allocator) catch return error.OutOfMemory,
+                        .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
                     }) catch return error.OutOfMemory;
                     current_columns = std.ArrayList(ColumnInfo){};
                 }
                 current_table = tname;
-            } else {
-                // Same table as current — free the duplicate allocation
-                if (tname.len > 0) allocator.free(tname);
             }
 
-            current_columns.append(allocator, .{
-                .name = cname,
-                .data_type = dtype,
-            }) catch return error.OutOfMemory;
+            current_columns.append(alloc, .{ .name = cname, .data_type = dtype }) catch return error.OutOfMemory;
         }
 
-        // Flush last table
         if (current_table != null) {
-            tables.append(allocator, .{
+            tables.append(alloc, .{
                 .name = current_table.?,
-                .columns = current_columns.toOwnedSlice(allocator) catch return error.OutOfMemory,
+                .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
             }) catch return error.OutOfMemory;
         }
 
         return SchemaInfo{
-            .tables = tables.toOwnedSlice(allocator) catch return error.OutOfMemory,
-            .allocator = allocator,
+            .tables = tables.toOwnedSlice(alloc) catch return error.OutOfMemory,
+            .arena = arena,
         };
     }
 
-    pub fn fetchEnhancedSchema(self: *PgConnection, allocator: std.mem.Allocator) PgError!EnhancedSchemaInfo {
-        // Q1: Columns + PK info
+    pub fn fetchEnhancedSchema(self: *PgConnection, backing: std.mem.Allocator) PgError!EnhancedSchemaInfo {
         const col_sql =
             "SELECT c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, " ++
             "CASE WHEN pk.column_name IS NOT NULL THEN 'true' ELSE 'false' END AS is_primary_key " ++
@@ -158,7 +159,6 @@ pub const PgConnection = struct {
         defer c.PQclear(col_res);
         if (c.PQresultStatus(col_res) != c.PGRES_TUPLES_OK) return error.QueryFailed;
 
-        // Q2: Foreign keys
         const fk_sql =
             "SELECT kcu.table_name, kcu.column_name, ccu.table_name AS target_table, ccu.column_name AS target_column " ++
             "FROM information_schema.table_constraints tc " ++
@@ -170,7 +170,6 @@ pub const PgConnection = struct {
         defer c.PQclear(fk_res);
         if (c.PQresultStatus(fk_res) != c.PGRES_TUPLES_OK) return error.QueryFailed;
 
-        // Q3: ENUM values
         const enum_sql =
             "SELECT c.relname, a.attname, e.enumlabel " ++
             "FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid " ++
@@ -180,236 +179,85 @@ pub const PgConnection = struct {
 
         const enum_res = c.PQexecParams(self.conn, enum_sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
         defer c.PQclear(enum_res);
-        // ENUMs may not exist — treat TUPLES_OK only
 
-        // Build FK lookup: table_name+column_name -> (target_table, target_column)
-        const FkEntry = struct { table: []const u8, column: []const u8, target_table: []const u8, target_column: []const u8 };
-        var fk_entries = std.ArrayList(FkEntry){};
-        defer fk_entries.deinit(allocator);
+        // Extract PGresult rows into typed slices using a temp arena.
+        // The slices reference PGresult memory (via getStringFieldNoAlloc),
+        // which stays valid until the deferred PQclear calls above.
+        var tmp = std.heap.ArenaAllocator.init(backing);
+        defer tmp.deinit();
+        const t = tmp.allocator();
 
-        if (c.PQresultStatus(fk_res) == c.PGRES_TUPLES_OK) {
-            const fk_rows: usize = @intCast(c.PQntuples(fk_res));
-            for (0..fk_rows) |ri| {
-                fk_entries.append(allocator, .{
-                    .table = getStringFieldNoAlloc(fk_res, ri, 0),
-                    .column = getStringFieldNoAlloc(fk_res, ri, 1),
-                    .target_table = getStringFieldNoAlloc(fk_res, ri, 2),
-                    .target_column = getStringFieldNoAlloc(fk_res, ri, 3),
-                }) catch return error.OutOfMemory;
-            }
+        const col_n: usize = @intCast(c.PQntuples(col_res));
+        const col_data = t.alloc(ColumnRowData, col_n) catch return error.OutOfMemory;
+        for (0..col_n) |i| {
+            col_data[i] = .{
+                .table_name = getStringFieldNoAlloc(col_res, i, 0),
+                .col_name = getStringFieldNoAlloc(col_res, i, 1),
+                .data_type = getStringFieldNoAlloc(col_res, i, 2),
+                .is_nullable = getStringFieldNoAlloc(col_res, i, 3),
+                .col_default = getStringFieldNoAlloc(col_res, i, 4),
+                .is_pk = getStringFieldNoAlloc(col_res, i, 5),
+            };
         }
 
-        // Build ENUM lookup: table_name+column_name -> []enumlabel
-        const EnumKey = struct { table: []const u8, column: []const u8 };
-        const EnumEntry = struct { key: EnumKey, values: std.ArrayList([]const u8) };
-        var enum_entries = std.ArrayList(EnumEntry){};
-        defer {
-            for (enum_entries.items) |*entry| entry.values.deinit(allocator);
-            enum_entries.deinit(allocator);
+        const fk_n: usize = if (c.PQresultStatus(fk_res) == c.PGRES_TUPLES_OK)
+            @intCast(c.PQntuples(fk_res))
+        else
+            0;
+        const fk_data = t.alloc(FkRowData, fk_n) catch return error.OutOfMemory;
+        for (0..fk_n) |i| {
+            fk_data[i] = .{
+                .table = getStringFieldNoAlloc(fk_res, i, 0),
+                .column = getStringFieldNoAlloc(fk_res, i, 1),
+                .target_table = getStringFieldNoAlloc(fk_res, i, 2),
+                .target_column = getStringFieldNoAlloc(fk_res, i, 3),
+            };
         }
 
-        if (c.PQresultStatus(enum_res) == c.PGRES_TUPLES_OK) {
-            const enum_rows: usize = @intCast(c.PQntuples(enum_res));
-            for (0..enum_rows) |ri| {
-                const tbl = getStringFieldNoAlloc(enum_res, ri, 0);
-                const col = getStringFieldNoAlloc(enum_res, ri, 1);
-                const label = getStringFieldNoAlloc(enum_res, ri, 2);
-
-                // Find or create entry
-                var found = false;
-                for (enum_entries.items) |*entry| {
-                    if (std.mem.eql(u8, entry.key.table, tbl) and std.mem.eql(u8, entry.key.column, col)) {
-                        const duped_label = allocator.dupe(u8, label) catch return error.OutOfMemory;
-                        entry.values.append(allocator, duped_label) catch return error.OutOfMemory;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    var new_entry = EnumEntry{
-                        .key = .{ .table = tbl, .column = col },
-                        .values = std.ArrayList([]const u8){},
-                    };
-                    const duped_label = allocator.dupe(u8, label) catch return error.OutOfMemory;
-                    new_entry.values.append(allocator, duped_label) catch return error.OutOfMemory;
-                    enum_entries.append(allocator, new_entry) catch return error.OutOfMemory;
-                }
-            }
+        const enum_n: usize = if (c.PQresultStatus(enum_res) == c.PGRES_TUPLES_OK)
+            @intCast(c.PQntuples(enum_res))
+        else
+            0;
+        const enum_data = t.alloc(EnumRowData, enum_n) catch return error.OutOfMemory;
+        for (0..enum_n) |i| {
+            enum_data[i] = .{
+                .table = getStringFieldNoAlloc(enum_res, i, 0),
+                .column = getStringFieldNoAlloc(enum_res, i, 1),
+                .label = getStringFieldNoAlloc(enum_res, i, 2),
+            };
         }
 
-        // Build enhanced table list from Q1 results
-        const col_rows: usize = @intCast(c.PQntuples(col_res));
-        var tables = std.ArrayList(EnhancedTableInfo){};
-        errdefer {
-            for (tables.items) |*table| {
-                @constCast(table).deinit(allocator);
-            }
-            tables.deinit(allocator);
-        }
-
-        var current_table: ?[]const u8 = null;
-        var current_columns = std.ArrayList(EnhancedColumnInfo){};
-        errdefer {
-            for (current_columns.items) |col| {
-                if (col.name.len > 0) allocator.free(col.name);
-                if (col.data_type.len > 0) allocator.free(col.data_type);
-                if (col.column_default) |d| allocator.free(d);
-                if (col.fk_target_table) |t| allocator.free(t);
-                if (col.fk_target_column) |tc| allocator.free(tc);
-                if (col.enum_values) |vals| {
-                    for (vals) |v| allocator.free(v);
-                    allocator.free(vals);
-                }
-            }
-            current_columns.deinit(allocator);
-        }
-        var pk_cols = std.ArrayList([]const u8){};
-        errdefer {
-            for (pk_cols.items) |pk| allocator.free(pk);
-            pk_cols.deinit(allocator);
-        }
-
-        for (0..col_rows) |ri| {
-            const tname = getStringField(allocator, col_res, ri, 0) catch return error.OutOfMemory;
-            const cname = getStringField(allocator, col_res, ri, 1) catch return error.OutOfMemory;
-            const dtype = getStringField(allocator, col_res, ri, 2) catch return error.OutOfMemory;
-            const nullable_str = getStringFieldNoAlloc(col_res, ri, 3);
-            const default_str = getStringFieldNoAlloc(col_res, ri, 4);
-            const pk_str = getStringFieldNoAlloc(col_res, ri, 5);
-
-            if (current_table == null or !std.mem.eql(u8, current_table.?, tname)) {
-                // Flush previous table
-                if (current_table != null) {
-                    const has_pk = pk_cols.items.len > 0;
-                    tables.append(allocator, .{
-                        .name = current_table.?,
-                        .columns = current_columns.toOwnedSlice(allocator) catch return error.OutOfMemory,
-                        .primary_key_columns = pk_cols.toOwnedSlice(allocator) catch return error.OutOfMemory,
-                        .has_primary_key = has_pk,
-                    }) catch return error.OutOfMemory;
-                    current_columns = std.ArrayList(EnhancedColumnInfo){};
-                    pk_cols = std.ArrayList([]const u8){};
-                }
-                current_table = tname;
-            } else {
-                // Same table as current — free the duplicate allocation
-                if (tname.len > 0) allocator.free(tname);
-            }
-
-            const is_pk = std.mem.eql(u8, pk_str, "true");
-            const is_nullable = std.mem.eql(u8, nullable_str, "YES");
-            const col_default: ?[]const u8 = if (default_str.len > 0) (allocator.dupe(u8, default_str) catch return error.OutOfMemory) else null;
-
-            // FK lookup
-            var fk_table: ?[]const u8 = null;
-            var fk_col: ?[]const u8 = null;
-            for (fk_entries.items) |fk| {
-                if (std.mem.eql(u8, fk.table, current_table.?) and std.mem.eql(u8, fk.column, cname)) {
-                    fk_table = allocator.dupe(u8, fk.target_table) catch return error.OutOfMemory;
-                    fk_col = allocator.dupe(u8, fk.target_column) catch return error.OutOfMemory;
-                    break;
-                }
-            }
-
-            // ENUM lookup
-            var enum_vals: ?[][]const u8 = null;
-            for (enum_entries.items) |entry| {
-                if (std.mem.eql(u8, entry.key.table, current_table.?) and std.mem.eql(u8, entry.key.column, cname)) {
-                    // Dupe the values for ownership
-                    const vals = allocator.alloc([]const u8, entry.values.items.len) catch return error.OutOfMemory;
-                    for (entry.values.items, 0..) |v, vi| {
-                        vals[vi] = allocator.dupe(u8, v) catch return error.OutOfMemory;
-                    }
-                    enum_vals = vals;
-                    break;
-                }
-            }
-
-            if (is_pk) {
-                pk_cols.append(allocator, allocator.dupe(u8, cname) catch return error.OutOfMemory) catch return error.OutOfMemory;
-            }
-
-            current_columns.append(allocator, .{
-                .name = cname,
-                .data_type = dtype,
-                .is_primary_key = is_pk,
-                .is_nullable = is_nullable,
-                .column_default = col_default,
-                .fk_target_table = fk_table,
-                .fk_target_column = fk_col,
-                .enum_values = enum_vals,
-            }) catch return error.OutOfMemory;
-        }
-
-        // Flush last table
-        if (current_table != null) {
-            const has_pk = pk_cols.items.len > 0;
-            tables.append(allocator, .{
-                .name = current_table.?,
-                .columns = current_columns.toOwnedSlice(allocator) catch return error.OutOfMemory,
-                .primary_key_columns = pk_cols.toOwnedSlice(allocator) catch return error.OutOfMemory,
-                .has_primary_key = has_pk,
-            }) catch return error.OutOfMemory;
-        }
-
-        return EnhancedSchemaInfo{
-            .tables = tables.toOwnedSlice(allocator) catch return error.OutOfMemory,
-            .allocator = allocator,
-        };
+        return buildEnhancedSchemaFromRows(backing, col_data, fk_data, enum_data);
     }
 };
 
-fn extractResult(allocator: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
+fn extractResult(backing: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
     const status = c.PQresultStatus(res);
     if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
         c.PQclear(res);
         return error.QueryFailed;
     }
 
+    var arena = std.heap.ArenaAllocator.init(backing);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
+
     const n_rows: usize = @intCast(c.PQntuples(res));
     const n_cols: usize = @intCast(c.PQnfields(res));
 
-    // Collect column names
-    var col_names = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-    var col_names_filled: usize = 0;
-    errdefer {
-        for (col_names[0..col_names_filled]) |name| {
-            if (name.len > 0 and !isStaticStr(name)) allocator.free(name);
-        }
-        allocator.free(col_names);
-    }
+    const col_names = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
     for (0..n_cols) |col_idx| {
         const name_ptr = c.PQfname(res, @intCast(col_idx));
         if (name_ptr == null) {
             col_names[col_idx] = "";
         } else {
-            const name_slice = std.mem.sliceTo(name_ptr, 0);
-            col_names[col_idx] = allocator.dupe(u8, name_slice) catch return error.OutOfMemory;
+            col_names[col_idx] = alloc.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return error.OutOfMemory;
         }
-        col_names_filled = col_idx + 1;
     }
 
-    // Collect rows as string values
-    var rows = allocator.alloc([][]const u8, n_rows) catch return error.OutOfMemory;
-    var rows_completed: usize = 0;
-    errdefer {
-        for (rows[0..rows_completed]) |row| {
-            for (row) |val| {
-                if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
-            }
-            allocator.free(row);
-        }
-        allocator.free(rows);
-    }
+    const rows = alloc.alloc([][]const u8, n_rows) catch return error.OutOfMemory;
     for (0..n_rows) |row_idx| {
-        var row_data = allocator.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-        var cells_filled: usize = 0;
-        errdefer {
-            for (row_data[0..cells_filled]) |val| {
-                if (val.len > 0 and !isStaticStr(val)) allocator.free(val);
-            }
-            allocator.free(row_data);
-        }
+        const row_data = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
         for (0..n_cols) |col_idx| {
             if (c.PQgetisnull(res, @intCast(row_idx), @intCast(col_idx)) != 0) {
                 row_data[col_idx] = "NULL";
@@ -418,14 +266,11 @@ fn extractResult(allocator: std.mem.Allocator, res: *c.PGresult) PgError!QueryRe
                 if (val_ptr == null) {
                     row_data[col_idx] = "";
                 } else {
-                    const val_slice = std.mem.sliceTo(val_ptr, 0);
-                    row_data[col_idx] = allocator.dupe(u8, val_slice) catch return error.OutOfMemory;
+                    row_data[col_idx] = alloc.dupe(u8, std.mem.sliceTo(val_ptr, 0)) catch return error.OutOfMemory;
                 }
             }
-            cells_filled = col_idx + 1;
         }
         rows[row_idx] = row_data;
-        rows_completed = row_idx + 1;
     }
 
     c.PQclear(res);
@@ -435,7 +280,7 @@ fn extractResult(allocator: std.mem.Allocator, res: *c.PGresult) PgError!QueryRe
         .rows = rows,
         .n_cols = n_cols,
         .n_rows = n_rows,
-        .allocator = allocator,
+        .arena = arena,
     };
 }
 
@@ -453,32 +298,20 @@ fn getStringField(allocator: std.mem.Allocator, res: *c.PGresult, row: usize, co
     return allocator.dupe(u8, val_slice);
 }
 
+// ── Result types ──────────────────────────────────────────────────────
+
 pub const QueryResult = struct {
     col_names: [][]const u8,
     rows: [][][]const u8,
     n_cols: usize,
     n_rows: usize,
-    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *QueryResult) void {
-        for (self.col_names) |name| {
-            if (name.len > 0 and !isStaticStr(name)) self.allocator.free(name);
-        }
-        self.allocator.free(self.col_names);
-        for (self.rows) |row| {
-            for (row) |val| {
-                if (val.len > 0 and !isStaticStr(val)) self.allocator.free(val);
-            }
-            self.allocator.free(row);
-        }
-        self.allocator.free(self.rows);
+        self.arena.deinit();
         self.* = undefined;
     }
 };
-
-fn isStaticStr(s: []const u8) bool {
-    return std.mem.eql(u8, s, "NULL") or s.len == 0;
-}
 
 pub const ColumnInfo = struct {
     name: []const u8,
@@ -506,42 +339,21 @@ pub const EnhancedTableInfo = struct {
     columns: []EnhancedColumnInfo,
     primary_key_columns: [][]const u8,
     has_primary_key: bool,
-
-    pub fn deinit(self: *EnhancedTableInfo, allocator: std.mem.Allocator) void {
-        for (self.columns) |col| {
-            if (col.name.len > 0) allocator.free(col.name);
-            if (col.data_type.len > 0) allocator.free(col.data_type);
-            if (col.column_default) |d| allocator.free(d);
-            if (col.fk_target_table) |t| allocator.free(t);
-            if (col.fk_target_column) |tc| allocator.free(tc);
-            if (col.enum_values) |vals| {
-                for (vals) |v| allocator.free(v);
-                allocator.free(vals);
-            }
-        }
-        allocator.free(self.columns);
-        for (self.primary_key_columns) |pk| allocator.free(pk);
-        allocator.free(self.primary_key_columns);
-        if (self.name.len > 0) allocator.free(self.name);
-    }
 };
 
 pub const EnhancedSchemaInfo = struct {
     tables: []EnhancedTableInfo,
-    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
 
     pub fn deinit(self: *EnhancedSchemaInfo) void {
-        for (self.tables) |*table| {
-            @constCast(table).deinit(self.allocator);
-        }
-        self.allocator.free(self.tables);
+        self.arena.deinit();
         self.* = undefined;
     }
 };
 
 pub const SchemaInfo = struct {
     tables: []TableInfo,
-    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
 
     pub fn format(self: *const SchemaInfo, allocator: std.mem.Allocator) ![]u8 {
         var buf = std.ArrayList(u8){};
@@ -561,30 +373,22 @@ pub const SchemaInfo = struct {
     }
 
     pub fn deinit(self: *SchemaInfo) void {
-        for (self.tables) |table| {
-            for (table.columns) |col| {
-                if (col.name.len > 0) self.allocator.free(col.name);
-                if (col.data_type.len > 0) self.allocator.free(col.data_type);
-            }
-            self.allocator.free(table.columns);
-            if (table.name.len > 0) self.allocator.free(table.name);
-        }
-        self.allocator.free(self.tables);
+        self.arena.deinit();
         self.* = undefined;
     }
 };
 
-/// Raw row data from a columns query (pre-parsed from PGresult or test fixtures).
+// ── Raw row types for testable schema building ────────────────────────
+
 pub const ColumnRowData = struct {
     table_name: []const u8,
     col_name: []const u8,
     data_type: []const u8,
-    is_nullable: []const u8, // "YES" or "NO"
+    is_nullable: []const u8,
     col_default: []const u8,
-    is_pk: []const u8, // "true" or "false"
+    is_pk: []const u8,
 };
 
-/// Raw row data from a foreign-key query.
 pub const FkRowData = struct {
     table: []const u8,
     column: []const u8,
@@ -592,7 +396,6 @@ pub const FkRowData = struct {
     target_column: []const u8,
 };
 
-/// Raw row data from an enum query.
 pub const EnumRowData = struct {
     table: []const u8,
     column: []const u8,
@@ -600,261 +403,128 @@ pub const EnumRowData = struct {
 };
 
 /// Build an EnhancedSchemaInfo from pre-parsed row slices.
-/// This is the allocation-heavy inner loop of fetchEnhancedSchema, extracted so
-/// it can be tested without a live PostgreSQL connection (e.g. with
-/// checkAllAllocationFailures to exercise every OOM path).
+/// All allocations go into a single arena — on error, one errdefer cleans up everything.
+/// Extracted so it can be tested without a live PostgreSQL connection.
 pub fn buildEnhancedSchemaFromRows(
-    allocator: std.mem.Allocator,
+    backing: std.mem.Allocator,
     col_data: []const ColumnRowData,
     fk_data: []const FkRowData,
     enum_data: []const EnumRowData,
 ) PgError!EnhancedSchemaInfo {
-    // Build FK lookup list
-    const FkEntry = struct { table: []const u8, column: []const u8, target_table: []const u8, target_column: []const u8 };
-    var fk_entries = std.ArrayList(FkEntry){};
-    defer fk_entries.deinit(allocator);
-    for (fk_data) |row| {
-        fk_entries.append(allocator, .{
-            .table = row.table,
-            .column = row.column,
-            .target_table = row.target_table,
-            .target_column = row.target_column,
-        }) catch return error.OutOfMemory;
-    }
+    var arena = std.heap.ArenaAllocator.init(backing);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
 
-    // Build ENUM lookup
+    // Build ENUM lookup: group labels by (table, column)
     const EnumKey = struct { table: []const u8, column: []const u8 };
     const EnumEntry = struct { key: EnumKey, values: std.ArrayList([]const u8) };
     var enum_entries = std.ArrayList(EnumEntry){};
-    defer {
-        for (enum_entries.items) |*entry| entry.values.deinit(allocator);
-        enum_entries.deinit(allocator);
-    }
     for (enum_data) |row| {
         var found = false;
         for (enum_entries.items) |*entry| {
             if (std.mem.eql(u8, entry.key.table, row.table) and std.mem.eql(u8, entry.key.column, row.column)) {
-                const duped_label = allocator.dupe(u8, row.label) catch return error.OutOfMemory;
-                entry.values.append(allocator, duped_label) catch return error.OutOfMemory;
+                entry.values.append(alloc, alloc.dupe(u8, row.label) catch return error.OutOfMemory) catch return error.OutOfMemory;
                 found = true;
                 break;
             }
         }
         if (!found) {
-            var new_entry = EnumEntry{
-                .key = .{ .table = row.table, .column = row.column },
-                .values = std.ArrayList([]const u8){},
-            };
-            const duped_label = allocator.dupe(u8, row.label) catch return error.OutOfMemory;
-            new_entry.values.append(allocator, duped_label) catch return error.OutOfMemory;
-            enum_entries.append(allocator, new_entry) catch return error.OutOfMemory;
+            var new_entry = EnumEntry{ .key = .{ .table = row.table, .column = row.column }, .values = std.ArrayList([]const u8){} };
+            new_entry.values.append(alloc, alloc.dupe(u8, row.label) catch return error.OutOfMemory) catch return error.OutOfMemory;
+            enum_entries.append(alloc, new_entry) catch return error.OutOfMemory;
         }
     }
 
     // Build table list from column rows
     var tables = std.ArrayList(EnhancedTableInfo){};
-    errdefer {
-        for (tables.items) |*table| @constCast(table).deinit(allocator);
-        tables.deinit(allocator);
-    }
-
     var current_table: ?[]const u8 = null;
-    errdefer if (current_table) |ct| allocator.free(ct);
     var current_columns = std.ArrayList(EnhancedColumnInfo){};
-    errdefer {
-        for (current_columns.items) |col| {
-            if (col.name.len > 0) allocator.free(col.name);
-            if (col.data_type.len > 0) allocator.free(col.data_type);
-            if (col.column_default) |d| allocator.free(d);
-            if (col.fk_target_table) |t| allocator.free(t);
-            if (col.fk_target_column) |tc| allocator.free(tc);
-            if (col.enum_values) |vals| {
-                for (vals) |v| allocator.free(v);
-                allocator.free(vals);
-            }
-        }
-        current_columns.deinit(allocator);
-    }
     var pk_cols = std.ArrayList([]const u8){};
-    errdefer {
-        for (pk_cols.items) |pk| allocator.free(pk);
-        pk_cols.deinit(allocator);
-    }
 
     for (col_data) |row| {
-        // Allocate per-row strings. Use nullable sentinels so errdefer can be
-        // set once and nulled out when ownership is transferred.
-        var tname_owned: ?[]const u8 = allocator.dupe(u8, row.table_name) catch return error.OutOfMemory;
-        errdefer if (tname_owned) |t| allocator.free(t);
-        var cname_owned: ?[]const u8 = allocator.dupe(u8, row.col_name) catch return error.OutOfMemory;
-        errdefer if (cname_owned) |n| allocator.free(n);
-        var dtype_owned: ?[]const u8 = allocator.dupe(u8, row.data_type) catch return error.OutOfMemory;
-        errdefer if (dtype_owned) |dt| allocator.free(dt);
-
-        const tname = tname_owned.?;
-        const cname = cname_owned.?;
-        const dtype = dtype_owned.?;
+        const tname = alloc.dupe(u8, row.table_name) catch return error.OutOfMemory;
+        const cname = alloc.dupe(u8, row.col_name) catch return error.OutOfMemory;
+        const dtype = alloc.dupe(u8, row.data_type) catch return error.OutOfMemory;
 
         if (current_table == null or !std.mem.eql(u8, current_table.?, tname)) {
-            // Flush previous table (if any)
             if (current_table != null) {
                 const has_pk = pk_cols.items.len > 0;
-                const cols_slice = current_columns.toOwnedSlice(allocator) catch return error.OutOfMemory;
-                errdefer {
-                    for (cols_slice) |col| {
-                        if (col.name.len > 0) allocator.free(col.name);
-                        if (col.data_type.len > 0) allocator.free(col.data_type);
-                        if (col.column_default) |d| allocator.free(d);
-                        if (col.fk_target_table) |t| allocator.free(t);
-                        if (col.fk_target_column) |tc| allocator.free(tc);
-                        if (col.enum_values) |vals| {
-                            for (vals) |v| allocator.free(v);
-                            allocator.free(vals);
-                        }
-                    }
-                    allocator.free(cols_slice);
-                }
-                const pks_slice = pk_cols.toOwnedSlice(allocator) catch return error.OutOfMemory;
-                errdefer {
-                    for (pks_slice) |pk| allocator.free(pk);
-                    allocator.free(pks_slice);
-                }
-                tables.append(allocator, .{
+                tables.append(alloc, .{
                     .name = current_table.?,
-                    .columns = cols_slice,
-                    .primary_key_columns = pks_slice,
+                    .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
+                    .primary_key_columns = pk_cols.toOwnedSlice(alloc) catch return error.OutOfMemory,
                     .has_primary_key = has_pk,
                 }) catch return error.OutOfMemory;
-                current_table = null; // transferred to tables, outer errdefer must not double-free
                 current_columns = std.ArrayList(EnhancedColumnInfo){};
                 pk_cols = std.ArrayList([]const u8){};
             }
             current_table = tname;
-            tname_owned = null; // transferred to current_table, outer errdefer owns it
-        } else {
-            allocator.free(tname);
-            tname_owned = null; // freed, errdefer is now a no-op
         }
 
         const is_pk = std.mem.eql(u8, row.is_pk, "true");
         const is_nullable = std.mem.eql(u8, row.is_nullable, "YES");
-
-        var col_default_owned: ?[]const u8 = if (row.col_default.len > 0)
-            (allocator.dupe(u8, row.col_default) catch return error.OutOfMemory)
+        const col_default: ?[]const u8 = if (row.col_default.len > 0)
+            (alloc.dupe(u8, row.col_default) catch return error.OutOfMemory)
         else
             null;
-        errdefer if (col_default_owned) |d| allocator.free(d);
 
-        // FK lookup
-        var fk_table_owned: ?[]const u8 = null;
-        errdefer if (fk_table_owned) |t| allocator.free(t);
-        var fk_col_owned: ?[]const u8 = null;
-        errdefer if (fk_col_owned) |tc| allocator.free(tc);
-        for (fk_entries.items) |fk| {
+        // FK lookup — search input data directly
+        var fk_table: ?[]const u8 = null;
+        var fk_col: ?[]const u8 = null;
+        for (fk_data) |fk| {
             if (std.mem.eql(u8, fk.table, current_table.?) and std.mem.eql(u8, fk.column, cname)) {
-                fk_table_owned = allocator.dupe(u8, fk.target_table) catch return error.OutOfMemory;
-                fk_col_owned = allocator.dupe(u8, fk.target_column) catch return error.OutOfMemory;
+                fk_table = alloc.dupe(u8, fk.target_table) catch return error.OutOfMemory;
+                fk_col = alloc.dupe(u8, fk.target_column) catch return error.OutOfMemory;
                 break;
             }
         }
 
         // ENUM lookup
-        var enum_vals_owned: ?[][]const u8 = null;
-        errdefer if (enum_vals_owned) |vals| {
-            for (vals) |v| allocator.free(v);
-            allocator.free(vals);
-        };
-        enum_lookup: for (enum_entries.items) |entry| {
+        var enum_vals: ?[][]const u8 = null;
+        for (enum_entries.items) |entry| {
             if (std.mem.eql(u8, entry.key.table, current_table.?) and std.mem.eql(u8, entry.key.column, cname)) {
-                const n = entry.values.items.len;
-                const vals = allocator.alloc([]const u8, n) catch return error.OutOfMemory;
-                var vals_filled: usize = 0;
+                const vals = alloc.alloc([]const u8, entry.values.items.len) catch return error.OutOfMemory;
                 for (entry.values.items, 0..) |v, vi| {
-                    vals[vi] = allocator.dupe(u8, v) catch {
-                        for (vals[0..vals_filled]) |fv| allocator.free(fv);
-                        allocator.free(vals);
-                        return error.OutOfMemory;
-                    };
-                    vals_filled = vi + 1;
+                    vals[vi] = alloc.dupe(u8, v) catch return error.OutOfMemory;
                 }
-                enum_vals_owned = vals;
-                break :enum_lookup;
+                enum_vals = vals;
+                break;
             }
         }
 
         if (is_pk) {
-            const pk_dupe = allocator.dupe(u8, cname) catch return error.OutOfMemory;
-            pk_cols.append(allocator, pk_dupe) catch {
-                allocator.free(pk_dupe);
-                return error.OutOfMemory;
-            };
+            pk_cols.append(alloc, alloc.dupe(u8, cname) catch return error.OutOfMemory) catch return error.OutOfMemory;
         }
 
-        current_columns.append(allocator, .{
+        current_columns.append(alloc, .{
             .name = cname,
             .data_type = dtype,
             .is_primary_key = is_pk,
             .is_nullable = is_nullable,
-            .column_default = col_default_owned,
-            .fk_target_table = fk_table_owned,
-            .fk_target_column = fk_col_owned,
-            .enum_values = enum_vals_owned,
+            .column_default = col_default,
+            .fk_target_table = fk_table,
+            .fk_target_column = fk_col,
+            .enum_values = enum_vals,
         }) catch return error.OutOfMemory;
-        // All per-column owned allocations transferred to current_columns entry.
-        // current_columns errdefer handles them if an error occurs later.
-        cname_owned = null;
-        dtype_owned = null;
-        col_default_owned = null;
-        fk_table_owned = null;
-        fk_col_owned = null;
-        enum_vals_owned = null;
     }
 
-    // Flush last table
     if (current_table != null) {
         const has_pk = pk_cols.items.len > 0;
-        const cols_slice = current_columns.toOwnedSlice(allocator) catch return error.OutOfMemory;
-        errdefer {
-            for (cols_slice) |col| {
-                if (col.name.len > 0) allocator.free(col.name);
-                if (col.data_type.len > 0) allocator.free(col.data_type);
-                if (col.column_default) |d| allocator.free(d);
-                if (col.fk_target_table) |t| allocator.free(t);
-                if (col.fk_target_column) |tc| allocator.free(tc);
-                if (col.enum_values) |vals| {
-                    for (vals) |v| allocator.free(v);
-                    allocator.free(vals);
-                }
-            }
-            allocator.free(cols_slice);
-        }
-        const pks_slice = pk_cols.toOwnedSlice(allocator) catch return error.OutOfMemory;
-        errdefer {
-            for (pks_slice) |pk| allocator.free(pk);
-            allocator.free(pks_slice);
-        }
-        tables.append(allocator, .{
+        tables.append(alloc, .{
             .name = current_table.?,
-            .columns = cols_slice,
-            .primary_key_columns = pks_slice,
+            .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
+            .primary_key_columns = pk_cols.toOwnedSlice(alloc) catch return error.OutOfMemory,
             .has_primary_key = has_pk,
         }) catch return error.OutOfMemory;
-        current_table = null; // transferred to tables, outer errdefer must not double-free
     }
 
     return EnhancedSchemaInfo{
-        .tables = tables.toOwnedSlice(allocator) catch return error.OutOfMemory,
-        .allocator = allocator,
+        .tables = tables.toOwnedSlice(alloc) catch return error.OutOfMemory,
+        .arena = arena,
     };
 }
 
-// Tests
-
-test "isStaticStr: identifies static strings" {
-    try std.testing.expect(isStaticStr("NULL"));
-    try std.testing.expect(isStaticStr(""));
-    try std.testing.expect(!isStaticStr("hello"));
-}
+// ── Tests ─────────────────────────────────────────────────────────────
 
 test "SchemaInfo.format: produces readable output" {
     const allocator = std.testing.allocator;
@@ -862,10 +532,11 @@ test "SchemaInfo.format: produces readable output" {
         .{ .name = "id", .data_type = "integer" },
         .{ .name = "name", .data_type = "text" },
     };
-    var tables = [_]TableInfo{
+    var tables_arr = [_]TableInfo{
         .{ .name = "users", .columns = &cols },
     };
-    var schema = SchemaInfo{ .tables = &tables, .allocator = allocator };
+    var schema = SchemaInfo{ .tables = &tables_arr, .arena = std.heap.ArenaAllocator.init(allocator) };
+    defer schema.deinit();
     const text = try schema.format(allocator);
     defer allocator.free(text);
 
@@ -905,6 +576,53 @@ fn testBuildEnhancedSchemaFromRows(allocator: std.mem.Allocator) !void {
 
 test "buildEnhancedSchemaFromRows: allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testBuildEnhancedSchemaFromRows, .{});
+}
+
+test "buildEnhancedSchemaFromRows: multiple tables with FK and enum" {
+    const allocator = std.testing.allocator;
+    const col_data = [_]ColumnRowData{
+        .{ .table_name = "orders", .col_name = "id", .data_type = "integer", .is_nullable = "NO", .col_default = "", .is_pk = "true" },
+        .{ .table_name = "orders", .col_name = "status", .data_type = "order_status", .is_nullable = "NO", .col_default = "'pending'", .is_pk = "false" },
+        .{ .table_name = "orders", .col_name = "user_id", .data_type = "integer", .is_nullable = "NO", .col_default = "", .is_pk = "false" },
+        .{ .table_name = "users", .col_name = "id", .data_type = "integer", .is_nullable = "NO", .col_default = "", .is_pk = "true" },
+        .{ .table_name = "users", .col_name = "name", .data_type = "text", .is_nullable = "YES", .col_default = "", .is_pk = "false" },
+    };
+    const fk_data = [_]FkRowData{
+        .{ .table = "orders", .column = "user_id", .target_table = "users", .target_column = "id" },
+    };
+    const enum_data = [_]EnumRowData{
+        .{ .table = "orders", .column = "status", .label = "pending" },
+        .{ .table = "orders", .column = "status", .label = "shipped" },
+        .{ .table = "orders", .column = "status", .label = "delivered" },
+    };
+
+    var result = try buildEnhancedSchemaFromRows(allocator, &col_data, &fk_data, &enum_data);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.tables.len);
+
+    // Orders table
+    const orders = result.tables[0];
+    try std.testing.expectEqualStrings("orders", orders.name);
+    try std.testing.expectEqual(@as(usize, 3), orders.columns.len);
+    try std.testing.expect(orders.has_primary_key);
+
+    // FK on user_id
+    const user_id_col = orders.columns[2];
+    try std.testing.expectEqualStrings("user_id", user_id_col.name);
+    try std.testing.expectEqualStrings("users", user_id_col.fk_target_table.?);
+    try std.testing.expectEqualStrings("id", user_id_col.fk_target_column.?);
+
+    // ENUM on status
+    const status_col = orders.columns[1];
+    try std.testing.expectEqual(@as(usize, 3), status_col.enum_values.?.len);
+    try std.testing.expectEqualStrings("pending", status_col.enum_values.?[0]);
+    try std.testing.expectEqualStrings("'pending'", status_col.column_default.?);
+
+    // Users table
+    const users = result.tables[1];
+    try std.testing.expectEqualStrings("users", users.name);
+    try std.testing.expectEqual(@as(usize, 2), users.columns.len);
 }
 
 comptime {
