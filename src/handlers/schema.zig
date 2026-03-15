@@ -187,6 +187,7 @@ pub fn handleConnect(
     stream: std.net.Stream,
     request: []const u8,
     state: *ServerState,
+    arena: std.mem.Allocator,
 ) !void {
     const allocator = state.allocator;
 
@@ -291,10 +292,9 @@ pub fn handleConnect(
         state.enhanced_arena = es.arena;
     }
 
-    // Build response with schema info
+    // Build response with schema info (use arena for temp response buffer)
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
-    const w = json_buf.writer(allocator);
+    const w = json_buf.writer(arena);
     w.writeAll("{\"status\":\"connected\",\"schema\":\"") catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"status\":\"connected\"}");
         return;
@@ -307,7 +307,7 @@ pub fn handleConnect(
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
+pub fn handleSchema(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -350,8 +350,7 @@ pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
     };
 
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
-    const w = json_buf.writer(allocator);
+    const w = json_buf.writer(arena);
 
     try w.writeAll("{\"tables\":[");
 
@@ -430,7 +429,7 @@ pub fn handleSchema(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
+pub fn handleReconnect(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
     const allocator = state.allocator;
 
     const last_ci = state.last_conninfo orelse {
@@ -492,10 +491,9 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
         state.enhanced_arena = es.arena;
     }
 
-    // Build response
+    // Build response (use arena for temp response buffer)
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
-    const w = json_buf.writer(allocator);
+    const w = json_buf.writer(arena);
     w.writeAll("{\"ok\":true,\"schema\":\"") catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
         return;
@@ -507,13 +505,13 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState) !void {
+pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
     const conninfo_z = state.conninfo_z.?;
 
     const start_time = std.time.milliTimestamp();
@@ -568,18 +566,16 @@ pub fn handleReadOnlyGet(stream: std.net.Stream, state: *const ServerState) !voi
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleGetConnections(stream: std.net.Stream, state: *ServerState) !void {
-    const allocator = state.allocator;
-    const data = readConnectionsFile(allocator) catch {
+pub fn handleGetConnections(stream: std.net.Stream, _: *ServerState, arena: std.mem.Allocator) !void {
+    const data = readConnectionsFile(arena) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connections\":[]}");
         return;
     };
-    defer allocator.free(data);
     try utils.sendResponse(stream, "200 OK", "application/json", data);
 }
 
-pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
-    const allocator = state.allocator;
+pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+    const allocator = arena;
 
     // Parse body
     const content_length = utils.findContentLength(request) orelse {
@@ -632,10 +628,8 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
         };
-        defer allocator.free(entry);
 
         var new_file = std.ArrayList(u8){};
-        defer new_file.deinit(allocator);
         const nw = new_file.writer(allocator);
         nw.writeAll("{\"connections\":[") catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
@@ -651,7 +645,6 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"id\":1}");
         return;
     };
-    defer allocator.free(existing);
 
     // Find max existing ID
     const max_id = findMaxConnectionId(existing);
@@ -663,11 +656,9 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(entry);
 
     // Insert entry into existing JSON — find the closing "]}" and insert before it
     var new_file = std.ArrayList(u8){};
-    defer new_file.deinit(allocator);
     const nw = new_file.writer(allocator);
 
     // Find last ']' in existing content
@@ -717,8 +708,8 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
     try utils.sendResponse(stream, "200 OK", "application/json", id_resp);
 }
 
-pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
-    const allocator = state.allocator;
+pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, _: *ServerState, arena: std.mem.Allocator) !void {
+    const allocator = arena;
 
     // Parse ID from path: /api/connections/<id>
     const prefix = "/api/connections/";
@@ -737,11 +728,9 @@ pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, state: *
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"No connections file\"}");
         return;
     };
-    defer allocator.free(existing);
 
     // Rebuild the connections array, skipping the one with target_id.
     var new_file = std.ArrayList(u8){};
-    defer new_file.deinit(allocator);
     const nw = new_file.writer(allocator);
     nw.writeAll("{\"connections\":[") catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");

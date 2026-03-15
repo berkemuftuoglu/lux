@@ -326,13 +326,13 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream,
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
+pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse table name from path: /api/tables/<name>/data
     const prefix = "/api/tables/";
@@ -469,9 +469,7 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
         var view_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch break :view_check;
         defer view_conn.deinit();
         var vq_buf = std.ArrayList(u8){};
-        defer vq_buf.deinit(allocator);
         const esc_tn = utils.escapeStringValue(allocator, table_name) catch break :view_check;
-        defer allocator.free(esc_tn);
         vq_buf.writer(allocator).print("SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = '{s}' AND n.nspname = 'public' AND c.relkind = 'v'", .{esc_tn}) catch break :view_check;
         vq_buf.append(allocator, 0) catch break :view_check;
         const vq_z: [*:0]const u8 = @ptrCast(vq_buf.items[0 .. vq_buf.items.len - 1 :0]);
@@ -486,7 +484,6 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
 
     // Build WHERE clause from filters and keyset cursor
     var where_buf = std.ArrayList(u8){};
-    defer where_buf.deinit(allocator);
     const ww = where_buf.writer(allocator);
     var where_parts: usize = 0;
 
@@ -498,7 +495,6 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     for (filters[0..filter_count]) |f| {
         if (where_parts > 0) try ww.writeAll(" AND ");
         const esc_val = utils.escapeStringValue(allocator, f.value) catch continue;
-        defer allocator.free(esc_val);
         try ww.print("\"{s}\"::text ILIKE '%{s}%'", .{ f.column, esc_val });
         where_parts += 1;
     }
@@ -511,7 +507,6 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
                 try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
                 return;
             };
-            defer allocator.free(esc_cursor);
             try ww.print("\"{s}\" > '{s}'", .{ pk_col_name.?, esc_cursor });
             where_parts += 1;
         } else if (before_cursor) |cursor| {
@@ -520,7 +515,6 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
                 try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
                 return;
             };
-            defer allocator.free(esc_cursor);
             try ww.print("\"{s}\" < '{s}'", .{ pk_col_name.?, esc_cursor });
             where_parts += 1;
         }
@@ -529,10 +523,8 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
 
     // Build count query
     var count_buf = std.ArrayList(u8){};
-    defer count_buf.deinit(allocator);
     if (!use_exact_count) {
         const esc_count_tn = try utils.escapeStringValue(allocator, table_name);
-        defer allocator.free(esc_count_tn);
         try count_buf.writer(allocator).print("SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables WHERE relname = '{s}'", .{esc_count_tn});
     } else {
         try count_buf.writer(allocator).print("SELECT COUNT(*) FROM \"{s}\"{s}", .{ table_name, where_clause });
@@ -541,7 +533,6 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
 
     // Build data query
     var sql_list = std.ArrayList(u8){};
-    defer sql_list.deinit(allocator);
     const sw = sql_list.writer(allocator);
 
     if (use_keyset and before_cursor != null) {
@@ -599,14 +590,14 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     });
 }
 
-pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     var extra_buf: [8192]u8 = undefined;
     const body = readRequestBody(stream, request, &extra_buf, 8192) orelse {
@@ -672,13 +663,11 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(escaped_value);
 
     const escaped_pk = utils.escapeStringValue(allocator, pk_value) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(escaped_pk);
 
     // Check column type for json/jsonb casting
     var is_json_col = false;
@@ -701,7 +690,6 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
 
     // Build SQL: use ctid WHERE clause for no-PK tables
     var sql_buf = std.ArrayList(u8){};
-    defer sql_buf.deinit(allocator);
     const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
         try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}{s} WHERE ctid = '{s}'::tid RETURNING \"{s}\"", .{
@@ -747,14 +735,14 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     var extra_buf: [4096]u8 = undefined;
     const body = readRequestBody(stream, request, &extra_buf, 4096) orelse {
@@ -805,11 +793,9 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(escaped_pk);
 
     // Build SQL: DELETE with ctid or PK column
     var sql_buf = std.ArrayList(u8){};
-    defer sql_buf.deinit(allocator);
     const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
         try w.print("DELETE FROM \"{s}\" WHERE ctid = '{s}'::tid", .{ table_name, escaped_pk });
@@ -830,10 +816,8 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
     // Fetch the row BEFORE deleting so we can record it in the journal
     var old_row_json: []const u8 = "";
     var old_row_buf: ?[]u8 = null;
-    defer if (old_row_buf) |b| allocator.free(b);
     {
         var sel_buf = std.ArrayList(u8){};
-        defer sel_buf.deinit(allocator);
         const sel_w = sel_buf.writer(allocator);
         if (is_ctid_mode) {
             sel_w.print("SELECT * FROM \"{s}\" WHERE ctid = '{s}'::tid LIMIT 1", .{ table_name, escaped_pk }) catch |err| {
@@ -882,14 +866,14 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
 }
 
-pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     var extra_buf: [4096]u8 = undefined;
     const body = readRequestBody(stream, request, &extra_buf, 4096) orelse {
@@ -914,7 +898,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
 
     // Parse optional values object
     const values = extractJsonObject(allocator, body, "values");
-    defer if (values) |v| allocator.free(v);
 
     // Validate column keys against schema
     if (values) |pairs| {
@@ -932,7 +915,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
 
     // Build SQL
     var sql_builder = std.ArrayList(u8){};
-    defer sql_builder.deinit(allocator);
     const sw = sql_builder.writer(allocator);
 
     if (values) |pairs| {
@@ -945,7 +927,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
                     try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid column name\"}");
                     return;
                 };
-                defer allocator.free(esc_col);
                 try sw.print("\"{s}\"", .{esc_col});
             }
             try sw.writeAll(") VALUES (");
@@ -958,7 +939,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
                         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
                         return;
                     };
-                    defer allocator.free(escaped);
                     try sw.print("'{s}'", .{escaped});
                 }
             }
@@ -1004,7 +984,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
 
     // Build response with the new row
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
     const jw = json_buf.writer(allocator);
 
     try jw.writeAll("{\"success\":true,\"columns\":[");
@@ -1032,12 +1011,12 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
+pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse: /api/tables/<table>/fk-lookup?column=...&search=...
     const prefix = "/api/tables/";
@@ -1096,7 +1075,6 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
 
     // Build query
     var sql_buf = std.ArrayList(u8){};
-    defer sql_buf.deinit(allocator);
     const sw = sql_buf.writer(allocator);
 
     if (search.len > 0) {
@@ -1104,7 +1082,6 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
         };
-        defer allocator.free(esc_search);
         try sw.print("SELECT \"{s}\" FROM \"{s}\" WHERE \"{s}\"::text ILIKE '%{s}%' LIMIT {d}", .{ target_col, target_table, target_col, esc_search, fk_limit });
     } else {
         try sw.print("SELECT \"{s}\" FROM \"{s}\" LIMIT {d}", .{ target_col, target_table, fk_limit });
@@ -1127,7 +1104,6 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
 
     // Serialize results as JSON array
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
     const jw = json_buf.writer(allocator);
     try jw.writeAll("{\"values\":[");
     for (pg_result.rows, 0..) |row, ri| {
@@ -1147,13 +1123,13 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState) !void {
+pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse table name from path: /api/tables/<name>/bulk-update
     const prefix = "/api/tables/";
@@ -1206,7 +1182,6 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(esc_find);
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
@@ -1217,7 +1192,6 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     if (!force) {
         // Preview mode: count affected rows
         var cnt_sql = std.ArrayList(u8){};
-        defer cnt_sql.deinit(allocator);
         try cnt_sql.writer(allocator).print("SELECT COUNT(*) FROM \"{s}\" WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_find });
         try cnt_sql.append(allocator, 0);
         const cnt_z: [*:0]const u8 = @ptrCast(cnt_sql.items[0 .. cnt_sql.items.len - 1 :0]);
@@ -1239,9 +1213,7 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
         };
-        defer allocator.free(esc_replace);
         var upd_sql = std.ArrayList(u8){};
-        defer upd_sql.deinit(allocator);
         try upd_sql.writer(allocator).print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_replace, column, esc_find });
         try upd_sql.append(allocator, 0);
         const upd_z: [*:0]const u8 = @ptrCast(upd_sql.items[0 .. upd_sql.items.len - 1 :0]);
@@ -1265,14 +1237,14 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     }
 }
 
-pub fn handleTruncateTable(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
+pub fn handleTruncateTable(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Extract table name from /api/tables/<name>/truncate
     const prefix = "/api/tables/";

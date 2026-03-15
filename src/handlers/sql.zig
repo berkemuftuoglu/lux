@@ -38,13 +38,13 @@ pub fn addHistoryEntry(
     }
 }
 
-pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse body
     const content_length = utils.findContentLength(request) orelse {
@@ -70,7 +70,6 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(extra_buf);
     if (body.len < content_length) {
         const already_have = body.len;
         @memcpy(extra_buf[0..already_have], body);
@@ -111,7 +110,6 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
         const guard = sql_guard.analyzeSql(sql_text);
         if (guard.is_destructive) {
             var warn_buf = std.ArrayList(u8){};
-            defer warn_buf.deinit(allocator);
             const ww = warn_buf.writer(allocator);
             try ww.writeAll("{\"requires_confirmation\":true,\"operation\":\"");
             try utils.writeJsonEscaped(ww, guard.operation);
@@ -128,7 +126,6 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(sql_z);
 
     // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
@@ -167,12 +164,12 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     try crud.sendQueryResultJson(allocator, stream, &result);
 }
 
-pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = state.allocator;
+    const allocator = arena;
     var extra_buf: [8192]u8 = undefined;
     const body = crud.readRequestBody(stream, request, &extra_buf, 8192) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
@@ -216,7 +213,6 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(sql_z);
 
     var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
         // Try to get error message before rollback
@@ -243,7 +239,6 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
 
     // Build preview response
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
     const w = json_buf.writer(allocator);
     try w.print("{{\"preview\":true,\"affected_rows\":{d},", .{pg_result.n_rows});
 
@@ -341,13 +336,13 @@ pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
     try writer.writeAll("-- No automatic rollback available for this operation.");
 }
 
-pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = state.allocator;
+    const allocator = arena;
     var extra_buf: [8192]u8 = undefined;
     const body = crud.readRequestBody(stream, request, &extra_buf, 8192) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
@@ -360,7 +355,6 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
 
     // Generate rollback SQL
     var rollback_buf = std.ArrayList(u8){};
-    defer rollback_buf.deinit(allocator);
     generateRollbackSql(sql_text, rollback_buf.writer(allocator)) catch |err| {
         log.warn("generateRollbackSql failed: {s}", .{@errorName(err)});
     };
@@ -371,7 +365,6 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
 
     // Build response
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
     const w = json_buf.writer(allocator);
     try w.writeAll("{\"operation\":\"");
     try utils.writeJsonEscaped(w, guard.operation);
@@ -384,10 +377,8 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleHistory(stream: std.net.Stream, state: *ServerState) !void {
-    var arena = std.heap.ArenaAllocator.init(state.allocator);
-    defer arena.deinit();
-    const alloc = arena.allocator();
+pub fn handleHistory(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
+    const alloc = arena;
 
     var json = std.ArrayList(u8){};
     try json.appendSlice(alloc, "{\"entries\":[");
@@ -434,11 +425,9 @@ pub fn handleHistory(stream: std.net.Stream, state: *ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json.items);
 }
 
-pub fn handleJournal(stream: std.net.Stream, state: *const ServerState) !void {
-    const allocator = state.allocator;
+pub fn handleJournal(stream: std.net.Stream, state: *const ServerState, arena: std.mem.Allocator) !void {
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
-    const w = json_buf.writer(allocator);
+    const w = json_buf.writer(arena);
 
     try w.writeAll("{\"entries\":[");
     const items = state.change_journal.items;
@@ -465,14 +454,14 @@ pub fn handleJournal(stream: std.net.Stream, state: *const ServerState) !void {
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
     var extra_buf: [1024]u8 = undefined;
     const body = crud.readRequestBody(stream, request, &extra_buf, 1024) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
@@ -507,7 +496,6 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *Se
 
     // Build undo SQL
     var sql_buf = std.ArrayList(u8){};
-    defer sql_buf.deinit(allocator);
     const w = sql_buf.writer(allocator);
 
     if (std.mem.eql(u8, entry.operation, "update")) {
@@ -516,12 +504,10 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *Se
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
         };
-        defer allocator.free(escaped_old);
         const escaped_pk = utils.escapeStringValue(allocator, entry.pk_value) catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
         };
-        defer allocator.free(escaped_pk);
         try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\" = '{s}'", .{
             entry.table_name, entry.column_name, escaped_old, entry.pk_column, escaped_pk,
         });
@@ -534,7 +520,6 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *Se
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
         };
-        defer allocator.free(escaped_pk);
         try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = '{s}'", .{
             entry.table_name, entry.pk_column, escaped_pk,
         });

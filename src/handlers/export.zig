@@ -270,13 +270,13 @@ fn buildAndExecuteInsert(
     return true;
 }
 
-pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
+pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse table name from path: /api/export/<name>
     const prefix = "/api/export/";
@@ -357,7 +357,6 @@ pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerStat
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format CSV\"}");
             return;
         };
-        defer allocator.free(csv_data);
 
         // Build filename
         var filename_buf: [256]u8 = undefined;
@@ -372,7 +371,6 @@ pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerStat
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format JSON\"}");
             return;
         };
-        defer allocator.free(json_data);
 
         // Build filename
         var filename_buf: [256]u8 = undefined;
@@ -385,13 +383,13 @@ pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerStat
     }
 }
 
-pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse body
     const content_length = utils.findContentLength(request) orelse {
@@ -455,7 +453,6 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *Serv
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(sql_z);
 
     // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
@@ -481,25 +478,23 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *Serv
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format CSV\"}");
             return;
         };
-        defer allocator.free(csv_data);
         try utils.sendResponseWithDownload(stream, "200 OK", "text/csv; charset=utf-8", "export.csv", csv_data);
     } else {
         const json_data = formatResultAsJson(allocator, pg_result.col_names, pg_result.rows) catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format JSON\"}");
             return;
         };
-        defer allocator.free(json_data);
         try utils.sendResponseWithDownload(stream, "200 OK", "application/json", "export.json", json_data);
     }
 }
 
-pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerState) !void {
+pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse table name from path: /api/tables/<name>/ddl
     const prefix = "/api/tables/";
@@ -545,10 +540,8 @@ pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerSt
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(escaped_name);
 
     var sql_buf = std.ArrayList(u8){};
-    defer sql_buf.deinit(allocator);
     const sw = sql_buf.writer(allocator);
 
     // Use a CASE expression to generate correct DDL for both tables and views
@@ -602,7 +595,6 @@ pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerSt
 
     // Build JSON response
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
     const w = json_buf.writer(allocator);
     try w.writeAll("{\"ddl\":\"");
     try utils.writeJsonEscaped(w, ddl_text);
@@ -615,6 +607,7 @@ pub fn handleCsvImport(
     request: []const u8,
     path: []const u8,
     state: *ServerState,
+    arena: std.mem.Allocator,
 ) !void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
@@ -622,7 +615,7 @@ pub fn handleCsvImport(
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse table name from path: /api/tables/<name>/import
     const prefix = "/api/tables/";
@@ -688,19 +681,10 @@ pub fn handleCsvImport(
         try utils.sendResponse(stream, "400 Bad Request", "application/json", msg);
         return;
     };
-    defer {
-        for (csv_result.headers) |h| allocator.free(h);
-        allocator.free(csv_result.headers);
-        for (csv_result.rows) |row| {
-            for (row) |field| allocator.free(field);
-            allocator.free(row);
-        }
-        allocator.free(csv_result.rows);
-    }
+    // No defer needed — arena handles cleanup
 
     // Determine column names for INSERT
     var col_names = std.ArrayList([]const u8){};
-    defer col_names.deinit(allocator);
 
     if (has_header) {
         // Validate CSV headers match table columns
@@ -800,7 +784,6 @@ pub fn handleCsvImport(
         };
         rb.deinit();
         var resp_buf = std.ArrayList(u8){};
-        defer resp_buf.deinit(allocator);
         const rw = resp_buf.writer(allocator);
         try rw.writeAll("{\"error\":\"Import failed: ");
         try utils.writeJsonEscaped(rw, error_msg_buf[0..error_msg_len]);
@@ -826,13 +809,14 @@ pub fn handleTableStats(
     stream: std.net.Stream,
     path: []const u8,
     state: *ServerState,
+    arena: std.mem.Allocator,
 ) !void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = state.allocator;
+    const allocator = arena;
 
     // Parse table name from path: /api/tables/<name>/stats
     const prefix = "/api/tables/";
@@ -878,10 +862,8 @@ pub fn handleTableStats(
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    defer allocator.free(escaped_name);
 
     var sql_buf = std.ArrayList(u8){};
-    defer sql_buf.deinit(allocator);
     const sw = sql_buf.writer(allocator);
     try sw.writeAll(
         "SELECT " ++
@@ -935,7 +917,6 @@ pub fn handleTableStats(
 
     // Build JSON response
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
     const w = json_buf.writer(allocator);
     try w.writeAll("{\"row_estimate\":");
     try w.writeAll(row_estimate);

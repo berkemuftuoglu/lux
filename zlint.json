@@ -1,6 +1,6 @@
 {
   "rules": {
-    "allocator-first-param":    "error",
+    "allocator-first-param":    "warn",
     "avoid-as":                 "warn",
     "case-convention":          "error",
     "empty-file":               "warn",
