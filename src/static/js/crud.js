@@ -1,4 +1,5 @@
-// FK Autocomplete state (in-grid editing)
+// crud.js — Cell editing, FK autocomplete, row insert/update/delete, read-only toggle, journal
+
 let fkDropdown = null;
 let fkItems = [];
 let fkIndex = -1;
@@ -77,7 +78,6 @@ function hideFkDropdown() {
 	fkIndex = -1;
 }
 
-// Inline Cell Editing
 function startEdit(td) {
 	if (readOnlyMode) {
 		toast('Read-only mode', 'error');
@@ -236,7 +236,6 @@ async function saveEdit() {
 	}
 }
 
-// Delete Row
 async function deleteRow(rowIdx) {
 	if (readOnlyMode) {
 		toast('Read-only mode', 'error');
@@ -288,7 +287,6 @@ async function deleteRow(rowIdx) {
 	}
 }
 
-// Insert Row (Modal)
 async function submitInsert() {
 	const meta = getTableMeta(currentTable);
 	if (!meta) return;
@@ -334,7 +332,6 @@ async function submitInsert() {
 	}
 }
 
-// Set to NULL
 async function setToNull(rowIdx, colName, td) {
 	if (readOnlyMode) {
 		toast('Read-only mode', 'error');
@@ -382,7 +379,6 @@ async function setToNull(rowIdx, colName, td) {
 	}
 }
 
-// Read-Only Toggle
 $('btn-readonly').onclick = async () => {
 	try {
 		const data = await fetchJson('/api/settings/read-only', { method: 'POST' });
@@ -409,7 +405,6 @@ function updateReadOnlyUI() {
 	$('status-ro').classList.toggle('show', readOnlyMode);
 }
 
-// Journal
 function bumpJournal() {
 	journalCount++;
 	const badge = $('journal-badge');
@@ -451,7 +446,6 @@ async function loadJournal() {
 				entry.old_value &&
 				entry.old_value.startsWith('{')
 			) {
-				// Show deleted row data
 				try {
 					const rowData = JSON.parse(entry.old_value);
 					const keys = Object.keys(rowData).slice(0, 4);
@@ -541,7 +535,6 @@ async function loadJournal() {
 			};
 		});
 
-		// Enhance delete entries with more prominent PK info
 		list.querySelectorAll('.journal-entry').forEach((entry) => {
 			const opEl = entry.querySelector('.op.delete');
 			if (opEl) {

@@ -1,4 +1,5 @@
-// Schema
+// sidebar.js — Schema tree, table selection, data loading, type helpers, ER diagram
+
 async function loadSchema() {
 	try {
 		schemaData = await fetchJson('/api/schema');
@@ -60,7 +61,6 @@ function renderSidebar() {
 			cols.appendChild(c);
 		});
 
-		// Hide if doesn't match search
 		if (searchTerm && !table.name.toLowerCase().includes(searchTerm)) {
 			item.style.display = 'none';
 			cols.classList.add('search-hidden');
@@ -85,7 +85,6 @@ function renderSidebar() {
 	});
 }
 
-// Table search handler
 $('table-search').addEventListener('input', () => {
 	const term = $('table-search').value.toLowerCase();
 	$('schema-tree')
@@ -94,14 +93,12 @@ $('table-search').addEventListener('input', () => {
 			const name = (el.dataset.table || '').toLowerCase();
 			const match = !term || name.includes(term);
 			el.style.display = match ? '' : 'none';
-			// Also hide the columns div right after using class (no animation for search)
 			if (el.nextElementSibling?.classList.contains('tree-columns')) {
 				el.nextElementSibling.classList.toggle('search-hidden', !match);
 			}
 		});
 });
 
-// Table Selection & Data
 function updateDestructiveButtons(enabled) {
 	const ids = [
 		'btn-truncate',
@@ -235,36 +232,27 @@ function isEnumType(type, colMeta) {
 	if (colMeta?.enum_values && colMeta.enum_values.length > 0) return true;
 	return type.toLowerCase() === 'user-defined';
 }
-// Map enum values to semantic color classes for pill rendering
 function enumPillClass(val) {
 	const v = val.toLowerCase();
-	// Status-like: done/complete/closed/resolved -> success
 	if (/done|complete|closed|resolved|active|enabled/.test(v))
 		return 'pill-success';
-	// In-progress/open -> accent
 	if (/in.progress|in_progress|open|started|running|pending/.test(v))
 		return 'pill-accent';
-	// Cancelled/blocked/failed/disabled -> error
 	if (/cancel|blocked|failed|disabled|rejected|archived/.test(v))
 		return 'pill-error';
-	// Priority: urgent/critical -> error, high -> warning, medium -> accent, low/none -> muted
 	if (/urgent|critical/.test(v)) return 'pill-error';
 	if (/high/.test(v)) return 'pill-warning';
 	if (/medium/.test(v)) return 'pill-accent';
 	if (/low|none|trivial/.test(v)) return 'pill-muted';
-	// Todo/backlog -> subtle
 	if (/todo|backlog|draft|review|planned/.test(v)) return 'pill-subtle';
 	return 'pill-default';
 }
 
-// ER Diagram
-let erPositions = []; // stored for hover detection
+let erPositions = [];
 let erTablePos = {};
 let erHoveredTable = null;
-let erLayoutCache = null; // cached force-directed layout
+let erLayoutCache = null;
 
-// Force-directed graph layout -- computes non-overlapping positions
-// where FK-connected tables are placed near each other.
 function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 	const cacheKey = tables
 		.map((t) => t.name)
@@ -273,16 +261,14 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 	if (erLayoutCache && erLayoutCache.key === cacheKey)
 		return erLayoutCache.nodes;
 
-	const PAD = 28; // minimum gap between boxes
+	const PAD = 28;
 
-	// Sort: most-connected tables first
 	const sorted = [...tables].sort((a, b) => {
 		const al = fkLinks[a.name] ? fkLinks[a.name].size : 0;
 		const bl = fkLinks[b.name] ? fkLinks[b.name].size : 0;
 		return bl - al;
 	});
 
-	// Build unique edge list for spring forces
 	const edgeSet = new Set();
 	const edges = [];
 	tables.forEach((t) => {
@@ -297,7 +283,6 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 		});
 	});
 
-	// Initialize positions -- circular for connected tables, row below for isolated
 	const cx = Math.max(W, 1200) / 2,
 		cy = Math.max(H, 900) / 2;
 	const connected = sorted.filter(
@@ -349,23 +334,20 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 		isoX += sz.w + PAD + 20;
 	});
 
-	// Run force simulation (only on connected nodes for performance)
 	const simNodes = nodes.filter(
 		(n) => fkLinks[n.name] && fkLinks[n.name].size > 0
 	);
 	const ITERS = 300;
 
 	for (let iter = 0; iter < ITERS; iter++) {
-		const alpha = 1 - iter / ITERS; // cooling
-		const t = alpha * alpha; // quadratic decay for smooth settling
+		const alpha = 1 - iter / ITERS;
+		const t = alpha * alpha;
 
-		// Reset forces
 		simNodes.forEach((n) => {
 			n.fx = 0;
 			n.fy = 0;
 		});
 
-		// Repulsion -- push all pairs apart (rectangle-aware)
 		for (let i = 0; i < simNodes.length; i++) {
 			for (let j = i + 1; j < simNodes.length; j++) {
 				const a = simNodes[i],
@@ -381,7 +363,6 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 					dy = (Math.random() - 0.5) * 10;
 				}
 				const dist = Math.sqrt(dx * dx + dy * dy);
-				// Stronger repulsion when close, weaker when far
 				const strength = 120000 / (dist * dist + 200);
 				const fx = (dx / dist) * strength * t;
 				const fy = (dy / dist) * strength * t;
@@ -392,7 +373,6 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 			}
 		}
 
-		// Attraction -- FK-connected tables pull toward each other
 		edges.forEach((e) => {
 			const a = nodeMap[e.from],
 				b = nodeMap[e.to];
@@ -414,13 +394,11 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 			b.fy -= fy;
 		});
 
-		// Centering gravity -- gentle pull toward center
 		simNodes.forEach((n) => {
 			n.fx += (cx - n.x - n.w / 2) * 0.005 * t;
 			n.fy += (cy - n.y - n.h / 2) * 0.005 * t;
 		});
 
-		// Apply forces with velocity damping
 		let maxV = 0;
 		simNodes.forEach((n) => {
 			n.vx = (n.vx + n.fx) * 0.6;
@@ -430,10 +408,8 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 			const v = Math.abs(n.vx) + Math.abs(n.vy);
 			if (v > maxV) maxV = v;
 		});
-		// Early termination when all nodes have settled
 		if (iter > 50 && maxV < 0.5) break;
 
-		// Hard overlap resolution -- push overlapping boxes apart
 		for (let pass = 0; pass < 4; pass++) {
 			for (let i = 0; i < simNodes.length; i++) {
 				for (let j = i + 1; j < simNodes.length; j++) {
@@ -444,7 +420,6 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 					const oy =
 						a.h / 2 + b.h / 2 + PAD - Math.abs(b.y + b.h / 2 - (a.y + a.h / 2));
 					if (ox > 0 && oy > 0) {
-						// Push apart along the axis of least overlap
 						if (ox < oy) {
 							const push = ox / 2 + 1;
 							if (a.x + a.w / 2 < b.x + b.w / 2) {
@@ -470,7 +445,6 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 		}
 	}
 
-	// Normalize: shift so all positions start at margin
 	let minX = Infinity,
 		minY = Infinity;
 	nodes.forEach((n) => {
@@ -514,7 +488,6 @@ function drawER() {
 	const rowH = 20;
 	const headerH = 30;
 
-	// Build FK index: which tables are related to which
 	const fkLinks = {};
 	tables.forEach((t) => {
 		if (!fkLinks[t.name]) fkLinks[t.name] = new Set();
@@ -528,7 +501,6 @@ function drawER() {
 		});
 	});
 
-	// Measure box sizes
 	ctx.font = '12px ui-monospace, monospace';
 	const boxSizeMap = {};
 	tables.forEach((t) => {
@@ -545,10 +517,8 @@ function drawER() {
 		boxSizeMap[t.name] = { w, h };
 	});
 
-	// Get force-directed layout (cached)
 	const layoutNodes = computeERLayout(tables, fkLinks, boxSizeMap, W, H);
 
-	// Build positions with pan offset
 	const positions = layoutNodes.map((n) => ({
 		x: n.x + erPanX,
 		y: n.y + erPanY,
@@ -557,12 +527,10 @@ function drawER() {
 		table: n.table,
 	}));
 
-	// Store globally for hover detection
 	erPositions = positions;
 	erTablePos = {};
 	positions.forEach((p) => (erTablePos[p.table.name] = p));
 
-	// Canvas sizing -- fit all content
 	let maxX = 0,
 		maxY = 0;
 	positions.forEach((p) => {
@@ -581,7 +549,6 @@ function drawER() {
 	ctx.scale(erZoom, erZoom);
 	ctx.clearRect(0, 0, canvasW / erZoom, canvasH / erZoom);
 
-	// Determine which tables are "active" (hovered or related to hovered)
 	const hovered = erHoveredTable;
 	const relatedSet = new Set();
 	if (hovered) {
@@ -594,7 +561,6 @@ function drawER() {
 	const dimLineColor = 'rgba(100,110,140,0.15)';
 	const brightLineColor = accentColor;
 
-	// FK line drawing -- bezier curves with smart exit side
 	function drawFkLine(fromTable, col, ci, bright) {
 		const from = erTablePos[fromTable.name];
 		const to = erTablePos[col.fk_target_table];
@@ -675,7 +641,6 @@ function drawER() {
 		}
 	}
 
-	// Pass 1: dim FK lines
 	tables.forEach((t) => {
 		t.columns.forEach((col, ci) => {
 			if (!col.fk_target_table) return;
@@ -686,7 +651,7 @@ function drawER() {
 			if (!isBright) drawFkLine(t, col, ci, false);
 		});
 	});
-	// Pass 2: bright FK lines (on top)
+	// Bright FK lines drawn on top so they aren't hidden by dim ones
 	if (hasHover) {
 		tables.forEach((t) => {
 			t.columns.forEach((col, ci) => {
@@ -698,7 +663,6 @@ function drawER() {
 		});
 	}
 
-	// Table boxes
 	positions.forEach((p) => {
 		const t = p.table;
 		const isActive = !hasHover || relatedSet.has(t.name);
@@ -706,13 +670,11 @@ function drawER() {
 
 		ctx.globalAlpha = boxAlpha;
 
-		// Box shadow
 		ctx.fillStyle = 'rgba(0,0,0,0.15)';
 		ctx.beginPath();
 		ctx.roundRect(p.x + 2, p.y + 2, p.w, p.h, 8);
 		ctx.fill();
 
-		// Box body
 		ctx.fillStyle = style.getPropertyValue('--er-box-bg').trim();
 		ctx.strokeStyle =
 			isActive && hasHover && t.name === hovered
@@ -724,7 +686,6 @@ function drawER() {
 		ctx.fill();
 		ctx.stroke();
 
-		// Header
 		ctx.fillStyle = style.getPropertyValue('--er-header-bg').trim();
 		ctx.beginPath();
 		ctx.roundRect(p.x, p.y, p.w, headerH, [8, 8, 0, 0]);
@@ -736,12 +697,10 @@ function drawER() {
 		ctx.lineTo(p.x + p.w, p.y + headerH);
 		ctx.stroke();
 
-		// Table name
 		ctx.fillStyle = style.getPropertyValue('--er-text').trim();
 		ctx.font = '600 12px -apple-system, sans-serif';
 		ctx.fillText(t.name, p.x + 12, p.y + 19);
 
-		// Column count + link badge
 		const incomingCount = fkLinks[t.name] ? fkLinks[t.name].size : 0;
 		ctx.fillStyle = style.getPropertyValue('--er-text-dim').trim();
 		ctx.font = '10px -apple-system, sans-serif';
@@ -752,7 +711,6 @@ function drawER() {
 		const bw = ctx.measureText(badge).width;
 		ctx.fillText(badge, p.x + p.w - bw - 10, p.y + 19);
 
-		// Columns
 		t.columns.forEach((col, ci) => {
 			const y = p.y + headerH + ci * rowH + 15;
 			if (ci % 2 === 1) {
@@ -811,7 +769,6 @@ window.addEventListener('mousemove', (e) => {
 		drawER();
 		return;
 	}
-	// Hover detection on ER canvas
 	const canvas = $('er-canvas');
 	if (!canvas || !$('panel-er').classList.contains('active')) return;
 	const rect = canvas.getBoundingClientRect();

@@ -1,3 +1,5 @@
+// grid.js — Data grid rendering, cell focus, pagination, context menu, row selection, bulk ops
+
 function displayCols() {
 	return currentPkMode === 'ctid'
 		? currentColumns.filter((c) => c !== 'ctid')
@@ -43,7 +45,6 @@ function renderGrid() {
 	});
 	headHtml += '<th class="row-actions-col"></th></tr>';
 
-	// Filter row
 	headHtml += '<tr class="filter-row"><th></th>';
 	cols.forEach((col) => {
 		const val = columnFilters[col] || '';
@@ -71,7 +72,6 @@ function renderGrid() {
 			};
 		});
 
-	// Column filter handlers
 	let filterTimer = null;
 	$('grid-head')
 		.querySelectorAll('.col-filter')
@@ -187,7 +187,6 @@ function renderGrid() {
 		.querySelectorAll('td.editable')
 		.forEach((td) => {
 			td.addEventListener('dblclick', () => startEdit(td));
-			// Single click: copy to clipboard and focus cell
 			td.addEventListener('click', (e) => {
 				if (td.classList.contains('editing')) return;
 				const val = td.textContent;
@@ -206,7 +205,6 @@ function renderGrid() {
 							/* clipboard not available in insecure context */
 						});
 				}
-				// Set focus
 				focusRow = parseInt(td.dataset.row, 10);
 				focusCol = Array.from(
 					td.parentElement.querySelectorAll('td.editable')
@@ -223,7 +221,6 @@ function renderGrid() {
 			);
 		});
 
-	// Row number click: detail view or multi-select
 	$('grid-body')
 		.querySelectorAll('td.row-num')
 		.forEach((td) => {
@@ -245,7 +242,6 @@ function renderGrid() {
 			});
 		});
 
-	// Context menu on cells
 	$('grid-body').addEventListener('contextmenu', (e) => {
 		const td = e.target.closest('td.editable');
 		const tr = e.target.closest('tr');
@@ -256,7 +252,6 @@ function renderGrid() {
 		showContextMenu(e.clientX, e.clientY, ri, col, td);
 	});
 
-	// Restore focus if any
 	if (focusRow >= 0 && focusCol >= 0) updateCellFocus();
 }
 
@@ -296,7 +291,6 @@ $('page-next').onclick = () => {
 	loadTableData();
 };
 
-// Context Menu
 function showContextMenu(x, y, rowIdx, colName, td) {
 	const menu = $('ctx-menu');
 	const val = td.textContent;
@@ -395,7 +389,6 @@ function copyRowAsInsert(rowIdx) {
 		.catch(() => {});
 }
 
-// Multi-Row Selection
 function updateRowSelection() {
 	$('grid-body')
 		.querySelectorAll('tr')
@@ -517,7 +510,6 @@ $('bulk-copy-sql').onclick = () => {
 		.catch(() => {});
 };
 
-// Row Detail Modal
 function showRowDetail(rowIdx) {
 	const cols = displayCols();
 	const meta = getTableMeta(currentTable);
@@ -551,7 +543,6 @@ function showRowDetail(rowIdx) {
 
 $('detail-copy').onclick = () => {
 	const cols = displayCols();
-	// Get row index from the title
 	const titleText = $('detail-title').textContent;
 	const match = titleText.match(/Row (\d+)/);
 	if (!match) return;

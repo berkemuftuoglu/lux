@@ -18,31 +18,25 @@ pub const SqlGuardResult = struct {
 };
 
 pub fn analyzeSql(sql: []const u8) SqlGuardResult {
-    // Skip leading whitespace
     var i: usize = 0;
     while (i < sql.len and (sql[i] == ' ' or sql[i] == '\t' or sql[i] == '\n' or sql[i] == '\r')) i += 1;
     if (i >= sql.len) return .{ .is_destructive = false, .operation = "", .warning = "" };
     const rest = sql[i..];
 
-    // DROP
     if (rest.len >= 4 and matchesIgnoreCase(rest, "DROP")) {
         return .{ .is_destructive = true, .operation = "DROP", .warning = "This will permanently drop the object. This cannot be undone." };
     }
-    // TRUNCATE
     if (rest.len >= 8 and matchesIgnoreCase(rest, "TRUNCATE")) {
         return .{ .is_destructive = true, .operation = "TRUNCATE", .warning = "This will delete ALL rows from the table. This cannot be undone." };
     }
-    // ALTER
     if (rest.len >= 5 and matchesIgnoreCase(rest, "ALTER")) {
         return .{ .is_destructive = true, .operation = "ALTER", .warning = "This will modify the table schema. Review carefully." };
     }
-    // DELETE without WHERE
     if (rest.len >= 6 and matchesIgnoreCase(rest, "DELETE")) {
         if (!containsIgnoreCaseWord(sql, "WHERE")) {
             return .{ .is_destructive = true, .operation = "DELETE", .warning = "DELETE without WHERE clause will delete ALL rows." };
         }
     }
-    // UPDATE without WHERE
     if (rest.len >= 6 and matchesIgnoreCase(rest, "UPDATE")) {
         if (!containsIgnoreCaseWord(sql, "WHERE")) {
             return .{ .is_destructive = true, .operation = "UPDATE", .warning = "UPDATE without WHERE clause will update ALL rows." };
@@ -51,19 +45,16 @@ pub fn analyzeSql(sql: []const u8) SqlGuardResult {
     return .{ .is_destructive = false, .operation = "", .warning = "" };
 }
 
-/// Check if SQL text contains multiple statements (semicolons outside strings/comments).
-/// A trailing semicolon with only whitespace after it does NOT count.
 pub fn hasMultipleStatements(sql: []const u8) bool {
     var i: usize = 0;
     while (i < sql.len) {
         const ch = sql[i];
 
-        // Single-quoted string: skip to closing quote (handle escaped quotes '')
         if (ch == '\'') {
             i += 1;
             while (i < sql.len) {
                 if (sql[i] == '\'' and i + 1 < sql.len and sql[i + 1] == '\'') {
-                    i += 2; // escaped quote
+                    i += 2;
                 } else if (sql[i] == '\'') {
                     i += 1;
                     break;
@@ -74,7 +65,6 @@ pub fn hasMultipleStatements(sql: []const u8) bool {
             continue;
         }
 
-        // Double-quoted identifier: skip to closing quote
         if (ch == '"') {
             i += 1;
             while (i < sql.len) : (i += 1) {
@@ -86,16 +76,13 @@ pub fn hasMultipleStatements(sql: []const u8) bool {
             continue;
         }
 
-        // Dollar-quoted string: $$ ... $$ or $tag$ ... $tag$
         if (ch == '$') {
-            // Extract the opening tag: $ followed by optional identifier chars, then $
             const tag_start = i;
             var ti = i + 1;
             while (ti < sql.len and ((sql[ti] >= 'a' and sql[ti] <= 'z') or (sql[ti] >= 'A' and sql[ti] <= 'Z') or (sql[ti] >= '0' and sql[ti] <= '9') or sql[ti] == '_')) ti += 1;
             if (ti < sql.len and sql[ti] == '$') {
-                const tag = sql[tag_start .. ti + 1]; // e.g. "$$" or "$tag$"
-                i = ti + 1; // skip past opening tag
-                // Find matching closing tag
+                const tag = sql[tag_start .. ti + 1];
+                i = ti + 1;
                 while (i + tag.len <= sql.len) {
                     if (std.mem.eql(u8, sql[i .. i + tag.len], tag)) {
                         i += tag.len;
@@ -105,19 +92,16 @@ pub fn hasMultipleStatements(sql: []const u8) bool {
                 }
                 continue;
             }
-            // Not a dollar-quote, just a bare $
             i += 1;
             continue;
         }
 
-        // Line comment: -- skip to end of line
         if (ch == '-' and i + 1 < sql.len and sql[i + 1] == '-') {
             i += 2;
             while (i < sql.len and sql[i] != '\n') : (i += 1) {}
             continue;
         }
 
-        // Block comment: /* ... */
         if (ch == '/' and i + 1 < sql.len and sql[i + 1] == '*') {
             i += 2;
             while (i + 1 < sql.len) {
@@ -130,11 +114,10 @@ pub fn hasMultipleStatements(sql: []const u8) bool {
             continue;
         }
 
-        // Semicolon: check if there's a real statement after it
         if (ch == ';') {
             var j = i + 1;
             while (j < sql.len and (sql[j] == ' ' or sql[j] == '\t' or sql[j] == '\n' or sql[j] == '\r')) : (j += 1) {}
-            if (j < sql.len) return true; // non-whitespace after semicolon
+            if (j < sql.len) return true;
         }
 
         i += 1;
@@ -147,38 +130,30 @@ pub fn hasMultipleStatements(sql: []const u8) bool {
 /// Scans for write keywords outside string literals to catch CTE bypass attacks
 /// like: WITH cte AS (DELETE FROM users RETURNING *) SELECT * FROM cte
 pub fn isSqlReadSafe(sql: []const u8) bool {
-    // Block multi-statement scripts entirely in read-only mode
     if (hasMultipleStatements(sql)) return false;
 
-    // Skip leading whitespace
     var i: usize = 0;
     while (i < sql.len and (sql[i] == ' ' or sql[i] == '\t' or sql[i] == '\n' or sql[i] == '\r')) i += 1;
     if (i >= sql.len) return false;
     const rest = sql[i..];
 
-    // Whitelist: only these prefixes are safe reads
     if (rest.len >= 6 and matchesIgnoreCase(rest[0..6], "SELECT")) return true;
     if (rest.len >= 4 and matchesIgnoreCase(rest[0..4], "SHOW")) return true;
-    // EXPLAIN is safe, but EXPLAIN ANALYZE actually executes the query —
-    // so if ANALYZE is present, check the inner statement for write keywords
+    // EXPLAIN ANALYZE actually executes the inner query, so check it for writes
     if (rest.len >= 7 and matchesIgnoreCase(rest[0..7], "EXPLAIN")) {
-        // Skip "EXPLAIN" and any whitespace
         var ei: usize = 7;
         while (i + ei < sql.len and (sql[i + ei] == ' ' or sql[i + ei] == '\t' or sql[i + ei] == '\n' or sql[i + ei] == '\r')) ei += 1;
-        // Check if ANALYZE follows
         if (rest.len >= ei + 7 and matchesIgnoreCase(rest[ei .. ei + 7], "ANALYZE")) {
-            // EXPLAIN ANALYZE — must verify the inner query has no write keywords
             return !containsWriteKeyword(sql);
         }
-        return true; // plain EXPLAIN (without ANALYZE) is safe
+        return true;
     }
 
-    // WITH: safe only if no write keywords appear outside string literals
     if (rest.len >= 4 and matchesIgnoreCase(rest[0..4], "WITH")) {
         return !containsWriteKeyword(sql);
     }
 
-    return false; // Everything else (BEGIN, COPY, DO, INSERT, etc.) is blocked
+    return false;
 }
 
 /// Scan SQL for write keywords (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE,
@@ -195,7 +170,7 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
             i += 1;
             while (i < sql.len) {
                 if (sql[i] == '\'' and i + 1 < sql.len and sql[i + 1] == '\'') {
-                    i += 2; // escaped quote
+                    i += 2;
                 } else if (sql[i] == '\'') {
                     break;
                 } else {

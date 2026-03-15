@@ -18,8 +18,6 @@ const CsvParseError = error{
     OutOfMemory,
 };
 
-/// Write a single CSV field, quoting it if it contains commas, quotes, or newlines.
-/// Internal double quotes are escaped by doubling them (RFC 4180).
 fn escapeCsvField(writer: anytype, field: []const u8) !void {
     var needs_quoting = false;
     for (field) |ch| {
@@ -45,8 +43,6 @@ fn escapeCsvField(writer: anytype, field: []const u8) !void {
     try writer.writeByte('"');
 }
 
-/// Format query result as CSV text (RFC 4180 with CRLF line endings).
-/// Caller owns the returned memory.
 fn formatResultAsCsv(
     allocator: std.mem.Allocator,
     col_names: []const []const u8,
@@ -56,14 +52,12 @@ fn formatResultAsCsv(
     errdefer buf.deinit(allocator);
     const w = buf.writer(allocator);
 
-    // Header row
     for (col_names, 0..) |name, i| {
         if (i > 0) w.writeByte(',') catch return error.OutOfMemory;
         escapeCsvField(w, name) catch return error.OutOfMemory;
     }
     w.writeAll("\r\n") catch return error.OutOfMemory;
 
-    // Data rows
     for (rows) |row| {
         for (row, 0..) |val, i| {
             if (i > 0) w.writeByte(',') catch return error.OutOfMemory;
@@ -75,9 +69,6 @@ fn formatResultAsCsv(
     return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
-/// Format query result as a JSON array of objects.
-/// NULL values (the literal string "NULL" from libpq) are rendered as JSON null.
-/// Caller owns the returned memory.
 fn formatResultAsJson(
     allocator: std.mem.Allocator,
     col_names: []const []const u8,
@@ -96,14 +87,12 @@ fn formatResultAsJson(
         for (row, 0..) |val, ci| {
             if (ci > 0) w.writeByte(',') catch return error.OutOfMemory;
 
-            // Write key
             w.writeByte('"') catch return error.OutOfMemory;
             if (ci < col_names.len) {
                 utils.writeJsonEscaped(w, col_names[ci]) catch return error.OutOfMemory;
             }
             w.writeAll("\":") catch return error.OutOfMemory;
 
-            // Write value — NULL becomes JSON null, everything else is a string
             if (std.mem.eql(u8, val, "NULL")) {
                 w.writeAll("null") catch return error.OutOfMemory;
             } else {
@@ -121,11 +110,6 @@ fn formatResultAsJson(
     return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
-/// Parse a CSV string into a list of rows, each row being a list of field values.
-/// Handles quoted fields (RFC 4180): double quotes inside quoted fields are escaped
-/// by doubling them. Supports both \n and \r\n line endings.
-/// Returns headers (first row) and data rows as separate allocations.
-/// Caller must free each field, each row slice, and the headers/rows slices.
 fn parseCsvContent(
     allocator: std.mem.Allocator,
     csv: []const u8,
@@ -143,7 +127,6 @@ fn parseCsvContent(
 
     var pos: usize = 0;
     while (pos < csv.len) {
-        // Skip trailing whitespace-only content
         var check = pos;
         while (check < csv.len and (csv[check] == '\r' or csv[check] == '\n' or csv[check] == ' ')) check += 1;
         if (check >= csv.len) break;
@@ -154,23 +137,19 @@ fn parseCsvContent(
             fields.deinit(allocator);
         }
 
-        // Parse one row
         while (true) {
             if (pos >= csv.len) break;
 
             if (csv[pos] == '"') {
-                // Quoted field
-                pos += 1; // skip opening quote
+                pos += 1;
                 var field_buf = std.ArrayList(u8){};
                 errdefer field_buf.deinit(allocator);
                 while (pos < csv.len) {
                     if (csv[pos] == '"') {
                         if (pos + 1 < csv.len and csv[pos + 1] == '"') {
-                            // Escaped double quote
                             field_buf.append(allocator, '"') catch return error.OutOfMemory;
                             pos += 2;
                         } else {
-                            // End of quoted field
                             pos += 1;
                             break;
                         }
@@ -182,7 +161,6 @@ fn parseCsvContent(
                 const owned = field_buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
                 fields.append(allocator, owned) catch return error.OutOfMemory;
             } else {
-                // Unquoted field — read until comma or newline
                 const start = pos;
                 while (pos < csv.len and csv[pos] != ',' and csv[pos] != '\n' and csv[pos] != '\r') {
                     pos += 1;
@@ -192,14 +170,13 @@ fn parseCsvContent(
                 fields.append(allocator, val) catch return error.OutOfMemory;
             }
 
-            // After field: expect comma (more fields), newline (end of row), or EOF
             if (pos >= csv.len) break;
             if (csv[pos] == ',') {
-                pos += 1; // skip comma, continue to next field
+                pos += 1;
                 continue;
             }
-            if (csv[pos] == '\r') pos += 1; // skip CR
-            if (pos < csv.len and csv[pos] == '\n') pos += 1; // skip LF
+            if (csv[pos] == '\r') pos += 1;
+            if (pos < csv.len and csv[pos] == '\n') pos += 1;
             break;
         }
 
@@ -213,18 +190,15 @@ fn parseCsvContent(
 
     if (all_rows.items.len == 0) return error.EmptyCsv;
 
-    // First row is always returned as headers
     const headers = all_rows.items[0];
 
     if (all_rows.items.len < 2) {
-        // Only headers, no data rows
         const empty_rows = allocator.alloc([]const []const u8, 0) catch return error.OutOfMemory;
         // Remove the header from all_rows so errdefer doesn't free it
         _ = all_rows.orderedRemove(0);
         return .{ .headers = headers, .rows = empty_rows };
     }
 
-    // Copy data rows into a separate allocation
     const data_rows = allocator.alloc([]const []const u8, all_rows.items.len - 1) catch return error.OutOfMemory;
     for (all_rows.items[1..], 0..) |row, i| {
         data_rows[i] = row;
@@ -278,7 +252,6 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
 
     const allocator = arena;
 
-    // Parse table name from path: /api/export/<name>
     const prefix = "/api/export/";
     if (!std.mem.startsWith(u8, path, prefix)) {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
@@ -286,7 +259,6 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
     }
 
     const after_prefix = path[prefix.len..];
-    // Split off query string
     const path_part = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[0..qi] else after_prefix;
     const query_string = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[qi + 1 ..] else "";
 
@@ -296,7 +268,7 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
         return;
     }
 
-    // Validate table name exists in schema (fail-closed: reject if schema not loaded)
+    // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -315,7 +287,6 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
         }
     }
 
-    // Parse format from query string
     var fmt_buf: [8]u8 = undefined;
     const format_param = utils.parseStringQueryParam(query_string, "format", &fmt_buf) orelse "csv";
 
@@ -326,7 +297,6 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
         return;
     }
 
-    // Connect to Postgres and run SELECT * FROM "<table>"
     const conninfo_z = state.conninfo_z orelse {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -338,7 +308,6 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
     };
     defer pg_conn.deinit();
 
-    // Build query: SELECT * FROM "<table_name>"
     var sql_buf: [256]u8 = undefined;
     const sql = std.fmt.bufPrintZ(&sql_buf, "SELECT * FROM \"{s}\"", .{table_name}) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Table name too long\"}");
@@ -351,14 +320,12 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
     };
     defer result.deinit();
 
-    // Format the result
     if (is_csv) {
         const csv_data = formatResultAsCsv(allocator, result.col_names, result.rows) catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format CSV\"}");
             return;
         };
 
-        // Build filename
         var filename_buf: [256]u8 = undefined;
         const filename = std.fmt.bufPrint(&filename_buf, "{s}.csv", .{table_name}) catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Filename too long\"}");
@@ -372,7 +339,6 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
             return;
         };
 
-        // Build filename
         var filename_buf: [256]u8 = undefined;
         const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{table_name}) catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Filename too long\"}");
@@ -391,7 +357,6 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u
 
     const allocator = arena;
 
-    // Parse body
     const content_length = utils.findContentLength(request) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing Content-Length\"}");
         return;
@@ -433,7 +398,6 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     }
 
-    // Block write operations in read-only mode
     const sql_guard = @import("sql_guard");
     if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
         try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to export write operations.\"}");
@@ -448,13 +412,11 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     }
 
-    // Build null-terminated SQL
     const sql_z = allocator.dupeZ(u8, sql_text) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
 
-    // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
@@ -496,7 +458,6 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
 
     const allocator = arena;
 
-    // Parse table name from path: /api/tables/<name>/ddl
     const prefix = "/api/tables/";
     if (!std.mem.startsWith(u8, path, prefix)) {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
@@ -516,7 +477,7 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
         return;
     }
 
-    // Validate table name exists in schema (fail-closed: reject if schema not loaded)
+    // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -535,7 +496,6 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
         }
     }
 
-    // Check if this is a view or table
     const escaped_name = utils.escapeStringValue(allocator, table_name) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
@@ -544,7 +504,6 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
     var sql_buf = std.ArrayList(u8){};
     const sw = sql_buf.writer(allocator);
 
-    // Use a CASE expression to generate correct DDL for both tables and views
     try sw.writeAll(
         "SELECT CASE WHEN cls.relkind = 'v' THEN " ++
             "'CREATE OR REPLACE VIEW \"' || cls.relname || '\" AS' || chr(10) || pg_get_viewdef(cls.oid, true) " ++
@@ -566,7 +525,6 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
     try sql_buf.append(allocator, 0);
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
-    // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
@@ -585,7 +543,6 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
     };
     defer pg_result.deinit();
 
-    // Extract DDL from result
     if (pg_result.n_rows == 0 or pg_result.rows.len == 0 or pg_result.rows[0].len == 0) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Could not generate DDL for table\"}");
         return;
@@ -593,7 +550,6 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
 
     const ddl_text = pg_result.rows[0][0];
 
-    // Build JSON response
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(allocator);
     try w.writeAll("{\"ddl\":\"");
@@ -617,7 +573,6 @@ pub fn handleCsvImport(
 
     const allocator = arena;
 
-    // Parse table name from path: /api/tables/<name>/import
     const prefix = "/api/tables/";
     if (!std.mem.startsWith(u8, path, prefix)) {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
@@ -637,7 +592,6 @@ pub fn handleCsvImport(
         return;
     }
 
-    // Validate table name exists in schema
     const tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
         return;
@@ -647,7 +601,6 @@ pub fn handleCsvImport(
         return;
     };
 
-    // Read request body
     const max_request_size = 8192;
     var extra_buf: [max_request_size]u8 = undefined;
     const body = crud.readRequestBody(stream, request, &extra_buf, max_request_size) orelse {
@@ -655,7 +608,6 @@ pub fn handleCsvImport(
         return;
     };
 
-    // Extract CSV content from JSON body
     const csv_content = utils.extractJsonField(body, "csv") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing csv field\"}");
         return;
@@ -666,11 +618,9 @@ pub fn handleCsvImport(
         return;
     }
 
-    // Check has_header (default true)
     const has_header_str = utils.extractJsonField(body, "has_header");
     const has_header = if (has_header_str) |h| !std.mem.eql(u8, h, "false") else true;
 
-    // Parse CSV
     const csv_result = parseCsvContent(allocator, csv_content) catch |err| {
         const msg = switch (err) {
             error.EmptyCsv => "{\"error\":\"CSV content is empty\"}",
@@ -682,11 +632,9 @@ pub fn handleCsvImport(
         return;
     };
 
-    // Determine column names for INSERT
     var col_names = std.ArrayList([]const u8){};
 
     if (has_header) {
-        // Validate CSV headers match table columns
         for (csv_result.headers) |header| {
             if (!crud.findColumnInTable(table_info, header)) {
                 var err_buf: [256]u8 = undefined;
@@ -704,8 +652,7 @@ pub fn handleCsvImport(
             };
         }
     } else {
-        // No header row — the "headers" from parseCsv are actually data row 0
-        // Use schema column names (first N columns matching field count)
+        // parseCsv always treats first row as headers, so without has_header these are data
         const field_count = csv_result.headers.len;
         if (field_count > table_info.columns.len) {
             try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"CSV has more columns than table\"}");
@@ -719,14 +666,12 @@ pub fn handleCsvImport(
         }
     }
 
-    // Connect to Postgres
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
 
-    // Begin transaction
     var begin_result = pg_conn.runQuery(allocator, "BEGIN") catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to start transaction\"}");
         return;
@@ -738,11 +683,10 @@ pub fn handleCsvImport(
     var error_msg_buf: [512]u8 = undefined;
     var error_msg_len: usize = 0;
 
-    // Build INSERT for each row
     const data_rows = csv_result.rows;
     const num_cols = col_names.items.len;
 
-    // If !has_header, we also need to insert the "headers" row as data
+    // Without has_header, the parsed "headers" row is actually data that must be inserted
     if (!has_header) {
         const first_row = csv_result.headers;
         if (first_row.len >= num_cols) {
@@ -776,7 +720,6 @@ pub fn handleCsvImport(
     }
 
     if (insert_error) {
-        // Rollback
         var rb = pg_conn.runQuery(allocator, "ROLLBACK") catch {
             try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Insert failed and rollback failed\"}");
             return;
@@ -791,14 +734,12 @@ pub fn handleCsvImport(
         return;
     }
 
-    // Commit
     var commit_result = pg_conn.runQuery(allocator, "COMMIT") catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Commit failed\"}");
         return;
     };
     commit_result.deinit();
 
-    // Return success
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"imported\":{d}}}", .{imported}) catch "{\"error\":\"fmt\"}";
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
@@ -818,7 +759,6 @@ pub fn handleTableStats(
 
     const allocator = arena;
 
-    // Parse table name from path: /api/tables/<name>/stats
     const prefix = "/api/tables/";
     if (!std.mem.startsWith(u8, path, prefix)) {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
@@ -838,7 +778,7 @@ pub fn handleTableStats(
         return;
     }
 
-    // Validate table name exists in schema (fail-closed: reject if schema not loaded)
+    // Fail-closed: reject if schema not loaded
     const schema_tables_fk = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -857,7 +797,6 @@ pub fn handleTableStats(
         }
     }
 
-    // Build stats query — works for both tables and views
     const escaped_name = utils.escapeStringValue(allocator, table_name) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
@@ -884,7 +823,6 @@ pub fn handleTableStats(
     try sql_buf.append(allocator, 0);
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
-    // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
@@ -908,14 +846,12 @@ pub fn handleTableStats(
         return;
     }
 
-    // Extract values: row_estimate, table_size, index_size, total_size
     const row = pg_result.rows[0];
     const row_estimate = if (row.len > 0) row[0] else "0";
     const table_size = if (row.len > 1) row[1] else "0 bytes";
     const index_size = if (row.len > 2) row[2] else "0 bytes";
     const total_size = if (row.len > 3) row[3] else "0 bytes";
 
-    // Build JSON response
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(allocator);
     try w.writeAll("{\"row_estimate\":");
@@ -930,8 +866,6 @@ pub fn handleTableStats(
 
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
-
-// Tests
 
 test "escapeCsvField: plain text passes through" {
     var buf = std.ArrayList(u8){};
@@ -1310,7 +1244,6 @@ test "parseCsvContent: whitespace-only lines at end are skipped" {
         }
         allocator.free(result.rows);
     }
-    // The whitespace-only line is not treated as a data row
     try std.testing.expect(result.rows.len <= 2);
 }
 

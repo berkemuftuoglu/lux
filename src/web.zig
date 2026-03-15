@@ -19,12 +19,8 @@ const index_html = @embedFile("static/index.html");
 
 const StaticResult = struct { data: []const u8, is_heap: bool };
 
-/// In Debug builds, reads the file fresh from disk on each request (dev hot-reload).
-/// In release builds, returns the compile-time embedded bytes.
-/// Falls back to embedded if the disk file is missing (wrong CWD, deleted file).
 fn readStaticFile(allocator: std.mem.Allocator, disk_path: []const u8, embedded: []const u8) StaticResult {
     if (comptime builtin.mode != .Debug) return .{ .data = embedded, .is_heap = false };
-    // Debug: read from disk for hot-reload
     const data = std.fs.cwd().readFileAlloc(allocator, disk_path, 4 * 1024 * 1024) catch |err| {
         log.warn("dev: could not read '{s}' ({s}), using embedded", .{ disk_path, @errorName(err) });
         return .{ .data = embedded, .is_heap = false };
@@ -32,8 +28,6 @@ fn readStaticFile(allocator: std.mem.Allocator, disk_path: []const u8, embedded:
     return .{ .data = data, .is_heap = true };
 }
 
-/// Comptime tuple of static file entries.
-/// Each entry: .{ url_path, content_type, disk_path, embedded_bytes }
 const static_files = .{
     .{ "/css/styles.css", "text/css", "src/static/css/styles.css", @embedFile("static/css/styles.css") },
     .{ "/js/state.js", "application/javascript", "src/static/js/state.js", @embedFile("static/js/state.js") },
@@ -51,8 +45,6 @@ const static_files = .{
     .{ "/js/crud.js", "application/javascript", "src/static/js/crud.js", @embedFile("static/js/crud.js") },
 };
 
-/// Validates that a URL path contains only printable ASCII characters (0x20–0x7E).
-/// Rejects empty paths, null bytes, and control characters.
 pub fn isValidPath(path: []const u8) bool {
     if (path.len == 0) return false;
     for (path) |byte| {
@@ -61,14 +53,9 @@ pub fn isValidPath(path: []const u8) bool {
     return true;
 }
 
-// --- Route table ---
-
 const Method = enum { GET, POST, DELETE };
 const MatchType = enum { exact, prefix };
 
-/// Common handler errors mapped by handleRequestError.
-/// Handlers use inferred error sets (!void); this type documents the handled set
-/// and drives the central error mapper's switch statement.
 pub const HandlerError = error{
     OutOfMemory,
     ReadOnlyMode,
@@ -82,13 +69,8 @@ pub const HandlerError = error{
     ConnectionResetByPeer,
 } || postgres.PgError;
 
-/// Unified handler signature: fn(stream, request, path, state, arena) anyerror!void
-/// All handlers conform to this signature directly — no wrappers needed.
 const HandlerFn = *const fn (std.net.Stream, []const u8, []const u8, *ServerState, std.mem.Allocator) anyerror!void;
 
-/// Map named errors to HTTP responses.
-/// Called by the dispatch loop when a handler returns an error.
-/// Handlers that need custom PG error messages handle them inline and return void.
 fn handleRequestError(stream: std.net.Stream, err: anyerror) void {
     const status_and_body = switch (err) {
         error.OutOfMemory => .{ "500 Internal Server Error", "{\"error\":\"Out of memory\"}" },
@@ -116,8 +98,7 @@ const Route = struct {
     handler: HandlerFn,
 };
 
-/// Dispatch for /api/tables/* prefix routes, discriminating by suffix.
-/// Order matters: more-specific suffixes checked before bare table data.
+// Order matters: more-specific suffixes must come before the catch-all GET.
 fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (std.mem.eql(u8, method, "POST") and std.mem.endsWith(u8, path, "/bulk-update")) {
         return crud.handleBulkUpdate(stream, request, path, state, arena);
@@ -143,18 +124,13 @@ fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []con
     try utils.sendResponse(stream, "404 Not Found", "text/plain", "Not Found");
 }
 
-/// Comptime route table.
-/// Exact matches first, then prefix matches (inline for evaluates in order).
-/// The /api/tables/ prefix uses dispatchTableRoute for suffix discrimination.
 const routes = [_]Route{
-    // GET exact routes
     .{ .method = .GET, .path = "/api/schema", .match = .exact, .handler = schema_mod.handleSchema },
     .{ .method = .GET, .path = "/api/settings/read-only", .match = .exact, .handler = schema_mod.handleReadOnlyGet },
     .{ .method = .GET, .path = "/api/connections", .match = .exact, .handler = schema_mod.handleGetConnections },
     .{ .method = .GET, .path = "/api/history", .match = .exact, .handler = sql_mod.handleHistory },
     .{ .method = .GET, .path = "/api/journal", .match = .exact, .handler = sql_mod.handleJournal },
     .{ .method = .GET, .path = "/api/health", .match = .exact, .handler = schema_mod.handleHealthCheck },
-    // POST/DELETE exact routes
     .{ .method = .POST, .path = "/api/connect", .match = .exact, .handler = schema_mod.handleConnect },
     .{ .method = .POST, .path = "/api/sql", .match = .exact, .handler = sql_mod.handleSql },
     .{ .method = .POST, .path = "/api/settings/read-only", .match = .exact, .handler = schema_mod.handleReadOnlyToggle },
@@ -167,9 +143,7 @@ const routes = [_]Route{
     .{ .method = .POST, .path = "/api/delete-row", .match = .exact, .handler = crud.handleDeleteRow },
     .{ .method = .POST, .path = "/api/insert-row", .match = .exact, .handler = crud.handleInsertRow },
     .{ .method = .POST, .path = "/api/reconnect", .match = .exact, .handler = schema_mod.handleReconnect },
-    // GET prefix routes
     .{ .method = .GET, .path = "/api/export/", .match = .prefix, .handler = export_mod.handleExport },
-    // DELETE prefix routes
     .{ .method = .DELETE, .path = "/api/connections/", .match = .prefix, .handler = schema_mod.handleDeleteConnection },
 };
 
@@ -206,38 +180,27 @@ pub const QueryHistoryEntry = struct {
 };
 
 pub const ServerState = struct {
-    /// Boolean flags for ServerState — packed to save space and group related booleans.
     pub const Flags = packed struct {
-        /// Read-only mode — blocks DML/DDL operations.
         read_only: bool = false,
         _padding: u7 = 0,
     };
 
     allocator: std.mem.Allocator,
-    /// Stored Postgres connection string (null-terminated) for per-query connections.
     conninfo_z: ?[:0]u8 = null,
-    /// Schema column info for table/column resolution.
     schema_tables: ?[]postgres.TableInfo = null,
     schema_text: ?[]u8 = null,
-    /// Arena backing schema_tables memory. Freed by freeSchemaState.
     schema_arena: ?std.heap.ArenaAllocator = null,
-    /// Enhanced schema with PK, FK, ENUM, nullability info.
     enhanced_schema: ?[]postgres.EnhancedTableInfo = null,
-    /// Arena backing enhanced_schema memory. Freed by freeSchemaState.
     enhanced_arena: ?std.heap.ArenaAllocator = null,
-    /// Boolean flags for mode/state toggles.
     flags: Flags = .{},
     change_journal: std.ArrayList(ChangeEntry) = .{},
     next_journal_id: u64 = 1,
     query_history: std.ArrayList(QueryHistoryEntry) = .{},
-    /// Last successful connection string (for reconnect).
     last_conninfo: ?[]const u8 = null,
-    /// Next auto-increment ID for saved connections.
     next_connection_id: u64 = 1,
-    /// Port the server is listening on (for CSRF origin checks).
+    /// Stored for CSRF origin checks, not for binding.
     port: u16 = 8080,
 
-    /// Stack allocation: caller owns the memory.
     pub fn init(allocator: std.mem.Allocator) ServerState {
         return .{
             .allocator = allocator,
@@ -246,7 +209,6 @@ pub const ServerState = struct {
         };
     }
 
-    /// Heap allocation: allocator owns the ServerState pointer.
     pub fn create(allocator: std.mem.Allocator) !*ServerState {
         const self = try allocator.create(ServerState);
         self.* = init(allocator);
@@ -257,10 +219,7 @@ pub const ServerState = struct {
         return self.conninfo_z != null;
     }
 
-    /// Clean up all owned resources (schema, journal, history).
-    /// After deinit, the struct is in an undefined state.
     pub fn deinit(self: *ServerState) void {
-        // Free journal entries
         for (self.change_journal.items) |entry| {
             self.allocator.free(entry.table_name);
             self.allocator.free(entry.operation);
@@ -271,13 +230,11 @@ pub const ServerState = struct {
             self.allocator.free(entry.pk_value);
         }
         self.change_journal.deinit(self.allocator);
-        // Free history entries
         for (self.query_history.items) |entry| {
             self.allocator.free(entry.sql);
             if (entry.error_msg) |e| self.allocator.free(e);
         }
         self.query_history.deinit(self.allocator);
-        // Free schema state
         if (self.conninfo_z) |old| self.allocator.free(old);
         if (self.schema_text) |old| self.allocator.free(old);
         if (self.schema_arena) |*a| a.deinit();
@@ -286,8 +243,6 @@ pub const ServerState = struct {
         self.* = undefined;
     }
 
-    /// Heap deallocation: frees resources then the struct itself.
-    /// Must have been allocated via create().
     pub fn destroy(self: *ServerState, allocator: std.mem.Allocator) void {
         self.deinit();
         allocator.destroy(self);
@@ -321,7 +276,6 @@ pub fn serve(
         log.warn("edit CSS/JS/HTML and refresh browser — no rebuild needed", .{});
     }
 
-    // Install signal handlers for graceful shutdown
     var sa = std.posix.Sigaction{
         .handler = .{ .handler = handleSignal },
         .mask = std.posix.sigemptyset(),
@@ -338,7 +292,7 @@ pub fn serve(
         };
         defer conn.stream.close();
 
-        // Set 5-second receive timeout so idle clients don't hold connections forever
+        // Prevent idle clients from holding the single-threaded server indefinitely
         const timeout = std.posix.timeval{ .sec = 5, .usec = 0 };
         std.posix.setsockopt(conn.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
             log.warn("failed to set socket timeout: {s}", .{@errorName(err)});
@@ -358,8 +312,6 @@ fn handleConnection(
     stream: std.net.Stream,
     state: *ServerState,
 ) !void {
-    // Request-scoped arena: all temporary allocations are freed in one shot after
-    // the response is sent, regardless of the code path taken.
     var arena = std.heap.ArenaAllocator.init(state.allocator);
     defer arena.deinit();
     const request_alloc = arena.allocator();
@@ -367,10 +319,7 @@ fn handleConnection(
     var buf: [max_request_size]u8 = undefined;
     var total_read: usize = 0;
 
-    // Buffered header read: loops until \r\n\r\n is found or buffer fills.
-    // Handles headers split across multiple TCP segments (common with slow
-    // clients, proxies, or TLS record boundaries). Each read() appends to
-    // the buffer and rechecks for the header terminator.
+    // Headers may arrive split across TCP segments; loop until \r\n\r\n.
     while (total_read < buf.len) {
         const n = stream.read(buf[total_read..]) catch return;
         if (n == 0) return; // Connection closed
@@ -378,7 +327,6 @@ fn handleConnection(
         if (std.mem.indexOf(u8, buf[0..total_read], "\r\n\r\n") != null) break;
     }
 
-    // If the buffer is full and we never found \r\n\r\n, the request is oversized
     if (total_read == buf.len and std.mem.indexOf(u8, buf[0..total_read], "\r\n\r\n") == null) {
         utils.sendResponse(stream, "400 Bad Request", "text/plain", "Request too large") catch return;
         return;
@@ -386,19 +334,15 @@ fn handleConnection(
 
     const request = buf[0..total_read];
 
-    // Parse first line: "METHOD /path HTTP/1.x\r\n"
     const first_line_end = std.mem.indexOf(u8, request, "\r\n") orelse return;
     const first_line = request[0..first_line_end];
 
-    // Split into method and path
     var parts = std.mem.splitScalar(u8, first_line, ' ');
     const method = parts.next() orelse return;
     const path_raw = parts.next() orelse return;
 
-    // Strip query string for routing purposes
     const path = if (std.mem.indexOf(u8, path_raw, "?")) |q| path_raw[0..q] else path_raw;
 
-    // CSRF protection: check Origin header on state-changing requests
     const is_post = std.mem.eql(u8, method, "POST");
     const is_delete = std.mem.eql(u8, method, "DELETE");
     if (is_post or is_delete) {
@@ -408,26 +352,23 @@ fn handleConnection(
         }
     }
 
-    // URL path validation: reject control characters before routing
     if (!isValidPath(path)) {
         try utils.sendResponse(stream, "400 Bad Request", "text/plain", "Bad Request: invalid path");
         return;
     }
 
-    // Serve index.html (needs special CSP header)
+    // Index needs CSP header (sendHtmlResponseWithCsp), unlike other static files
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/")) {
         const r = readStaticFile(request_alloc, "src/static/index.html", index_html);
         try utils.sendHtmlResponseWithCsp(stream, r.data);
         return;
     }
 
-    // Serve favicon (204 No Content)
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/favicon.ico")) {
         try utils.sendResponse(stream, "204 No Content", "image/x-icon", "");
         return;
     }
 
-    // Serve static JS/CSS files via single inline for over comptime tuple
     inline for (static_files) |entry| {
         if (std.mem.eql(u8, path, entry[0])) {
             const r = readStaticFile(request_alloc, entry[2], entry[3]);
@@ -436,7 +377,6 @@ fn handleConnection(
         }
     }
 
-    // Dispatch /api/tables/* prefix routes (suffix-discriminated internally)
     if (std.mem.startsWith(u8, path, "/api/tables/")) {
         dispatchTableRoute(stream, method, request, path, state, request_alloc) catch |err| {
             handleRequestError(stream, err);
@@ -444,7 +384,6 @@ fn handleConnection(
         return;
     }
 
-    // Dispatch API routes via comptime route table
     const method_enum: ?Method = if (std.mem.eql(u8, method, "GET"))
         .GET
     else if (std.mem.eql(u8, method, "POST"))
@@ -474,8 +413,6 @@ fn handleConnection(
     try utils.sendResponse(stream, "404 Not Found", "text/plain", "Not Found");
 }
 
-// ServerState tests
-
 test "ServerState: init defaults" {
     const state = ServerState.init(std.testing.allocator);
     try std.testing.expect(!state.hasDbConnection());
@@ -502,16 +439,12 @@ test "ServerState: flags.read_only works like old read_only" {
     try std.testing.expect(state.flags.read_only);
 }
 
-// readStaticFile tests
-
 test "readStaticFile: disk read succeeds returns is_heap=true" {
-    // Only meaningful in debug builds (which is how `zig build test` runs)
     if (comptime builtin.mode != .Debug) return;
 
     const allocator = std.testing.allocator;
     const content = "hello from disk";
 
-    // Write a temp file
     const tmp_path = "/tmp/lux_test_static_file.txt";
     {
         const f = try std.fs.createFileAbsolute(tmp_path, .{});
@@ -541,8 +474,6 @@ test "readStaticFile: missing disk file falls back to embedded" {
     try std.testing.expectEqualStrings(embedded, result.data);
 }
 
-// ServerState create/destroy tests
-
 test "ServerState: create returns heap-allocated state" {
     const state = try ServerState.create(std.testing.allocator);
     defer state.destroy(std.testing.allocator);
@@ -554,8 +485,6 @@ test "ServerState: deinit cleans up empty state without crash" {
     var state = ServerState.init(std.testing.allocator);
     state.deinit();
 }
-
-// isValidPath tests
 
 test "isValidPath: valid API path" {
     try std.testing.expect(isValidPath("/api/tables/users"));
@@ -588,8 +517,6 @@ test "isValidPath: root path is valid" {
 test "isValidPath: space 0x20 is valid" {
     try std.testing.expect(isValidPath("/api/search?q=hello world"));
 }
-
-// route table count test
 
 test "static_files tuple: has 14 JS/CSS entries" {
     try std.testing.expectEqual(@as(usize, 14), static_files.len);

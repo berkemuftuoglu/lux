@@ -11,9 +11,8 @@ const log = std.log.scoped(.main);
 pub fn main() !void {
     const stdout = std.fs.File.stdout().deprecatedWriter();
 
-    // --- Parse CLI args ---
     var args = std.process.args();
-    _ = args.next(); // skip argv[0]
+    _ = args.next();
 
     var port: u16 = 8080;
     var bind_addr: []const u8 = "127.0.0.1";
@@ -61,7 +60,6 @@ pub fn main() !void {
     var state = web.ServerState.init(allocator);
     defer state.deinit();
 
-    // Auto-connect to Postgres if --pg provided
     if (pg_conninfo) |conninfo| {
         log.info("connecting to PostgreSQL", .{});
 
@@ -71,7 +69,6 @@ pub fn main() !void {
         };
         state.conninfo_z = conninfo_z;
 
-        // Fetch schema
         var pg_conn = postgres.PgConnection.connect(conninfo_z) catch {
             log.err("failed to connect to PostgreSQL", .{});
             std.process.exit(1);
@@ -91,11 +88,9 @@ pub fn main() !void {
         };
         state.schema_text = schema_text;
         state.schema_tables = schema.tables;
-        // Prevent schema.deinit from freeing tables we now own
-        schema.tables = &.{};
+        schema.tables = &.{}; // prevent schema.deinit from freeing tables we now own
         schema.deinit();
 
-        // Also fetch enhanced schema (PK, FK, ENUM info)
         var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
         if (enhanced) |*es| {
             state.enhanced_schema = es.tables;

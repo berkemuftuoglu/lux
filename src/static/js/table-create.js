@@ -1,6 +1,4 @@
-// Table Creation module
-// Functions: addCreateTableCol, buildCreateTableDDL
-// State: createTableColCount
+// table-create.js — Create table modal: column definition UI and DDL generation
 
 let createTableColCount = 0;
 
@@ -64,7 +62,6 @@ function buildCreateTableDDL() {
 	return ddl;
 }
 
-// Event wiring
 $('btn-create-table').onclick = () => {
 	if (!dbConnected) {
 		toast('Connect first', 'error');
@@ -87,7 +84,6 @@ $('create-table-preview').onclick = () => {
 		toast('Add table name and columns', 'error');
 		return;
 	}
-	// Show in SQL editor
 	sqlEditor.value = ddl.replace(/\\n/g, '\n');
 	syncHighlight();
 	releaseFocus($('create-table-overlay'));

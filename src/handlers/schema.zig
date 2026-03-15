@@ -33,15 +33,9 @@ fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8,
     return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
 }
 
-/// Build the path to the platform-specific config directory for Lux.
-/// - Linux: $XDG_CONFIG_HOME/lux/ or ~/.config/lux/
-/// - macOS: $XDG_CONFIG_HOME/lux/ (if set) or ~/Library/Application Support/lux/
-/// - Windows: %APPDATA%\lux\ or %USERPROFILE%\AppData\Roaming\lux\
-/// Creates the directory if it does not exist. Caller owns the returned memory.
 fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     const sep_str = comptime if (builtin.os.tag == .windows) "\\" else "/";
 
-    // All platforms: XDG_CONFIG_HOME takes priority if set
     if (getEnvVar("XDG_CONFIG_HOME")) |xdg| {
         const path = std.fmt.allocPrint(allocator, "{s}" ++ sep_str ++ "lux" ++ sep_str, .{xdg}) catch return error.OutOfMemory;
         std.fs.cwd().makePath(path) catch |err| {
@@ -52,7 +46,6 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
 
     switch (builtin.os.tag) {
         .windows => {
-            // %APPDATA% (typically C:\Users\<user>\AppData\Roaming)
             if (getEnvVar("APPDATA")) |appdata| {
                 const path = std.fmt.allocPrint(allocator, "{s}" ++ sep_str ++ "lux" ++ sep_str, .{appdata}) catch return error.OutOfMemory;
                 std.fs.cwd().makePath(path) catch |err| {
@@ -60,7 +53,6 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
                 };
                 return path;
             }
-            // Fallback: %USERPROFILE%\AppData\Roaming\lux\
             if (getEnvVar("USERPROFILE")) |profile| {
                 const path = std.fmt.allocPrint(allocator, "{s}" ++ sep_str ++ "AppData" ++ sep_str ++ "Roaming" ++ sep_str ++ "lux" ++ sep_str, .{profile}) catch return error.OutOfMemory;
                 std.fs.cwd().makePath(path) catch |err| {
@@ -71,7 +63,6 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
             return error.ReadFailed;
         },
         .macos => {
-            // ~/Library/Application Support/lux/
             if (getEnvVar("HOME")) |home| {
                 const path = std.fmt.allocPrint(allocator, "{s}/Library/Application Support/lux/", .{home}) catch return error.OutOfMemory;
                 std.fs.cwd().makePath(path) catch |err| {
@@ -82,7 +73,6 @@ fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
             return error.ReadFailed;
         },
         else => {
-            // Linux: ~/.config/lux/
             if (getEnvVar("HOME")) |home| {
                 const path = std.fmt.allocPrint(allocator, "{s}/.config/lux/", .{home}) catch return error.OutOfMemory;
                 std.fs.cwd().makePath(path) catch |err| {
@@ -120,11 +110,7 @@ fn getConfigFilePath(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
     return path;
 }
 
-/// Read the connections file and return its raw contents.
-/// Uses XDG config directory. Falls back to CWD for backward compatibility.
-/// Caller owns the returned memory.
 fn readConnectionsFile(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
-    // Try XDG config dir first
     if (getConfigFilePath(allocator)) |config_path| {
         defer allocator.free(config_path);
         if (std.fs.cwd().openFile(config_path, .{})) |file| {
@@ -134,22 +120,18 @@ fn readConnectionsFile(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
         } else |_| {}
     } else |_| {}
 
-    // Backward compatibility: try CWD
+    // Backward compat: fall back to CWD for pre-XDG installs
     if (std.fs.cwd().openFile(connections_filename, .{})) |file| {
         defer file.close();
         const data = file.readToEndAlloc(allocator, 1024 * 1024) catch return error.ReadFailed;
         return data;
     } else |_| {}
 
-    // No file found — return empty array
     return allocator.dupe(u8, "{\"connections\":[]}") catch return error.OutOfMemory;
 }
 
-/// Write raw JSON content to the connections file (mode 0600 — owner-only).
-/// Writes to XDG config directory.
 fn writeConnectionsFile(allocator: std.mem.Allocator, data: []const u8) ConnectionFileError!void {
     const config_path = getConfigFilePath(allocator) catch {
-        // Fallback to CWD if XDG resolution fails
         const file = std.fs.cwd().createFile(connections_filename, .{ .mode = 0o600 }) catch return error.WriteFailed;
         defer file.close();
         file.writeAll(data) catch return error.WriteFailed;
@@ -165,13 +147,10 @@ fn findMaxConnectionId(file_content: []const u8) u64 {
     var max_id: u64 = 0;
     var pos: usize = 0;
     while (pos < file_content.len) {
-        // Search for "id":
         const id_key = "\"id\":";
         const idx = std.mem.indexOfPos(u8, file_content, pos, id_key) orelse break;
         var vp = idx + id_key.len;
-        // Skip whitespace
         while (vp < file_content.len and file_content[vp] == ' ') vp += 1;
-        // Parse number
         var end = vp;
         while (end < file_content.len and file_content[end] >= '0' and file_content[end] <= '9') end += 1;
         if (end > vp) {
@@ -192,7 +171,6 @@ pub fn handleConnect(
 ) anyerror!void {
     const allocator = state.allocator;
 
-    // Find Content-Length header
     const content_length = utils.findContentLength(request) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing Content-Length\"}");
         return;
@@ -203,7 +181,6 @@ pub fn handleConnect(
         return;
     }
 
-    // Find body
     const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Malformed request\"}");
         return;
@@ -211,7 +188,6 @@ pub fn handleConnect(
     const body_start = header_end + 4;
     var body = request[body_start..];
 
-    // Read remaining body if needed
     var extra_buf: [4096]u8 = undefined;
     if (body.len < content_length) {
         const already_have = body.len;
@@ -230,19 +206,16 @@ pub fn handleConnect(
         body = body[0..content_length];
     }
 
-    // Parse conninfo
     const conninfo_str = utils.extractJsonField(body, "conninfo") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing conninfo field\"}");
         return;
     };
 
-    // Build null-terminated connection string
     const conninfo_z = allocator.dupeZ(u8, conninfo_str) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
 
-    // Test connection and fetch schema
     var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
         allocator.free(conninfo_z);
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to connect to PostgreSQL. libpq returned null.\"}");
@@ -251,7 +224,6 @@ pub fn handleConnect(
     defer pg_conn.deinit();
 
     if (!pg_conn.isOk()) {
-        // Capture the actual error message from libpq
         var err_buf: [1024]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&err_buf);
         const ew = fbs.writer();
@@ -276,13 +248,10 @@ pub fn handleConnect(
         return;
     };
 
-    // Fetch enhanced schema (PK, FK, ENUM, nullability)
     var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
 
-    // Store connection info and schema in state (free old if any)
     freeSchemaState(state);
     state.conninfo_z = conninfo_z;
-    // Store a copy of the connection string for reconnect
     if (state.last_conninfo) |old_ci| allocator.free(@constCast(old_ci));
     state.last_conninfo = allocator.dupe(u8, conninfo_str) catch null;
     state.schema_text = schema_text;
@@ -293,7 +262,6 @@ pub fn handleConnect(
         state.enhanced_arena = es.arena;
     }
 
-    // Build response with schema info (use arena for temp response buffer)
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(arena);
     w.writeAll("{\"status\":\"connected\",\"schema\":\"") catch {
@@ -301,7 +269,6 @@ pub fn handleConnect(
         return;
     };
     utils.writeJsonEscaped(w, schema_text) catch return;
-    // Count tables
     var n_tables: usize = 0;
     if (state.schema_tables) |tables| n_tables = tables.len;
     w.print("\",\"tables\":{d}}}", .{n_tables}) catch return;
@@ -316,8 +283,7 @@ pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state:
 
     const allocator = state.allocator;
 
-    // Re-fetch schema from PostgreSQL to return fresh data.
-    // If anything fails, fall back to cached data.
+    // Fall back to cached data if re-fetch fails
     refresh: {
         const conninfo_z = state.conninfo_z orelse break :refresh;
         var pg_conn = postgres.PgConnection.connect(conninfo_z) catch break :refresh;
@@ -329,13 +295,12 @@ pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state:
         };
         var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
 
-        // Free old state (preserve conninfo_z — we're reusing the existing connection)
+        // Preserve conninfo_z — we're reusing the existing connection
         const saved_conninfo = state.conninfo_z;
         state.conninfo_z = null;
         freeSchemaState(state);
         state.conninfo_z = saved_conninfo;
 
-        // Store new state
         state.schema_text = new_text;
         state.schema_tables = schema.tables;
         state.schema_arena = schema.arena;
@@ -355,7 +320,6 @@ pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state:
 
     try w.writeAll("{\"tables\":[");
 
-    // Use enhanced schema if available, otherwise fall back to basic
     if (state.enhanced_schema) |etables| {
         for (etables, 0..) |etable, ti| {
             if (ti > 0) try w.writeByte(',');
@@ -438,13 +402,11 @@ pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, sta
         return;
     };
 
-    // Build null-terminated connection string
     const conninfo_z = allocator.dupeZ(u8, last_ci) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
 
-    // Test connection
     var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
         allocator.free(conninfo_z);
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to reconnect. libpq returned null.\"}");
@@ -464,7 +426,6 @@ pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, sta
         return;
     }
 
-    // Fetch schema
     var schema = pg_conn.fetchSchema(allocator) catch {
         allocator.free(conninfo_z);
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Reconnected but failed to fetch schema\"}");
@@ -478,10 +439,8 @@ pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, sta
         return;
     };
 
-    // Fetch enhanced schema
     var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
 
-    // Store in state (free old)
     freeSchemaState(state);
     state.conninfo_z = conninfo_z;
     state.schema_text = schema_text;
@@ -492,7 +451,6 @@ pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, sta
         state.enhanced_arena = es.arena;
     }
 
-    // Build response (use arena for temp response buffer)
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(arena);
     w.writeAll("{\"ok\":true,\"schema\":\"") catch {
@@ -522,7 +480,6 @@ pub fn handleHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, s
     };
     defer pg_conn.deinit();
 
-    // Run SELECT 1 to verify connection
     const sql: [*:0]const u8 = "SELECT 1";
     var pg_result = pg_conn.runQuery(allocator, sql) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
@@ -548,7 +505,6 @@ pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, _: []co
         return;
     };
     const enabled_str = utils.extractJsonField(body, "enabled") orelse {
-        // Toggle if no explicit value
         state.flags.read_only = !state.flags.read_only;
         var resp_buf: [64]u8 = undefined;
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
@@ -578,7 +534,6 @@ pub fn handleGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8
 pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const allocator = arena;
 
-    // Parse body
     const content_length = utils.findContentLength(request) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing Content-Length\"}");
         return;
@@ -611,7 +566,6 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
         body = body[0..content_length];
     }
 
-    // Extract fields
     const name = utils.extractJsonField(body, "name") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing name field\"}");
         return;
@@ -622,9 +576,7 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
     };
     const color = utils.extractJsonField(body, "color") orelse "gray";
 
-    // Read existing file
     const existing = readConnectionsFile(allocator) catch {
-        // Start fresh if read fails
         const entry = formatConnectionJson(allocator, 1, name, conninfo, color) catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
@@ -647,24 +599,20 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
         return;
     };
 
-    // Find max existing ID
     const max_id = findMaxConnectionId(existing);
     const new_id = @max(max_id + 1, state.next_connection_id);
     state.next_connection_id = new_id + 1;
 
-    // Build the new entry JSON
     const entry = formatConnectionJson(allocator, new_id, name, conninfo, color) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
 
-    // Insert entry into existing JSON — find the closing "]}" and insert before it
     var new_file = std.ArrayList(u8){};
     const nw = new_file.writer(allocator);
 
-    // Find last ']' in existing content
     const close_bracket = std.mem.lastIndexOfScalar(u8, existing, ']') orelse {
-        // Malformed file — rewrite
+        // Malformed file -- rewrite from scratch
         nw.writeAll("{\"connections\":[") catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
@@ -684,7 +632,6 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
         return;
     };
 
-    // Check if there are existing entries (non-empty array)
     const before_bracket = std.mem.trimRight(u8, existing[0..close_bracket], " \t\n\r");
     const needs_comma = before_bracket.len > 0 and before_bracket[before_bracket.len - 1] != '[';
 
@@ -712,7 +659,6 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
 pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []const u8, _: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const allocator = arena;
 
-    // Parse ID from path: /api/connections/<id>
     const prefix = "/api/connections/";
     if (!std.mem.startsWith(u8, path, prefix)) {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
@@ -724,13 +670,11 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
         return;
     };
 
-    // Read existing file
     const existing = readConnectionsFile(allocator) catch {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"No connections file\"}");
         return;
     };
 
-    // Rebuild the connections array, skipping the one with target_id.
     var new_file = std.ArrayList(u8){};
     const nw = new_file.writer(allocator);
     nw.writeAll("{\"connections\":[") catch {
@@ -742,21 +686,17 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
     var first = true;
     var pos: usize = 0;
 
-    // Find the start of the array
     const arr_start = std.mem.indexOf(u8, existing, "[") orelse {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
         return;
     };
     pos = arr_start + 1;
 
-    // Parse each object in the array
     while (pos < existing.len) {
-        // Skip whitespace and commas
         while (pos < existing.len and (existing[pos] == ' ' or existing[pos] == ',' or existing[pos] == '\n' or existing[pos] == '\r' or existing[pos] == '\t')) pos += 1;
         if (pos >= existing.len or existing[pos] == ']') break;
         if (existing[pos] != '{') break;
 
-        // Find matching closing brace (simple: count depth)
         var depth: usize = 0;
         var in_string = false;
         var obj_end = pos;
@@ -784,7 +724,6 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
 
         const obj_str = existing[pos..obj_end];
 
-        // Check if this object has the target ID
         const obj_id = findMaxConnectionId(obj_str);
         if (obj_id == target_id) {
             found = true;
@@ -811,8 +750,6 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
 
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
 }
-
-// Tests
 
 test "formatConnectionJson: basic entry" {
     const allocator = std.testing.allocator;
@@ -891,7 +828,6 @@ test "findMaxConnectionId: multiple ids with whitespace" {
 }
 
 test "findMaxConnectionId: id with leading zeros" {
-    // Parses as decimal — "007" = 7
     const result = findMaxConnectionId("{\"id\":007}");
     try std.testing.expectEqual(@as(u64, 7), result);
 }
@@ -917,7 +853,6 @@ test "getConfigDir: returns a path ending with lux dir separator" {
     const allocator = std.testing.allocator;
     const path = getConfigDir(allocator) catch return;
     defer allocator.free(path);
-    // Should end with "lux/" or "lux\"
     const ends_slash = std.mem.endsWith(u8, path, "lux/");
     const ends_backslash = std.mem.endsWith(u8, path, "lux\\");
     try std.testing.expect(ends_slash or ends_backslash);

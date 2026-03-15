@@ -1,17 +1,14 @@
 // sql.js — SQL editor, syntax highlighting, autocomplete, run/render, format, export
 // Loaded after state.js, utils.js, and sql-tabs.js, before app.js.
 
-// DOM references (assigned at script parse time -- elements are already in DOM via defer)
 const sqlEditor = $('sql-editor');
 const sqlHighlight = $('sql-highlight');
 
-// Autocomplete state
 const acDropdown = $('sql-autocomplete');
 let acItems = [];
 let acIndex = -1;
 let acTimer = null;
 
-// SQL keyword and function sets
 const SQL_KW = new Set([
 	'SELECT',
 	'FROM',
@@ -248,7 +245,6 @@ sqlEditor.addEventListener('scroll', () => {
 	sqlHighlight.scrollLeft = sqlEditor.scrollLeft;
 });
 
-// Autocomplete
 function getACWordAt(text, pos) {
 	let start = pos;
 	while (start > 0 && /[a-zA-Z0-9_.]/.test(text[start - 1])) start--;
@@ -442,7 +438,6 @@ sqlEditor.addEventListener('keydown', (e) => {
 
 sqlEditor.addEventListener('blur', () => setTimeout(hideAC, 150));
 
-// Run SQL
 function detectDangerousSQL(sql) {
 	const s = sql
 		.replace(/--[^\n]*/g, '')
@@ -461,10 +456,8 @@ async function runSQL() {
 	const sql = sqlEditor.value.trim();
 	if (!sql) return;
 
-	// Client-side pre-check: warn on UPDATE/DELETE without WHERE, auto-preview first
 	const danger = detectDangerousSQL(sql);
 	if (danger) {
-		// Auto-preview to show affected rows
 		let previewMsg = `${danger} without WHERE -- this affects the entire table.`;
 		try {
 			const pd = await fetchJson('/api/sql/preview', {
@@ -570,7 +563,6 @@ function renderSQLResult(data, elapsed) {
 	html += '</tbody></table></div>';
 	$('sql-results').innerHTML = html;
 
-	// Add export buttons if there are results
 	if (
 		data.columns &&
 		data.columns.length > 0 &&
@@ -595,13 +587,10 @@ function renderSQLResult(data, elapsed) {
 			resultsInfo.appendChild(jsonBtn);
 		}
 	}
-	// Store last SQL for export
 	lastSqlQuery = sqlEditor.value.trim();
 }
 
-// SQL Formatter
 function formatSQL(sql) {
-	// Simple SQL formatter: uppercase keywords, add newlines before major clauses
 	const majorClauses = [
 		'SELECT',
 		'FROM',
@@ -640,7 +629,6 @@ function formatSQL(sql) {
 		'END',
 	];
 
-	// Tokenize preserving strings and comments
 	let i = 0;
 	const tokens = [];
 	while (i < sql.length) {
@@ -678,13 +666,11 @@ function formatSQL(sql) {
 		}
 	}
 
-	// Reconstruct with formatting
 	let formatted = '';
 	for (let ti = 0; ti < tokens.length; ti++) {
 		const t = tokens[ti];
 		if (t.type === 'word') {
 			const upper = t.text.toUpperCase();
-			// Check for two-word clauses
 			let twoWord = '';
 			if (
 				ti + 2 < tokens.length &&
@@ -753,7 +739,6 @@ function formatSQL(sql) {
 	return formatted.trim();
 }
 
-// SQL Results Export
 async function exportSqlResults(format) {
 	const sql = lastSqlQuery;
 	if (!sql) {
@@ -782,7 +767,6 @@ async function exportSqlResults(format) {
 	}
 }
 
-// Run button and Ctrl+Enter
 $('btn-run-sql').onclick = runSQL;
 sqlEditor.addEventListener('keydown', (e) => {
 	if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -792,7 +776,6 @@ sqlEditor.addEventListener('keydown', (e) => {
 	}
 });
 
-// Explain and Preview buttons
 $('btn-explain').onclick = async () => {
 	const sql = sqlEditor.value.trim();
 	if (!sql) return;
@@ -830,7 +813,6 @@ $('btn-preview-sql').onclick = async () => {
 	}
 };
 
-// Format button
 $('btn-format-sql').onclick = () => {
 	const sql = sqlEditor.value.trim();
 	if (!sql) return;
@@ -839,7 +821,6 @@ $('btn-format-sql').onclick = () => {
 	toast('SQL formatted', 'success');
 };
 
-// Query History
 $('btn-sql-history').onclick = async () => {
 	$('history-overlay').classList.add('open');
 	trapFocus($('history-overlay'));
@@ -874,7 +855,6 @@ $('btn-sql-history').onclick = async () => {
 			html += '</div></div>';
 		});
 		list.innerHTML = html;
-		// Click to load into editor
 		list.querySelectorAll('.history-entry').forEach((el, i) => {
 			el.addEventListener('click', () => {
 				sqlEditor.value = entries[i].sql;

@@ -54,7 +54,6 @@ pub fn sendResponseWithDownload(
 }
 
 pub fn findContentLength(request: []const u8) ?usize {
-    // Case-insensitive search for Content-Length header
     var i: usize = 0;
     while (i + 16 < request.len) : (i += 1) {
         if (matchesIgnoreCase(request[i..], "content-length:")) {
@@ -99,13 +98,9 @@ pub fn eqlLower(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-/// Check the Origin header on a request for CSRF protection.
-/// Returns true if the request should be allowed, false if it should be rejected.
-/// If Origin header is absent, the request is allowed (same-origin browser requests
-/// may not send Origin). If present, it must match localhost:port.
+/// Absent Origin is allowed because same-origin requests may omit it.
 pub fn checkOrigin(request: []const u8, port: u16) bool {
-    const origin = findHeader(request, "Origin") orelse return true; // absent = allow
-    // Build expected origins
+    const origin = findHeader(request, "Origin") orelse return true;
     var buf_127: [64]u8 = undefined;
     var buf_local: [64]u8 = undefined;
     const expected_127 = std.fmt.bufPrint(&buf_127, "http://127.0.0.1:{d}", .{port}) catch return false;
@@ -115,10 +110,8 @@ pub fn checkOrigin(request: []const u8, port: u16) bool {
     return false;
 }
 
-/// Escape a SQL identifier by doubling all double-quote characters.
-/// Returns the escaped string suitable for use inside "..." identifiers.
 pub fn escapeIdentifier(allocator: std.mem.Allocator, name: []const u8) IdentifierError![]u8 {
-    // Reject null bytes to prevent truncation attacks
+    // Null bytes would cause C string truncation in libpq
     for (name) |ch| {
         if (ch == 0) return error.InvalidIdentifier;
     }
@@ -145,15 +138,11 @@ pub fn escapeIdentifier(allocator: std.mem.Allocator, name: []const u8) Identifi
     return buf;
 }
 
-/// Escape a string value for SQL by doubling single quotes and backslashes.
-/// Rejects null bytes to prevent C string truncation attacks.
-/// Caller owns the returned memory.
 pub fn escapeStringValue(allocator: std.mem.Allocator, value: []const u8) StringEscapeError![]u8 {
-    // Reject null bytes to prevent truncation attacks (libpq uses C strings)
+    // Null bytes would cause C string truncation in libpq
     for (value) |ch| {
         if (ch == 0) return error.InvalidCharacter;
     }
-    // Count characters that need doubling
     var extra: usize = 0;
     for (value) |ch| {
         if (ch == '\'' or ch == '\\') extra += 1;
@@ -180,7 +169,6 @@ pub fn escapeStringValue(allocator: std.mem.Allocator, value: []const u8) String
     return buf;
 }
 
-/// Write a string with JSON escaping (handles ", \, newlines, tabs, control chars per RFC 8259).
 pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
     const hex_digits = "0123456789abcdef";
     for (s) |ch| {
@@ -250,8 +238,6 @@ pub fn parseStringQueryParam(query_string: []const u8, name: []const u8, buf: []
     return null;
 }
 
-/// URL-decode a percent-encoded string in-place.
-/// Decodes %XX sequences and '+' to space. Returns the decoded slice.
 pub fn urlDecode(buf: []u8, input: []const u8) ?[]const u8 {
     var out: usize = 0;
     var i: usize = 0;
@@ -297,32 +283,21 @@ fn hexVal(ch: u8) ?u4 {
     return null;
 }
 
-/// Extract a string field value from a JSON body like {"field": "..."}.
-/// Minimal parser — no dependency on a JSON library.
+// Minimal JSON string field extractor — avoids pulling in a full JSON parser.
 pub fn extractJsonField(body: []const u8, field_name: []const u8) ?[]const u8 {
-    // Build the key pattern: "field_name"
-    // Search for it in the body
     var search_pos: usize = 0;
     while (search_pos < body.len) {
         const quote_pos = std.mem.indexOfScalarPos(u8, body, search_pos, '"') orelse return null;
         if (quote_pos + 1 + field_name.len + 1 > body.len) return null;
-        // Check if the text after the quote matches field_name followed by closing quote
         const after_quote = body[quote_pos + 1 ..];
         if (after_quote.len >= field_name.len + 1 and
             std.mem.eql(u8, after_quote[0..field_name.len], field_name) and
             after_quote[field_name.len] == '"')
         {
-            // Found the key — skip past closing quote
             var pos = quote_pos + 1 + field_name.len + 1;
-
-            // Skip whitespace and colon
             while (pos < body.len and (body[pos] == ' ' or body[pos] == ':')) pos += 1;
-
-            // Expect opening quote of value
             if (pos >= body.len or body[pos] != '"') return null;
             pos += 1;
-
-            // Find closing quote (handle escaped quotes)
             const start = pos;
             while (pos < body.len) {
                 if (body[pos] == '\\' and pos + 1 < body.len) {
@@ -345,8 +320,6 @@ pub fn extractJsonQuery(body: []const u8) ?[]const u8 {
     return extractJsonField(body, "query");
 }
 
-/// Read the HTTP request body, handling partial reads.
-/// Returns the body slice (may point into extra_buf or into request).
 pub fn readRequestBody(
     stream: std.net.Stream,
     request: []const u8,
@@ -375,8 +348,6 @@ pub fn readRequestBody(
         return body[0..content_length];
     }
 }
-
-// Tests
 
 test "extractJsonQuery: simple query" {
     const body = "{\"query\": \"Sum all values\"}";
@@ -439,8 +410,6 @@ test "matchesIgnoreCase: handles empty needle" {
     try std.testing.expect(matchesIgnoreCase("anything", ""));
 }
 
-// writeJsonEscaped tests
-
 test "writeJsonEscaped: plain text passes through" {
     var buf: [64]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -490,13 +459,10 @@ test "writeJsonEscaped: mixed special chars" {
     try std.testing.expectEqualStrings("He said \\\"hi\\\\there\\\"\\n", fbs.getWritten());
 }
 
-// more extractJsonQuery tests
-
 test "extractJsonQuery: query with escaped quotes inside" {
     const body = "{\"query\": \"say \\\"hello\\\"\"}";
     const result = extractJsonQuery(body);
     try std.testing.expect(result != null);
-    // The extracted string includes the backslash-quote sequences
     try std.testing.expectEqualStrings("say \\\"hello\\\"", result.?);
 }
 
@@ -538,8 +504,6 @@ test "extractJsonField: empty body" {
     try std.testing.expect(extractJsonField("", "query") == null);
 }
 
-// more eqlLower tests
-
 test "eqlLower: case insensitive match" {
     try std.testing.expect(eqlLower("Hello", "hello"));
     try std.testing.expect(eqlLower("HELLO", "hello"));
@@ -560,8 +524,6 @@ test "eqlLower: different lengths" {
     try std.testing.expect(!eqlLower("hello", ""));
 }
 
-// findContentLength edge cases
-
 test "findContentLength: with extra headers" {
     const req = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 25\r\n\r\n";
     try std.testing.expectEqual(@as(?usize, 25), findContentLength(req));
@@ -571,8 +533,6 @@ test "findContentLength: zero length" {
     const req = "POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
     try std.testing.expectEqual(@as(?usize, 0), findContentLength(req));
 }
-
-// parseQueryParam tests
 
 test "parseQueryParam: parses limit" {
     var limit: usize = 50;
@@ -603,8 +563,6 @@ test "parseQueryParam: single param" {
     parseQueryParam("limit=200", "limit", &limit);
     try std.testing.expectEqual(@as(usize, 200), limit);
 }
-
-// parseStringQueryParam tests
 
 test "parseStringQueryParam: parses sort column" {
     var buf: [128]u8 = undefined;
@@ -644,8 +602,6 @@ test "parseStringQueryParam: single param" {
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("email", result.?);
 }
-
-// escapeStringValue tests
 
 test "escapeStringValue: no quotes passes through" {
     const allocator = std.testing.allocator;
@@ -689,8 +645,6 @@ test "escapeStringValue: only single quotes" {
     try std.testing.expectEqualStrings("''''''", result);
 }
 
-// escapeIdentifier tests
-
 test "escapeIdentifier: no quotes passes through" {
     const allocator = std.testing.allocator;
     const result = try escapeIdentifier(allocator, "my_table");
@@ -726,8 +680,6 @@ test "escapeIdentifier: only double quotes" {
     try std.testing.expectEqualStrings("\"\"\"\"", result);
 }
 
-// eqlLower edge cases
-
 test "eqlLower: mixed case both sides" {
     try std.testing.expect(eqlLower("HeLLo", "hello"));
     try std.testing.expect(eqlLower("hello", "HELLO"));
@@ -743,12 +695,9 @@ test "eqlLower: single char" {
     try std.testing.expect(!eqlLower("A", "b"));
 }
 
-// URL/query param edge cases
-
 test "parseQueryParam: param with special chars in value" {
     var result: usize = 0;
     parseQueryParam("limit=abc&offset=0", "limit", &result);
-    // "abc" is not a valid number, should stay at default
     try std.testing.expectEqual(@as(usize, 0), result);
 }
 
@@ -757,8 +706,6 @@ test "parseQueryParam: multiple same params uses first" {
     parseQueryParam("limit=10&limit=20", "limit", &result);
     try std.testing.expectEqual(@as(usize, 10), result);
 }
-
-// extractJsonField edge cases
 
 test "extractJsonField: connection string with special chars" {
     const body = "{\"conninfo\":\"postgresql://user:p@ss@localhost:5432/mydb?sslmode=require\"}";
@@ -771,7 +718,6 @@ test "extractJsonField: connection string with escaped quotes" {
     const body = "{\"conninfo\":\"host=localhost dbname=\\\"my db\\\"\"}";
     const result = extractJsonField(body, "conninfo");
     try std.testing.expect(result != null);
-    // Escaped quotes: the raw JSON value is host=localhost dbname=\"my db\"
     try std.testing.expectEqualStrings("host=localhost dbname=\\\"my db\\\"", result.?);
 }
 
@@ -834,13 +780,10 @@ test "extractJsonField: partial field name match should not match" {
 }
 
 test "extractJsonField: field with number value returns null" {
-    // extractJsonField only handles string values
     const body = "{\"count\":42}";
     const result = extractJsonField(body, "count");
     try std.testing.expect(result == null);
 }
-
-// escapeStringValue edge cases
 
 test "escapeStringValue: long string" {
     const allocator = std.testing.allocator;
@@ -857,8 +800,6 @@ test "escapeStringValue: no special chars" {
     try std.testing.expectEqualStrings("simple text 123", result);
 }
 
-// writeJsonEscaped edge cases
-
 test "writeJsonEscaped: control characters" {
     var buf: [64]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
@@ -874,12 +815,9 @@ test "writeJsonEscaped: all special chars together" {
     try std.testing.expectEqualStrings(expected, fbs.getWritten());
 }
 
-// parseQueryParam edge cases
-
 test "parseQueryParam: negative number does not parse" {
     var out: usize = 42;
     parseQueryParam("limit=-5", "limit", &out);
-    // parseInt for usize should fail on negative, so out stays at default
     try std.testing.expectEqual(@as(usize, 42), out);
 }
 
@@ -923,7 +861,6 @@ test "parseStringQueryParam: multiple params finds correct one" {
 
 test "parseStringQueryParam: param with equals in value" {
     var buf: [20]u8 = undefined;
-    // The value portion is everything after the first '='
     const result = parseStringQueryParam("filter=a=b", "filter", &buf);
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("a=b", result.?);
@@ -959,8 +896,6 @@ test "urlDecode: empty string" {
     try std.testing.expectEqualStrings("", result);
 }
 
-// --- String escaping edge cases ---
-
 test "escapeStringValue: consecutive single quotes" {
     const allocator = std.testing.allocator;
     const result = try escapeStringValue(allocator, "''");
@@ -991,13 +926,9 @@ test "escapeStringValue: mixed quotes and other chars" {
 
 test "escapeStringValue: null bytes rejected at any position" {
     const allocator = std.testing.allocator;
-    // Middle position
     try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "hello\x00world"));
-    // Start position
     try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "\x00start"));
-    // End position
     try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "end\x00"));
-    // Single null byte
     try std.testing.expectError(error.InvalidCharacter, escapeStringValue(allocator, "\x00"));
 }
 
@@ -1030,14 +961,10 @@ test "writeJsonEscaped: all whitespace escapes" {
     try std.testing.expectEqualStrings("\\n\\r\\t", buf.items);
 }
 
-// --- indexOfIgnoreCase ---
-
 test "indexOfIgnoreCase: finds word at any position" {
-    // Start
     const at_start = indexOfIgnoreCase("DROP TABLE t", "drop");
     try std.testing.expect(at_start != null);
     try std.testing.expectEqual(@as(usize, 0), at_start.?);
-    // Middle
     const in_middle = indexOfIgnoreCase("ALTER TABLE foo ADD COLUMN bar", "ADD");
     try std.testing.expect(in_middle != null);
     try std.testing.expectEqual(@as(usize, 16), in_middle.?);
@@ -1045,7 +972,6 @@ test "indexOfIgnoreCase: finds word at any position" {
 
 test "indexOfIgnoreCase: returns null when not found" {
     try std.testing.expect(indexOfIgnoreCase("SELECT * FROM t", "DROP") == null);
-    // Needle longer than haystack
     try std.testing.expect(indexOfIgnoreCase("ab", "abcdef") == null);
 }
 
@@ -1055,18 +981,13 @@ test "indexOfIgnoreCase: empty needle returns zero" {
     try std.testing.expectEqual(@as(usize, 0), result.?);
 }
 
-// --- eqlLower edge cases ---
-
 test "eqlLower: unicode bytes pass through" {
-    // Non-ASCII bytes are compared as-is
     try std.testing.expect(eqlLower("\xc3\xa9", "\xc3\xa9"));
 }
 
 test "eqlLower: one char difference" {
     try std.testing.expect(!eqlLower("abc", "abd"));
 }
-
-// Content-Length parsing edge cases
 
 test "findContentLength: various formats" {
     try std.testing.expectEqual(
@@ -1099,8 +1020,6 @@ test "findContentLength: large value" {
 test "findContentLength: not present" {
     try std.testing.expect(findContentLength("POST / HTTP/1.1\r\nHost: x\r\n\r\n") == null);
 }
-
-// --- Content-Length parsing edge cases ---
 
 test "findContentLength: only header name no value" {
     const result = findContentLength("Content-Length: \r\n\r\n");
@@ -1138,8 +1057,6 @@ test "findContentLength: content-length among many headers" {
     try std.testing.expectEqual(@as(usize, 256), result.?);
 }
 
-// CSRF Origin check tests
-
 test "checkOrigin: no origin header allows request" {
     const request = "POST /api/connect HTTP/1.1\r\nHost: localhost\r\n\r\n";
     try std.testing.expect(checkOrigin(request, 8080));
@@ -1170,8 +1087,6 @@ test "checkOrigin: custom port works" {
     try std.testing.expect(checkOrigin(request, 3000));
 }
 
-// findHeader tests
-
 test "findHeader: finds Origin header" {
     const request = "POST /api HTTP/1.1\r\nOrigin: http://localhost:8080\r\nHost: localhost\r\n\r\n";
     const origin = findHeader(request, "Origin");
@@ -1199,11 +1114,8 @@ test "findHeader: trims whitespace from value" {
     try std.testing.expectEqualStrings("http://localhost:8080", origin.?);
 }
 
-// escapeIdentifier null byte tests
-
 test "escapeIdentifier: null bytes rejected at any position" {
     const allocator = std.testing.allocator;
-    // Middle position (injection attempt)
     try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "table\x00; DROP TABLE users"));
     // Start position
     try std.testing.expectError(error.InvalidIdentifier, escapeIdentifier(allocator, "\x00table"));
@@ -1217,8 +1129,6 @@ test "escapeIdentifier: normal string still works" {
     defer allocator.free(result);
     try std.testing.expectEqualStrings("normal_table", result);
 }
-
-// --- JSON extraction edge cases ---
 
 test "extractJsonField: nested escaped quotes in value" {
     const body = "{\"key\": \"value with \\\"nested\\\" quotes\"}";
@@ -1276,8 +1186,6 @@ test "extractJsonField: field not found in deeply nested body" {
     try std.testing.expect(result == null);
 }
 
-// --- OOM tests (checkAllAllocationFailures) ---
-
 fn testEscapeIdentifierAlloc(allocator: std.mem.Allocator) !void {
     const result = try escapeIdentifier(allocator, "test_table");
     defer allocator.free(result);
@@ -1296,14 +1204,9 @@ test "escapeStringValue: allocation failure" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, testEscapeStringValueAlloc, .{});
 }
 
-// --- Fuzz tests ---
-
 fn fuzzEscapeIdentifier(_: void, input: []const u8) anyerror!void {
-    // Verify escapeIdentifier never crashes on arbitrary input.
-    // Null bytes return error.InvalidIdentifier; all other bytes must produce valid output.
     const result = escapeIdentifier(std.testing.allocator, input) catch return;
     defer std.testing.allocator.free(result);
-    // Invariant: output length is >= input length (doubling can only grow the result)
     try std.testing.expect(result.len >= input.len);
 }
 
@@ -1312,11 +1215,8 @@ test "escapeIdentifier: fuzz" {
 }
 
 fn fuzzEscapeStringValue(_: void, input: []const u8) anyerror!void {
-    // Verify escapeStringValue never crashes on arbitrary input.
-    // Null bytes return error.InvalidCharacter; all other bytes must produce valid output.
     const result = escapeStringValue(std.testing.allocator, input) catch return;
     defer std.testing.allocator.free(result);
-    // Invariant: output length is >= input length (doubling can only grow the result)
     try std.testing.expect(result.len >= input.len);
 }
 

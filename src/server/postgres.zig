@@ -13,10 +13,6 @@ pub const PgError = error{
     InvalidData,
 };
 
-// ── libpq enum wrappers ───────────────────────────────────────────────
-
-/// Wraps the libpq connection status C constants.
-/// Unknown values from newer libpq versions map to .unknown (never unreachable).
 pub const ConnStatus = enum {
     ok,
     bad,
@@ -31,7 +27,6 @@ pub const ConnStatus = enum {
     }
 };
 
-/// Wraps the libpq query result status C constants.
 pub const ExecStatus = enum {
     empty_query,
     command_ok,
@@ -64,7 +59,6 @@ pub const ExecStatus = enum {
     }
 };
 
-/// Wraps the libpq transaction status C constants.
 pub const TransactionStatus = enum {
     idle,
     active,
@@ -84,8 +78,6 @@ pub const TransactionStatus = enum {
     }
 };
 
-/// Structured PostgreSQL error fields extracted via PQresultErrorField.
-/// All fields are optional — they may not be present for all error types.
 pub const PgErrorFields = struct {
     severity: ?[]const u8,
     code: ?[]const u8,
@@ -94,9 +86,7 @@ pub const PgErrorFields = struct {
     hint: ?[]const u8,
 };
 
-/// Extract structured error fields from a PGresult before calling PQclear.
-/// Returns a PgErrorFields with slices pointing into libpq-managed memory.
-/// The returned slices are only valid until PQclear is called on `res`.
+// Returned slices point into libpq memory — only valid until PQclear.
 fn extractErrorFields(res: *c.PGresult) PgErrorFields {
     return .{
         .severity = blk: {
@@ -124,8 +114,6 @@ fn extractErrorFields(res: *c.PGresult) PgErrorFields {
 
 pub const PgConnection = struct {
     conn: *c.PGconn,
-    /// Structured error fields from the last failed query.
-    /// Set by runQuery/runQueryMulti on failure; cleared on each new query.
     last_error_fields: ?PgErrorFields = null,
 
     pub fn connect(conninfo: [*:0]const u8) PgError!PgConnection {
@@ -137,8 +125,7 @@ pub const PgConnection = struct {
         return PgConnection{ .conn = conn };
     }
 
-    /// Connect and return the PGconn even on failure so the caller can read the error.
-    /// Caller must call deinit() on the returned connection regardless of success.
+    /// Returns the connection even on failure so the caller can read the error message.
     pub fn connectVerbose(conninfo: [*:0]const u8) PgError!PgConnection {
         const conn = c.PQconnectdb(conninfo) orelse return error.ConnectionFailed;
         return PgConnection{ .conn = conn };
@@ -148,15 +135,11 @@ pub const PgConnection = struct {
         return ConnStatus.fromCInt(c.PQstatus(self.conn)) == .ok;
     }
 
-    /// Check connection and transaction state. Returns true only if the
-    /// connection is up and idle (not in a failed transaction).
     pub fn isHealthy(self: *const PgConnection) bool {
         if (ConnStatus.fromCInt(c.PQstatus(self.conn)) != .ok) return false;
         return TransactionStatus.fromCInt(c.PQtransactionStatus(self.conn)) == .idle;
     }
 
-    /// If the connection is stuck in a failed transaction, issue ROLLBACK
-    /// to return it to an idle state so subsequent queries can proceed.
     pub fn resetIfNeeded(self: *PgConnection) void {
         if (TransactionStatus.fromCInt(c.PQtransactionStatus(self.conn)) == .in_error) {
             log.info("connection in failed transaction state, sending ROLLBACK", .{});
@@ -170,9 +153,6 @@ pub const PgConnection = struct {
         self.* = undefined;
     }
 
-    /// Return a human-readable error message.
-    /// Prefers the structured message field from last_error_fields if available,
-    /// falls back to PQerrorMessage from the connection.
     pub fn errorMessage(self: *const PgConnection) []const u8 {
         if (self.last_error_fields) |ef| {
             if (ef.message) |msg| return msg;
@@ -182,8 +162,7 @@ pub const PgConnection = struct {
         return std.mem.sliceTo(msg, 0);
     }
 
-    /// Run a SQL statement and return the result set.
-    /// Uses PQexecParams with no parameters for safety (single statement only).
+    /// PQexecParams enforces single-statement execution (no injection via semicolons).
     pub fn runQuery(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
         self.last_error_fields = null;
         const res = c.PQexecParams(
@@ -199,16 +178,13 @@ pub const PgConnection = struct {
         return self.extractResultCapturingErrors(allocator, res);
     }
 
-    /// Run one or more SQL statements via PQexec (supports multi-statement scripts).
-    /// Returns the result of the last statement. Use for the SQL editor endpoint
-    /// where users type arbitrary SQL including multi-statement scripts.
+    /// PQexec allows multi-statement scripts — used only for the SQL editor endpoint.
     pub fn runQueryMulti(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
         self.last_error_fields = null;
         const res = c.PQexec(self.conn, sql) orelse return error.QueryFailed;
         return self.extractResultCapturingErrors(allocator, res);
     }
 
-    /// Like extractResult but captures structured error fields into self.last_error_fields.
     fn extractResultCapturingErrors(self: *PgConnection, backing: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
         const status = ExecStatus.fromCInt(c.PQresultStatus(res));
         if (status != .tuples_ok and status != .command_ok) {
@@ -309,9 +285,7 @@ pub const PgConnection = struct {
         const enum_res = c.PQexecParams(self.conn, enum_sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
         defer c.PQclear(enum_res);
 
-        // Extract PGresult rows into typed slices using a temp arena.
-        // The slices reference PGresult memory (via getStringFieldNoAlloc),
-        // which stays valid until the deferred PQclear calls above.
+        // Slices reference PGresult memory — valid until the deferred PQclear calls above.
         var tmp = std.heap.ArenaAllocator.init(backing);
         defer tmp.deinit();
         const t = tmp.allocator();
@@ -427,8 +401,6 @@ fn getStringField(allocator: std.mem.Allocator, res: *c.PGresult, row: usize, co
     return allocator.dupe(u8, val_slice);
 }
 
-// ── Result types ──────────────────────────────────────────────────────
-
 pub const QueryResult = struct {
     col_names: [][]const u8,
     rows: [][][]const u8,
@@ -507,8 +479,6 @@ pub const SchemaInfo = struct {
     }
 };
 
-// ── Raw row types for testable schema building ────────────────────────
-
 pub const ColumnRowData = struct {
     table_name: []const u8,
     col_name: []const u8,
@@ -531,9 +501,7 @@ pub const EnumRowData = struct {
     label: []const u8,
 };
 
-/// Build an EnhancedSchemaInfo from pre-parsed row slices.
-/// All allocations go into a single arena — on error, one errdefer cleans up everything.
-/// Extracted so it can be tested without a live PostgreSQL connection.
+/// Extracted from PgConnection so it can be tested without a live database.
 pub fn buildEnhancedSchemaFromRows(
     backing: std.mem.Allocator,
     col_data: []const ColumnRowData,
@@ -544,7 +512,6 @@ pub fn buildEnhancedSchemaFromRows(
     errdefer arena.deinit();
     const alloc = arena.allocator();
 
-    // Build ENUM lookup: group labels by (table, column)
     const EnumKey = struct { table: []const u8, column: []const u8 };
     const EnumEntry = struct { key: EnumKey, values: std.ArrayList([]const u8) };
     var enum_entries = std.ArrayList(EnumEntry){};
@@ -564,7 +531,6 @@ pub fn buildEnhancedSchemaFromRows(
         }
     }
 
-    // Build table list from column rows
     var tables = std.ArrayList(EnhancedTableInfo){};
     var current_table: ?[]const u8 = null;
     var current_columns = std.ArrayList(EnhancedColumnInfo){};
@@ -597,7 +563,6 @@ pub fn buildEnhancedSchemaFromRows(
         else
             null;
 
-        // FK lookup — search input data directly
         var fk_table: ?[]const u8 = null;
         var fk_col: ?[]const u8 = null;
         for (fk_data) |fk| {
@@ -608,7 +573,6 @@ pub fn buildEnhancedSchemaFromRows(
             }
         }
 
-        // ENUM lookup
         var enum_vals: ?[][]const u8 = null;
         for (enum_entries.items) |entry| {
             if (std.mem.eql(u8, entry.key.table, current_table.?) and std.mem.eql(u8, entry.key.column, cname)) {
@@ -652,8 +616,6 @@ pub fn buildEnhancedSchemaFromRows(
         .arena = arena,
     };
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────
 
 test "SchemaInfo.format: produces readable output" {
     const allocator = std.testing.allocator;
@@ -730,25 +692,21 @@ test "buildEnhancedSchemaFromRows: multiple tables with FK and enum" {
 
     try std.testing.expectEqual(@as(usize, 2), result.tables.len);
 
-    // Orders table
     const orders = result.tables[0];
     try std.testing.expectEqualStrings("orders", orders.name);
     try std.testing.expectEqual(@as(usize, 3), orders.columns.len);
     try std.testing.expect(orders.has_primary_key);
 
-    // FK on user_id
     const user_id_col = orders.columns[2];
     try std.testing.expectEqualStrings("user_id", user_id_col.name);
     try std.testing.expectEqualStrings("users", user_id_col.fk_target_table.?);
     try std.testing.expectEqualStrings("id", user_id_col.fk_target_column.?);
 
-    // ENUM on status
     const status_col = orders.columns[1];
     try std.testing.expectEqual(@as(usize, 3), status_col.enum_values.?.len);
     try std.testing.expectEqualStrings("pending", status_col.enum_values.?[0]);
     try std.testing.expectEqualStrings("'pending'", status_col.column_default.?);
 
-    // Users table
     const users = result.tables[1];
     try std.testing.expectEqualStrings("users", users.name);
     try std.testing.expectEqual(@as(usize, 2), users.columns.len);

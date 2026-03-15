@@ -1,7 +1,6 @@
 // sql-tabs.js — SQL tab management: create, switch, close tabs
 // Loaded after state.js and utils.js, before sql.js (sql.js references tab state).
 
-// Module-local tab state
 const sqlTabs = [{ id: 0, name: 'Query 1', sql: '', results: '' }];
 let activeSqlTab = 0;
 let nextSqlTabId = 1;
@@ -32,13 +31,11 @@ function renderSqlTabs() {
 }
 
 function switchSqlTab(tabId) {
-	// Save current tab state
 	const current = sqlTabs.find((t) => t.id === activeSqlTab);
 	if (current) {
 		current.sql = sqlEditor.value;
 		current.results = $('sql-results').innerHTML;
 	}
-	// Load new tab
 	activeSqlTab = tabId;
 	const tab = sqlTabs.find((t) => t.id === tabId);
 	if (tab) {
@@ -76,9 +73,7 @@ async function closeSqlTab(tabId) {
 	const idx = sqlTabs.findIndex((t) => t.id === tabId);
 	if (idx < 0) return;
 	const tab = sqlTabs[idx];
-	// Get the live content if this is the active tab
 	const tabContent = tabId === activeSqlTab ? sqlEditor.value : tab.sql || '';
-	// Warn if tab has unsaved content
 	if (tabContent && tabContent.trim().length > 0) {
 		const ok = await confirm(
 			'Close Tab',

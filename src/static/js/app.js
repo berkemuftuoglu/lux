@@ -11,32 +11,27 @@
 //   grid.js        — data grid, cell editing, pagination
 //   crud.js        — bulk operations, row detail
 
-// App-level constants
 const HEALTH_CHECK_INTERVAL = 30000;
 const AC_LINE_HEIGHT = 23;
 const AC_CHAR_WIDTH = 8.4;
 
-// Theme Toggle
 function setTheme(theme) {
 	document.documentElement.setAttribute('data-theme', theme);
 	localStorage.setItem('lux-theme', theme);
 	$('theme-icon-sun').style.display = theme === 'dark' ? 'none' : 'block';
 	$('theme-icon-moon').style.display = theme === 'dark' ? 'block' : 'none';
-	// Redraw ER if visible
 	if ($('panel-er').classList.contains('active')) drawER();
 }
 $('btn-theme').onclick = () => {
 	const current = document.documentElement.getAttribute('data-theme');
 	setTheme(current === 'dark' ? 'light' : 'dark');
 };
-// Init theme from localStorage or system preference
 const savedTheme = localStorage.getItem('lux-theme');
 if (savedTheme) setTheme(savedTheme);
 else if (window.matchMedia('(prefers-color-scheme: light)').matches)
 	setTheme('light');
 else setTheme('dark');
 
-// Main Tab Bar — switch between Tables / SQL / ER / Journal panels
 $$('.tab').forEach((tab) => {
 	tab.addEventListener('click', () => {
 		$$('.tab').forEach((t) => {
@@ -55,13 +50,11 @@ $$('.tab').forEach((tab) => {
 	});
 });
 
-// Connection (functions defined in connection.js)
 $('conn-btn').onclick = doConnect;
 $('conn-input').addEventListener('keydown', (e) => {
 	if (e.key === 'Enter') doConnect();
 });
 
-// Export table data
 $('btn-export-csv').onclick = () => {
 	if (currentTable)
 		window.location.href = `/api/export/${encodeURIComponent(currentTable)}?format=csv`;
@@ -71,7 +64,6 @@ $('btn-export-json').onclick = () => {
 		window.location.href = `/api/export/${encodeURIComponent(currentTable)}?format=json`;
 };
 
-// Refresh
 $('btn-refresh').onclick = async () => {
 	if (dbConnected) {
 		await loadSchema();
@@ -80,7 +72,6 @@ $('btn-refresh').onclick = async () => {
 };
 $('btn-tbl-refresh').onclick = () => loadTableData();
 
-// Saved Queries (functions defined in saved-queries.js)
 $('btn-saved-queries').onclick = () => {
 	renderSavedQueries();
 	$('saved-overlay').classList.add('open');
@@ -107,12 +98,9 @@ $('saved-overlay').onclick = (e) => {
 	}
 };
 
-// SQL Tabs (functions defined in sql-tabs.js)
 $('sql-tab-add').onclick = addSqlTab;
 
-// Keyboard Shortcuts
 document.addEventListener('keydown', (e) => {
-	// Ctrl+L: focus SQL editor
 	if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
 		e.preventDefault();
 		$$('.tab').forEach((t) => t.classList.remove('active'));
@@ -121,7 +109,6 @@ document.addEventListener('keydown', (e) => {
 		$('panel-sql').classList.add('active');
 		sqlEditor.focus();
 	}
-	// Ctrl+F: find & replace (in Tables panel)
 	if (
 		(e.ctrlKey || e.metaKey) &&
 		e.key === 'f' &&
@@ -133,7 +120,7 @@ document.addEventListener('keydown', (e) => {
 			$('btn-find-replace').click();
 		}
 	}
-	// Escape: close modals in priority order (topmost first)
+	// Close modals in priority order (topmost first)
 	if (e.key === 'Escape') {
 		const modals = [
 			'cmd-overlay',
@@ -189,7 +176,6 @@ document.addEventListener('keydown', (e) => {
 			updateCellFocus();
 		}
 	}
-	// ? key: show shortcuts (when not typing)
 	if (
 		e.key === '?' &&
 		!editingCell &&
@@ -200,7 +186,6 @@ document.addEventListener('keydown', (e) => {
 		e.preventDefault();
 		$('shortcuts-overlay').classList.add('open');
 	}
-	// Ctrl+N: new SQL tab
 	if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
 		e.preventDefault();
 		addSqlTab();
@@ -209,12 +194,10 @@ document.addEventListener('keydown', (e) => {
 		document.querySelector('[data-tab="sql"]').classList.add('active');
 		$('panel-sql').classList.add('active');
 	}
-	// Ctrl+S: save connection
 	if ((e.ctrlKey || e.metaKey) && e.key === 's') {
 		e.preventDefault();
 		if (dbConnected) $('save-conn-btn').click();
 	}
-	// Grid arrow key navigation
 	if (
 		!editingCell &&
 		$('panel-tables').classList.contains('active') &&
@@ -266,7 +249,7 @@ document.addEventListener('keydown', (e) => {
 	}
 });
 
-// Init — deferred until DOMContentLoaded so all modules are fully parsed
+// Deferred until DOMContentLoaded so all modules are fully parsed
 async function init() {
 	updateDestructiveButtons(false);
 	await loadReadOnly();
@@ -292,7 +275,6 @@ window.addEventListener('resize', () => {
 	if ($('panel-er').classList.contains('active')) drawER();
 });
 
-// Sidebar Resize
 (() => {
 	const handle = $('sidebar-resize');
 	const sidebar = $('sidebar');
@@ -321,7 +303,6 @@ window.addEventListener('resize', () => {
 	});
 })();
 
-// SQL Editor Resize
 (() => {
 	const handle = $('sql-resize');
 	const wrap = document.querySelector('.sql-editor-wrap');
@@ -354,7 +335,6 @@ window.addEventListener('resize', () => {
 	});
 })();
 
-// Column Resizing
 (() => {
 	let resizing = false;
 	let resizeTh = null;
@@ -396,7 +376,6 @@ window.addEventListener('resize', () => {
 	});
 })();
 
-// Wire up modal close buttons (delegated from HTML class="modal-close-btn")
 document.querySelectorAll('.modal-close-btn').forEach((btn) => {
 	btn.addEventListener('click', () => {
 		const overlay = btn.closest('.modal-overlay');
@@ -407,7 +386,6 @@ document.querySelectorAll('.modal-close-btn').forEach((btn) => {
 	});
 });
 
-// Mobile sidebar toggle
 (() => {
 	const toggle = $('sidebar-toggle');
 	const sidebar = document.querySelector('.sidebar');
@@ -415,7 +393,6 @@ document.querySelectorAll('.modal-close-btn').forEach((btn) => {
 		toggle.addEventListener('click', () => {
 			sidebar.classList.toggle('open');
 		});
-		// Close sidebar when clicking outside on mobile
 		document.addEventListener('click', (e) => {
 			if (
 				sidebar.classList.contains('open') &&

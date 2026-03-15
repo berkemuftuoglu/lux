@@ -1,7 +1,4 @@
-// Command Palette module
-// Functions: openCmdPalette, closeCmdPalette, buildCmdResults,
-//            selectTableFromCmd, switchToTab, switchToSqlTab, renderCmdResults
-// State: cmdIndex, cmdItems
+// cmd-palette.js — Command palette (Ctrl+K): fuzzy search for tables, columns, and actions
 
 let cmdIndex = 0;
 let cmdItems = [];
@@ -25,7 +22,6 @@ function buildCmdResults(query) {
 	const actionIcon =
 		'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
 
-	// Tables
 	if (schemaData?.tables) {
 		schemaData.tables.forEach((t) => {
 			if (!q || t.name.toLowerCase().includes(q)) {
@@ -39,7 +35,6 @@ function buildCmdResults(query) {
 					},
 				});
 			}
-			// Also search columns
 			if (q && t.columns) {
 				t.columns.forEach((c) => {
 					if (c.name.toLowerCase().includes(q)) {
@@ -58,7 +53,6 @@ function buildCmdResults(query) {
 		});
 	}
 
-	// Actions
 	const actions = [
 		{
 			label: 'New SQL Tab',
@@ -143,7 +137,6 @@ function buildCmdResults(query) {
 }
 
 function selectTableFromCmd(name) {
-	// Switch to tables tab and select the table
 	switchToTab('tables');
 	const tree = $('schema-tree');
 	tree.querySelectorAll('.tree-table').forEach((el) => {
@@ -186,7 +179,6 @@ function renderCmdResults() {
 				'" data-idx="' +
 				i +
 				'">' +
-				// item.icon is always a hardcoded SVG string, never user data
 				'<div class="cmd-icon">' +
 				item.icon +
 				'</div>' +
@@ -213,12 +205,10 @@ function renderCmdResults() {
 		});
 	});
 
-	// Scroll selected into view
 	const selected = container.querySelector('.cmd-item.selected');
 	if (selected) selected.scrollIntoView({ block: 'nearest' });
 }
 
-// Event wiring
 $('cmd-input').addEventListener('input', () =>
 	buildCmdResults($('cmd-input').value)
 );
@@ -247,7 +237,6 @@ $('cmd-overlay').addEventListener('click', (e) => {
 });
 $('btn-cmd-palette').onclick = openCmdPalette;
 
-// Ctrl+K global shortcut
 document.addEventListener('keydown', (e) => {
 	if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
 		e.preventDefault();

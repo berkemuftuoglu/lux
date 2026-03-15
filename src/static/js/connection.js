@@ -1,7 +1,6 @@
 // connection.js — Connection management: connect, status, saved connections, health check, stripe
 // Loaded after state.js and utils.js, before app.js.
 
-// Module-local state (not shared across other files)
 let savedConnColor = 'blue';
 let savedConnsMap = new Map();
 
@@ -26,7 +25,6 @@ async function doConnect() {
 			await loadSchema();
 			toast('Connected', 'success');
 			startHealthCheck();
-			// Set connection stripe color
 			const connStr = $('conn-input').value.trim();
 			const savedColor = getSavedConnColor(connStr);
 			setConnStripe(savedColor || detectConnColor(connStr));
@@ -52,7 +50,6 @@ function updateConnUI() {
 	$('hdr-dot').classList.toggle('connected', dbConnected);
 	$('status-dot').classList.toggle('ok', dbConnected);
 	$('status-conn').textContent = dbConnected ? 'Connected' : 'Not connected';
-	// Show/hide save connection button
 	$('save-conn-btn').style.display = dbConnected ? '' : 'none';
 }
 
@@ -172,7 +169,6 @@ function getSavedConnColor(conninfo) {
 	return null;
 }
 
-// Save Connection Modal
 $('save-conn-btn').onclick = () => {
 	const conninfo = $('conn-input').value.trim();
 	if (!conninfo) {
@@ -236,7 +232,6 @@ $('save-conn-overlay').onclick = (e) => {
 	}
 };
 
-// Reconnect Banner
 $('reconnect-btn').onclick = async () => {
 	$('reconnect-btn').textContent = '...';
 	$('reconnect-btn').disabled = true;

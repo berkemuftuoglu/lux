@@ -38,8 +38,6 @@ pub fn findColumnInTable(table: postgres.TableInfo, col_name: []const u8) bool {
     return false;
 }
 
-/// Read the HTTP request body, handling partial reads.
-/// Returns the body slice (may point into extra_buf or into request).
 pub const readRequestBody = utils.readRequestBody;
 
 pub fn enforceReadOnly(stream: std.net.Stream, state: *const ServerState) !bool {
@@ -86,11 +84,7 @@ fn formatRowAsJsonCompact(allocator: std.mem.Allocator, col_names: []const []con
     return buf.toOwnedSlice(allocator);
 }
 
-/// Extract key-value pairs from a JSON object field (e.g. "values": {"col":"val", ...}).
-/// Returns null if the field is not found or not an object.
-/// Caller must free the returned slice with allocator.free().
 fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name: []const u8) ?[]KVPair {
-    // Find "field_name" :
     var search_pos: usize = 0;
     const obj_start = while (search_pos < body.len) {
         const quote_pos = std.mem.indexOfScalarPos(u8, body, search_pos, '"') orelse return null;
@@ -108,15 +102,12 @@ fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name:
         search_pos = quote_pos + 1;
     } else return null;
 
-    // Parse key-value pairs inside the object
     var pairs = std.ArrayList(KVPair){};
     var pos = obj_start;
     while (pos < body.len) {
-        // Skip whitespace and commas
         while (pos < body.len and (body[pos] == ' ' or body[pos] == ',' or body[pos] == '\t' or body[pos] == '\n' or body[pos] == '\r')) pos += 1;
         if (pos >= body.len or body[pos] == '}') break;
 
-        // Expect opening quote for key
         if (body[pos] != '"') break;
         pos += 1;
         const key_start = pos;
@@ -125,11 +116,9 @@ fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name:
         const key = body[key_start..pos];
         pos += 1; // skip closing quote
 
-        // Skip colon and whitespace
         while (pos < body.len and (body[pos] == ' ' or body[pos] == ':' or body[pos] == '\t')) pos += 1;
         if (pos >= body.len) break;
 
-        // Handle null value
         if (pos + 4 <= body.len and std.mem.eql(u8, body[pos..][0..4], "null")) {
             pairs.append(allocator, .{ .key = key, .value = "__NULL__" }) catch {
                 pairs.deinit(allocator);
@@ -139,7 +128,6 @@ fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name:
             continue;
         }
 
-        // Expect opening quote for value
         if (body[pos] != '"') break;
         pos += 1;
         const val_start = pos;
@@ -216,10 +204,7 @@ pub fn addJournalEntry(
     return entry.id;
 }
 
-/// Write the shared "columns":[...] and "rows":[[...]] JSON to the writer.
-/// Used by both sendTableDataJson and sendQueryResultJson to eliminate duplication.
 fn writeColumnsAndRows(w: anytype, pg_result: *const postgres.QueryResult) !void {
-    // Column names
     try w.writeAll("\"columns\":[");
     for (pg_result.col_names, 0..) |name, i| {
         if (i > 0) try w.writeByte(',');
@@ -229,7 +214,6 @@ fn writeColumnsAndRows(w: anytype, pg_result: *const postgres.QueryResult) !void
     }
     try w.writeAll("],\"rows\":[");
 
-    // Row data
     for (pg_result.rows, 0..) |row, ri| {
         if (ri > 0) try w.writeByte(',');
         try w.writeByte('[');
@@ -266,7 +250,6 @@ pub fn sendTableDataJson(
         if (meta.use_exact_count) "true" else "false", if (meta.table_has_pk) "column" else "ctid", if (meta.use_keyset) "keyset" else "offset",
     });
 
-    // Include PK info from enhanced schema
     if (state.enhanced_schema) |etables| {
         for (etables) |et| {
             if (std.mem.eql(u8, et.name, table_name)) {
@@ -283,10 +266,8 @@ pub fn sendTableDataJson(
         }
     }
 
-    // Write shared columns and rows
     try writeColumnsAndRows(w, pg_result);
 
-    // Add keyset cursor values if using keyset pagination
     if (meta.use_keyset and meta.pk_col_name != null and pg_result.n_rows > 0) {
         var pk_result_idx: ?usize = null;
         for (pg_result.col_names, 0..) |name, ci| {
@@ -319,7 +300,6 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream,
 
     try w.print("{{\"row_count\":{d},", .{pg_result.n_rows});
 
-    // Write shared columns and rows
     try writeColumnsAndRows(w, pg_result);
 
     try w.writeByte('}');
@@ -334,7 +314,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
 
     const allocator = arena;
 
-    // Parse table name from path: /api/tables/<name>/data
     const prefix = "/api/tables/";
     if (!std.mem.startsWith(u8, path, prefix)) {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
@@ -342,11 +321,9 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     }
 
     const after_prefix = path[prefix.len..];
-    // Split off query string
     const path_part = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[0..qi] else after_prefix;
     const query_string = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[qi + 1 ..] else "";
 
-    // path_part should be "<table_name>/data"
     const data_suffix = "/data";
     if (!std.mem.endsWith(u8, path_part, data_suffix)) {
         try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Expected /api/tables/<name>/data\"}");
@@ -359,7 +336,7 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         return;
     }
 
-    // Validate table name exists in schema (fail-closed: reject if schema not loaded)
+    // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -378,21 +355,18 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         }
     }
 
-    // Parse limit and offset from query string
     var limit: usize = 50;
     var offset: usize = 0;
     utils.parseQueryParam(query_string, "limit", &limit);
     utils.parseQueryParam(query_string, "offset", &offset);
     if (limit > 10000) limit = 10000;
 
-    // Parse optional sort column and direction
     var sort_col_buf: [128]u8 = undefined;
     const sort_col = utils.parseStringQueryParam(query_string, "sort", &sort_col_buf);
     var dir_buf: [8]u8 = undefined;
     const dir_param = utils.parseStringQueryParam(query_string, "dir", &dir_buf);
     const sort_dir: []const u8 = if (dir_param) |d| (if (std.mem.eql(u8, d, "desc")) @as([]const u8, "DESC") else "ASC") else "ASC";
 
-    // Validate sort column against schema if provided
     if (sort_col) |col| {
         if (state.schema_tables) |tables| {
             const table_info = findTableInSchema(tables, table_name);
@@ -405,7 +379,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         }
     }
 
-    // Parse count mode: ?count=exact for precise count, otherwise estimate
     var count_exact_buf: [8]u8 = undefined;
     const count_mode = utils.parseStringQueryParam(query_string, "count", &count_exact_buf);
     const use_exact_count_param = if (count_mode) |m| std.mem.eql(u8, m, "exact") else false;
@@ -422,7 +395,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
                     const col = param[2..eq];
                     const val = param[eq + 1 ..];
                     if (col.len > 0 and val.len > 0 and filter_count < 16) {
-                        // Validate column exists in schema
                         if (state.schema_tables) |tables| {
                             const ti = findTableInSchema(tables, table_name);
                             if (ti) |t_info| {
@@ -442,13 +414,12 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     // When filters active, use exact count; otherwise respect user preference
     const use_exact_count = use_exact_count_param or has_filters;
 
-    // Parse keyset pagination params: after=value, before=value
     var after_buf: [256]u8 = undefined;
     const after_cursor = utils.parseStringQueryParam(query_string, "after", &after_buf);
     var before_buf: [256]u8 = undefined;
     const before_cursor = utils.parseStringQueryParam(query_string, "before", &before_buf);
 
-    // Check if table has a primary key — if not, include ctid
+    // Tables without PK use ctid as row identifier
     var table_has_pk = true;
     var pk_col_name: ?[]const u8 = null;
     if (state.enhanced_schema) |etables| {
@@ -479,10 +450,8 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     }
     const select_cols: []const u8 = if (!table_has_pk and !is_view) "ctid::text, *" else "*";
 
-    // Use keyset pagination when: table has PK and after/before cursor present
     const use_keyset = table_has_pk and pk_col_name != null and (after_cursor != null or before_cursor != null);
 
-    // Build WHERE clause from filters and keyset cursor
     var where_buf = std.ArrayList(u8){};
     const ww = where_buf.writer(allocator);
     var where_parts: usize = 0;
@@ -491,7 +460,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         try ww.writeAll(" WHERE ");
     }
 
-    // Add filter conditions
     for (filters[0..filter_count]) |f| {
         if (where_parts > 0) try ww.writeAll(" AND ");
         const esc_val = utils.escapeStringValue(allocator, f.value) catch continue;
@@ -499,7 +467,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         where_parts += 1;
     }
 
-    // Add keyset cursor condition
     if (use_keyset) {
         if (after_cursor) |cursor| {
             if (where_parts > 0) try ww.writeAll(" AND ");
@@ -521,7 +488,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     }
     const where_clause = where_buf.items;
 
-    // Build count query
     var count_buf = std.ArrayList(u8){};
     if (!use_exact_count) {
         const esc_count_tn = try utils.escapeStringValue(allocator, table_name);
@@ -531,33 +497,29 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     }
     try count_buf.append(allocator, 0);
 
-    // Build data query
     var sql_list = std.ArrayList(u8){};
     const sw = sql_list.writer(allocator);
 
     if (use_keyset and before_cursor != null) {
-        // Backward keyset: reverse order, will re-reverse results
+        // Backward keyset: fetch in reverse, caller re-reverses
         try sw.print("SELECT {s} FROM \"{s}\"{s}", .{ select_cols, table_name, where_clause });
         try sw.print(" ORDER BY \"{s}\" DESC", .{pk_col_name.?});
         try sw.print(" LIMIT {d}", .{limit});
     } else if (sort_col) |col| {
         try sw.print("SELECT {s} FROM \"{s}\"{s} ORDER BY \"{s}\" {s} LIMIT {d} OFFSET {d}", .{ select_cols, table_name, where_clause, col, sort_dir, limit, offset });
     } else if (use_keyset) {
-        // Forward keyset
         try sw.print("SELECT {s} FROM \"{s}\"{s} ORDER BY \"{s}\" ASC LIMIT {d}", .{ select_cols, table_name, where_clause, pk_col_name.?, limit });
     } else {
         try sw.print("SELECT {s} FROM \"{s}\"{s} LIMIT {d} OFFSET {d}", .{ select_cols, table_name, where_clause, limit, offset });
     }
     try sql_list.append(allocator, 0);
 
-    // Connect and execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
 
-    // Get total count
     const count_z: [*:0]const u8 = @ptrCast(count_buf.items[0 .. count_buf.items.len - 1 :0]);
     var count_result = pg_conn.runQuery(allocator, count_z) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Count query failed\"}");
@@ -570,7 +532,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         total = std.fmt.parseInt(usize, count_result.rows[0][0], 10) catch 0;
     }
 
-    // Get data
     const data_z: [*:0]const u8 = @ptrCast(sql_list.items[0 .. sql_list.items.len - 1 :0]);
     var pg_result = pg_conn.runQuery(allocator, data_z) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Data query failed\"}");
@@ -578,7 +539,6 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     };
     defer pg_result.deinit();
 
-    // Build and send JSON response
     try sendTableDataJson(allocator, stream, state, &pg_result, table_name, .{
         .total = total,
         .limit = limit,
@@ -605,7 +565,6 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
         return;
     };
 
-    // Extract fields
     const table_name = utils.extractJsonField(body, "table") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table field\"}");
         return;
@@ -627,11 +586,9 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
         return;
     };
 
-    // Check pk_mode: "ctid" or "column" (default)
     const pk_mode = utils.extractJsonField(body, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
-    // Validate table and columns against schema
     const tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
         return;
@@ -644,21 +601,19 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Column not found in table schema\"}");
         return;
     }
-    // For ctid mode, pk_column is "ctid" which is a system column — skip schema validation
+    // ctid is a system column, not in the user schema — skip validation
     if (!is_ctid_mode) {
         if (!findColumnInTable(table_info, pk_column)) {
             try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"PK column not found in table schema\"}");
             return;
         }
     } else {
-        // Validate ctid format
         if (!validateCtid(pk_value)) {
             try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid ctid format\"}");
             return;
         }
     }
 
-    // Escape values
     const escaped_value = utils.escapeStringValue(allocator, value) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
@@ -669,7 +624,7 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
         return;
     };
 
-    // Check column type for json/jsonb casting
+    // json/jsonb columns need explicit cast
     var is_json_col = false;
     if (state.enhanced_schema) |etables| {
         for (etables) |et| {
@@ -688,7 +643,6 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
     }
     const value_expr: []const u8 = if (is_json_col) "'::jsonb" else "'";
 
-    // Build SQL: use ctid WHERE clause for no-PK tables
     var sql_buf = std.ArrayList(u8){};
     const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
@@ -700,11 +654,10 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
             table_name, column_name, escaped_value, value_expr, pk_column, escaped_pk, column_name,
         });
     }
-    try sql_buf.append(allocator, 0); // null terminator
+    try sql_buf.append(allocator, 0);
 
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
-    // Execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
@@ -723,7 +676,6 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
     };
     defer pg_result.deinit();
 
-    // Record journal entry — use the value field as the new value, old value from request
     const old_value_field = utils.extractJsonField(body, "old_value") orelse "";
     const journal_id = addJournalEntry(state, table_name, "update", column_name, old_value_field, value, pk_column, pk_value) catch |err| blk: {
         log.warn("journal entry failed: {s}", .{@errorName(err)});
@@ -763,11 +715,9 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     };
 
-    // Check pk_mode
     const pk_mode = utils.extractJsonField(body, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
-    // Validate against schema
     const tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
         return;
@@ -788,13 +738,11 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
         }
     }
 
-    // Escape pk value
     const escaped_pk = utils.escapeStringValue(allocator, pk_value) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
 
-    // Build SQL: DELETE with ctid or PK column
     var sql_buf = std.ArrayList(u8){};
     const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
@@ -806,7 +754,6 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
 
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
-    // Execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
@@ -858,7 +805,6 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
     };
     defer pg_result.deinit();
 
-    // Record journal entry for delete with old row data
     if (addJournalEntry(state, table_name, "delete", "", old_row_json, "", pk_column, pk_value)) |_| {} else |err| {
         log.warn("journal entry failed: {s}", .{@errorName(err)});
     }
@@ -886,7 +832,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     };
 
-    // Validate against schema
     const tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
         return;
@@ -896,10 +841,8 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     }
 
-    // Parse optional values object
     const values = extractJsonObject(allocator, body, "values");
 
-    // Validate column keys against schema
     if (values) |pairs| {
         const table_info = findTableInSchema(tables, table_name) orelse {
             try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Table not found in schema\"}");
@@ -913,13 +856,11 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
         }
     }
 
-    // Build SQL
     var sql_builder = std.ArrayList(u8){};
     const sw = sql_builder.writer(allocator);
 
     if (values) |pairs| {
         if (pairs.len > 0) {
-            // INSERT INTO "table" ("col1", "col2") VALUES ('val1', 'val2') RETURNING *
             try sw.print("INSERT INTO \"{s}\" (", .{table_name});
             for (pairs, 0..) |pair, i| {
                 if (i > 0) try sw.writeAll(", ");
@@ -949,12 +890,11 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
     } else {
         try sw.print("INSERT INTO \"{s}\" DEFAULT VALUES RETURNING *", .{table_name});
     }
-    try sw.writeByte(0); // null terminate
+    try sw.writeByte(0);
 
     const sql_slice = sql_builder.items;
     const sql_z: [*:0]const u8 = sql_slice[0 .. sql_slice.len - 1 :0];
 
-    // Execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
@@ -973,7 +913,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
     };
     defer pg_result.deinit();
 
-    // Record journal entry for insert — use first column as PK
+    // HACK: assumes first returned column is the PK for journal tracking
     if (pg_result.n_rows > 0 and pg_result.col_names.len > 0) {
         const insert_pk_col = pg_result.col_names[0];
         const insert_pk_val = if (pg_result.rows[0].len > 0) pg_result.rows[0][0] else "";
@@ -982,7 +922,6 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
         }
     }
 
-    // Build response with the new row
     var json_buf = std.ArrayList(u8){};
     const jw = json_buf.writer(allocator);
 
@@ -1018,7 +957,6 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     }
     const allocator = arena;
 
-    // Parse: /api/tables/<table>/fk-lookup?column=...&search=...
     const prefix = "/api/tables/";
     const after_prefix = path[prefix.len..];
     const fk_idx = std.mem.indexOf(u8, after_prefix, "/fk-lookup") orelse {
@@ -1027,7 +965,6 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     };
     const table_name = after_prefix[0..fk_idx];
 
-    // Parse query string
     const qs_start = std.mem.indexOfScalar(u8, path, '?') orelse path.len;
     const qs = if (qs_start < path.len) path[qs_start + 1 ..] else "";
 
@@ -1039,7 +976,6 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     var search_buf: [256]u8 = undefined;
     const search = utils.parseStringQueryParam(qs, "search", &search_buf) orelse "";
 
-    // Find FK target from enhanced schema
     const etables = state.enhanced_schema orelse {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No enhanced schema\"}");
         return;
@@ -1068,12 +1004,10 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
         return;
     };
 
-    // Parse limit
     var fk_limit: usize = 20;
     utils.parseQueryParam(qs, "limit", &fk_limit);
     if (fk_limit > 100) fk_limit = 100;
 
-    // Build query
     var sql_buf = std.ArrayList(u8){};
     const sw = sql_buf.writer(allocator);
 
@@ -1102,7 +1036,6 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     };
     defer pg_result.deinit();
 
-    // Serialize results as JSON array
     var json_buf = std.ArrayList(u8){};
     const jw = json_buf.writer(allocator);
     try jw.writeAll("{\"values\":[");
@@ -1131,7 +1064,6 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     }
     const allocator = arena;
 
-    // Parse table name from path: /api/tables/<name>/bulk-update
     const prefix = "/api/tables/";
     const after_prefix = path[prefix.len..];
     const suffix = "/bulk-update";
@@ -1141,7 +1073,6 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     }
     const table_name = after_prefix[0 .. after_prefix.len - suffix.len];
 
-    // Validate table
     const tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
         return;
@@ -1172,7 +1103,6 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     const force_str = utils.extractJsonField(body, "force") orelse "false";
     const force = std.mem.eql(u8, force_str, "true");
 
-    // Validate column
     if (!findColumnInTable(table_info, column)) {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Column not found\"}");
         return;
@@ -1229,7 +1159,6 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
         };
         defer upd_result.deinit();
 
-        // Record journal entries
         if (addJournalEntry(state, table_name, "update", column, find_val, replace_val, "bulk", "")) |_| {} else |err| {
             log.warn("journal entry failed: {s}", .{@errorName(err)});
         }
@@ -1246,7 +1175,6 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
 
     const allocator = arena;
 
-    // Extract table name from /api/tables/<name>/truncate
     const prefix = "/api/tables/";
     const suffix = "/truncate";
     if (path.len <= prefix.len + suffix.len) {
@@ -1259,7 +1187,6 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
         return;
     }
 
-    // Validate table exists in schema
     const tables = state.schema_tables orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
         return;
@@ -1269,7 +1196,6 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
         return;
     }
 
-    // Build TRUNCATE SQL
     var sql_buf: [512]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&sql_buf);
     fbs.writer().print("TRUNCATE TABLE \"{s}\"", .{table_name}) catch {
@@ -1280,7 +1206,6 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
     sql_buf[sql_len] = 0;
     const sql_z: [*:0]const u8 = sql_buf[0..sql_len :0];
 
-    // Execute
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
         return;
@@ -1299,15 +1224,12 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
     };
     defer pg_result.deinit();
 
-    // Record in journal
     if (addJournalEntry(state, table_name, "truncate", "", "", "", "ALL", "")) |_| {} else |err| {
         log.warn("journal entry failed: {s}", .{@errorName(err)});
     }
 
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
 }
-
-// Tests
 
 test "findTableInSchema: finds existing table" {
     const cols = [_]postgres.ColumnInfo{
@@ -1394,7 +1316,6 @@ test "addJournalEntry: adds to journal" {
     const id = try addJournalEntry(&state, "users", "update", "name", "old", "new", "id", "1");
     try std.testing.expect(id > 0);
     try std.testing.expectEqual(@as(usize, 1), state.change_journal.items.len);
-    // Free the duped strings
     for (state.change_journal.items) |entry| {
         std.testing.allocator.free(entry.table_name);
         std.testing.allocator.free(entry.operation);
@@ -1447,7 +1368,6 @@ test "addJournalEntry: delete operation stores table and pk" {
 
 test "enforceReadOnly: allows when not read-only" {
     const state = ServerState.init(std.testing.allocator);
-    // Can't test with a real stream, but verify the logic
     try std.testing.expect(!state.flags.read_only);
 }
 

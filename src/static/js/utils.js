@@ -1,27 +1,22 @@
 // utils.js -- Pure utility functions (loaded second in index.html, after state.js)
 // These functions have no feature-specific state dependencies.
 
-// Constants
 const TOAST_DURATION = 3500;
 const TOAST_HOVER_DURATION = 2000;
 
-// DOM query helpers
 const $ = (id) => document.getElementById(id);
 const $$ = (sel) => document.querySelectorAll(sel);
 
-// HTML escaping -- safe, uses textContent not innerHTML
 function escHtml(s) {
 	const d = document.createElement('div');
 	d.textContent = s;
 	return d.innerHTML;
 }
 
-// snake_case to Title Case
 function prettyName(name) {
 	return name.replace(/_/g, ' ').replace(/\bid\b/gi, 'ID');
 }
 
-// Modal close with exit animation
 function closeModal(overlayId) {
 	const overlay = $(overlayId);
 	if (!overlay || !overlay.classList.contains('open')) return;
@@ -44,15 +39,14 @@ function closeModal(overlayId) {
 	}
 }
 
-// Re-trigger CSS animation on connection dot
 function pulseDot(dotEl) {
 	dotEl.classList.remove('pulse');
-	dotEl.offsetHeight; // force reflow to re-trigger animation
+	dotEl.offsetHeight; // force reflow to re-trigger CSS animation
 	dotEl.classList.add('pulse');
 	dotEl.addEventListener('animationend', () => dotEl.classList.remove('pulse'), { once: true });
 }
 
-// Clipboard copy with fallback for HTTP (insecure) contexts
+// Fallback for HTTP (insecure) contexts where navigator.clipboard is unavailable
 function copyToClipboard(text) {
 	if (navigator.clipboard?.writeText) {
 		return navigator.clipboard.writeText(text);
@@ -72,7 +66,6 @@ function copyToClipboard(text) {
 	return Promise.resolve();
 }
 
-// Fetch wrapper -- throws on non-2xx, extracts server error messages
 async function fetchJson(url, opts) {
 	const res = await fetch(url, opts);
 	if (!res.ok) {
@@ -88,7 +81,6 @@ async function fetchJson(url, opts) {
 	return res.json();
 }
 
-// Toast notification
 function toast(msg, type) {
 	const el = document.createElement('div');
 	el.className = 'toast ' + (type || 'info');
@@ -107,7 +99,6 @@ function toast(msg, type) {
 	});
 }
 
-// Loading spinner overlay
 function showLoading(parentId) {
 	const parent = $(parentId);
 	if (!parent || parent.querySelector('.loading-overlay')) return;
@@ -126,7 +117,6 @@ function hideLoading(parentId) {
 	if (overlay) overlay.remove();
 }
 
-// Async confirmation dialog
 let confirmResolve = null;
 function confirm(title, body) {
 	return new Promise((resolve) => {
@@ -148,7 +138,6 @@ $('confirm-cancel').onclick = () => {
 	if (confirmResolve) confirmResolve(false);
 };
 
-// Async prompt dialog
 let promptResolve = null;
 function promptUser(title, defaultVal) {
 	return new Promise((resolve) => {
@@ -177,7 +166,6 @@ $('prompt-overlay').onclick = (e) => {
 	if (e.target === $('prompt-overlay')) $('prompt-cancel').click();
 };
 
-// Keyboard focus trap for modal accessibility
 function trapFocus(modal) {
 	const focusable = modal.querySelectorAll(
 		'button, input, textarea, select, [tabindex]:not([tabindex="-1"])'

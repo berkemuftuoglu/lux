@@ -1,7 +1,5 @@
-// Table Operations module
-// Handles: Insert Row modal, Find & Replace modal, DDL viewer, Table Stats, Truncate, Import CSV
+// table-ops.js — Insert row, find/replace, DDL viewer, table stats, truncate, CSV import
 
-// Insert Row (Modal)
 $('btn-add-row').onclick = () => {
 	if (!currentTable || !dbConnected) return;
 	const meta = getTableMeta(currentTable);
@@ -91,7 +89,6 @@ $('insert-fields').addEventListener('keydown', (e) => {
 	if (e.key === 'Enter') submitInsert();
 });
 
-// Find & Replace
 $('btn-find-replace').onclick = () => {
 	if (!currentTable || !dbConnected) return;
 	$('fnr-tbl').textContent = currentTable;
@@ -184,7 +181,6 @@ $('fnr-overlay').onclick = (e) => {
 	}
 };
 
-// DDL Viewer
 $('btn-ddl').onclick = async () => {
 	if (!currentTable) return;
 	$('ddl-title').textContent = `${currentTable} \u2014 DDL`;
@@ -213,7 +209,6 @@ $('ddl-overlay').onclick = (e) => {
 	}
 };
 
-// Table Stats
 $('btn-stats').onclick = async () => {
 	if (!currentTable) return;
 	try {
@@ -263,7 +258,6 @@ $('btn-stats').onclick = async () => {
 	}
 };
 
-// Truncate Table
 $('btn-truncate').onclick = async () => {
 	if (!currentTable || !dbConnected) return;
 	const ok = await confirm(
@@ -290,7 +284,6 @@ $('btn-truncate').onclick = async () => {
 	}
 };
 
-// Import CSV
 $('btn-import-csv').onclick = () => {
 	if (!currentTable || !dbConnected || readOnlyMode) {
 		if (readOnlyMode) toast('Read-only mode', 'error');
