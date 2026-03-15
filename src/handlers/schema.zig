@@ -550,21 +550,21 @@ pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, state: 
     };
     const enabled_str = utils.extractJsonField(body, "enabled") orelse {
         // Toggle if no explicit value
-        state.read_only = !state.read_only;
+        state.flags.read_only = !state.flags.read_only;
         var resp_buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.read_only) "true" else "false"}) catch return;
+        const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
         try utils.sendResponse(stream, "200 OK", "application/json", resp);
         return;
     };
-    state.read_only = std.mem.eql(u8, enabled_str, "true");
+    state.flags.read_only = std.mem.eql(u8, enabled_str, "true");
     var resp_buf: [64]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.read_only) "true" else "false"}) catch return;
+    const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
 pub fn handleReadOnlyGet(stream: std.net.Stream, state: *const ServerState) !void {
     var resp_buf: [64]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.read_only) "true" else "false"}) catch return;
+    const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 

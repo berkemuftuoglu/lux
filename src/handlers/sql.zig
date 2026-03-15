@@ -99,7 +99,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     }
 
     // Block write operations in read-only mode (whitelist approach)
-    if (state.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
+    if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
         try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to execute write operations.\"}");
         return;
     }
@@ -188,7 +188,7 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *Ser
     }
 
     // Block write operations in read-only mode
-    if (state.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
+    if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
         try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to preview write operations.\"}");
         return;
     }

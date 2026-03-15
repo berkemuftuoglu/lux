@@ -188,6 +188,7 @@ fn parseCsvContent(
                     pos += 1;
                 }
                 const val = allocator.dupe(u8, csv[start..pos]) catch return error.OutOfMemory;
+                errdefer allocator.free(val);
                 fields.append(allocator, val) catch return error.OutOfMemory;
             }
 
@@ -436,7 +437,7 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *Serv
 
     // Block write operations in read-only mode
     const sql_guard = @import("sql_guard");
-    if (state.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
+    if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
         try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to export write operations.\"}");
         return;
     }

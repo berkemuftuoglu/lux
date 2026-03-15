@@ -13,12 +13,124 @@ pub const PgError = error{
     InvalidData,
 };
 
+// ── libpq enum wrappers ───────────────────────────────────────────────
+
+/// Wraps the libpq connection status C constants.
+/// Unknown values from newer libpq versions map to .unknown (never unreachable).
+pub const ConnStatus = enum {
+    ok,
+    bad,
+    unknown,
+
+    pub fn fromCInt(value: c_uint) ConnStatus {
+        return switch (value) {
+            c.CONNECTION_OK => .ok,
+            c.CONNECTION_BAD => .bad,
+            else => .unknown,
+        };
+    }
+};
+
+/// Wraps the libpq query result status C constants.
+pub const ExecStatus = enum {
+    empty_query,
+    command_ok,
+    tuples_ok,
+    copy_out,
+    copy_in,
+    bad_response,
+    nonfatal_error,
+    fatal_error,
+    copy_both,
+    single_tuple,
+    pipeline_sync,
+    pipeline_aborted,
+    unknown,
+
+    pub fn fromCInt(value: c_uint) ExecStatus {
+        return switch (value) {
+            c.PGRES_EMPTY_QUERY => .empty_query,
+            c.PGRES_COMMAND_OK => .command_ok,
+            c.PGRES_TUPLES_OK => .tuples_ok,
+            c.PGRES_COPY_OUT => .copy_out,
+            c.PGRES_COPY_IN => .copy_in,
+            c.PGRES_BAD_RESPONSE => .bad_response,
+            c.PGRES_NONFATAL_ERROR => .nonfatal_error,
+            c.PGRES_FATAL_ERROR => .fatal_error,
+            c.PGRES_COPY_BOTH => .copy_both,
+            c.PGRES_SINGLE_TUPLE => .single_tuple,
+            else => .unknown,
+        };
+    }
+};
+
+/// Wraps the libpq transaction status C constants.
+pub const TransactionStatus = enum {
+    idle,
+    active,
+    in_trans,
+    in_error,
+    unknown,
+
+    pub fn fromCInt(value: c_uint) TransactionStatus {
+        return switch (value) {
+            c.PQTRANS_IDLE => .idle,
+            c.PQTRANS_ACTIVE => .active,
+            c.PQTRANS_INTRANS => .in_trans,
+            c.PQTRANS_INERROR => .in_error,
+            c.PQTRANS_UNKNOWN => .unknown,
+            else => .unknown,
+        };
+    }
+};
+
+/// Structured PostgreSQL error fields extracted via PQresultErrorField.
+/// All fields are optional — they may not be present for all error types.
+pub const PgErrorFields = struct {
+    severity: ?[]const u8,
+    code: ?[]const u8,
+    message: ?[]const u8,
+    detail: ?[]const u8,
+    hint: ?[]const u8,
+};
+
+/// Extract structured error fields from a PGresult before calling PQclear.
+/// Returns a PgErrorFields with slices pointing into libpq-managed memory.
+/// The returned slices are only valid until PQclear is called on `res`.
+fn extractErrorFields(res: *c.PGresult) PgErrorFields {
+    return .{
+        .severity = blk: {
+            const p = c.PQresultErrorField(res, c.PG_DIAG_SEVERITY);
+            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
+        },
+        .code = blk: {
+            const p = c.PQresultErrorField(res, c.PG_DIAG_SQLSTATE);
+            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
+        },
+        .message = blk: {
+            const p = c.PQresultErrorField(res, c.PG_DIAG_MESSAGE_PRIMARY);
+            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
+        },
+        .detail = blk: {
+            const p = c.PQresultErrorField(res, c.PG_DIAG_MESSAGE_DETAIL);
+            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
+        },
+        .hint = blk: {
+            const p = c.PQresultErrorField(res, c.PG_DIAG_MESSAGE_HINT);
+            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
+        },
+    };
+}
+
 pub const PgConnection = struct {
     conn: *c.PGconn,
+    /// Structured error fields from the last failed query.
+    /// Set by runQuery/runQueryMulti on failure; cleared on each new query.
+    last_error_fields: ?PgErrorFields = null,
 
     pub fn connect(conninfo: [*:0]const u8) PgError!PgConnection {
         const conn = c.PQconnectdb(conninfo) orelse return error.ConnectionFailed;
-        if (c.PQstatus(conn) != c.CONNECTION_OK) {
+        if (ConnStatus.fromCInt(c.PQstatus(conn)) != .ok) {
             c.PQfinish(conn);
             return error.ConnectionFailed;
         }
@@ -33,22 +145,20 @@ pub const PgConnection = struct {
     }
 
     pub fn isOk(self: *const PgConnection) bool {
-        return c.PQstatus(self.conn) == c.CONNECTION_OK;
+        return ConnStatus.fromCInt(c.PQstatus(self.conn)) == .ok;
     }
 
     /// Check connection and transaction state. Returns true only if the
     /// connection is up and idle (not in a failed transaction).
     pub fn isHealthy(self: *const PgConnection) bool {
-        if (c.PQstatus(self.conn) != c.CONNECTION_OK) return false;
-        const txn = c.PQtransactionStatus(self.conn);
-        return txn == c.PQTRANS_IDLE;
+        if (ConnStatus.fromCInt(c.PQstatus(self.conn)) != .ok) return false;
+        return TransactionStatus.fromCInt(c.PQtransactionStatus(self.conn)) == .idle;
     }
 
     /// If the connection is stuck in a failed transaction, issue ROLLBACK
     /// to return it to an idle state so subsequent queries can proceed.
     pub fn resetIfNeeded(self: *PgConnection) void {
-        const txn = c.PQtransactionStatus(self.conn);
-        if (txn == c.PQTRANS_INERROR) {
+        if (TransactionStatus.fromCInt(c.PQtransactionStatus(self.conn)) == .in_error) {
             log.info("connection in failed transaction state, sending ROLLBACK", .{});
             const res = c.PQexec(self.conn, "ROLLBACK");
             if (res) |r| c.PQclear(r);
@@ -60,7 +170,13 @@ pub const PgConnection = struct {
         self.* = undefined;
     }
 
+    /// Return a human-readable error message.
+    /// Prefers the structured message field from last_error_fields if available,
+    /// falls back to PQerrorMessage from the connection.
     pub fn errorMessage(self: *const PgConnection) []const u8 {
+        if (self.last_error_fields) |ef| {
+            if (ef.message) |msg| return msg;
+        }
         const msg = c.PQerrorMessage(self.conn);
         if (msg == null) return "";
         return std.mem.sliceTo(msg, 0);
@@ -69,6 +185,7 @@ pub const PgConnection = struct {
     /// Run a SQL statement and return the result set.
     /// Uses PQexecParams with no parameters for safety (single statement only).
     pub fn runQuery(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
+        self.last_error_fields = null;
         const res = c.PQexecParams(
             self.conn,
             sql,
@@ -79,15 +196,27 @@ pub const PgConnection = struct {
             null,
             0,
         ) orelse return error.QueryFailed;
-        return extractResult(allocator, res);
+        return self.extractResultCapturingErrors(allocator, res);
     }
 
     /// Run one or more SQL statements via PQexec (supports multi-statement scripts).
     /// Returns the result of the last statement. Use for the SQL editor endpoint
     /// where users type arbitrary SQL including multi-statement scripts.
     pub fn runQueryMulti(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
+        self.last_error_fields = null;
         const res = c.PQexec(self.conn, sql) orelse return error.QueryFailed;
-        return extractResult(allocator, res);
+        return self.extractResultCapturingErrors(allocator, res);
+    }
+
+    /// Like extractResult but captures structured error fields into self.last_error_fields.
+    fn extractResultCapturingErrors(self: *PgConnection, backing: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
+        const status = ExecStatus.fromCInt(c.PQresultStatus(res));
+        if (status != .tuples_ok and status != .command_ok) {
+            self.last_error_fields = extractErrorFields(res);
+            c.PQclear(res);
+            return error.QueryFailed;
+        }
+        return extractResult(backing, res);
     }
 
     pub fn fetchSchema(self: *PgConnection, backing: std.mem.Allocator) PgError!SchemaInfo {
@@ -99,7 +228,7 @@ pub const PgConnection = struct {
 
         const res = c.PQexecParams(self.conn, sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
         defer c.PQclear(res);
-        if (c.PQresultStatus(res) != c.PGRES_TUPLES_OK) return error.QueryFailed;
+        if (ExecStatus.fromCInt(c.PQresultStatus(res)) != .tuples_ok) return error.QueryFailed;
 
         var arena = std.heap.ArenaAllocator.init(backing);
         errdefer arena.deinit();
@@ -157,7 +286,7 @@ pub const PgConnection = struct {
 
         const col_res = c.PQexecParams(self.conn, col_sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
         defer c.PQclear(col_res);
-        if (c.PQresultStatus(col_res) != c.PGRES_TUPLES_OK) return error.QueryFailed;
+        if (ExecStatus.fromCInt(c.PQresultStatus(col_res)) != .tuples_ok) return error.QueryFailed;
 
         const fk_sql =
             "SELECT kcu.table_name, kcu.column_name, ccu.table_name AS target_table, ccu.column_name AS target_column " ++
@@ -168,7 +297,7 @@ pub const PgConnection = struct {
 
         const fk_res = c.PQexecParams(self.conn, fk_sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
         defer c.PQclear(fk_res);
-        if (c.PQresultStatus(fk_res) != c.PGRES_TUPLES_OK) return error.QueryFailed;
+        if (ExecStatus.fromCInt(c.PQresultStatus(fk_res)) != .tuples_ok) return error.QueryFailed;
 
         const enum_sql =
             "SELECT c.relname, a.attname, e.enumlabel " ++
@@ -200,7 +329,7 @@ pub const PgConnection = struct {
             };
         }
 
-        const fk_n: usize = if (c.PQresultStatus(fk_res) == c.PGRES_TUPLES_OK)
+        const fk_n: usize = if (ExecStatus.fromCInt(c.PQresultStatus(fk_res)) == .tuples_ok)
             @intCast(c.PQntuples(fk_res))
         else
             0;
@@ -214,7 +343,7 @@ pub const PgConnection = struct {
             };
         }
 
-        const enum_n: usize = if (c.PQresultStatus(enum_res) == c.PGRES_TUPLES_OK)
+        const enum_n: usize = if (ExecStatus.fromCInt(c.PQresultStatus(enum_res)) == .tuples_ok)
             @intCast(c.PQntuples(enum_res))
         else
             0;
@@ -232,8 +361,8 @@ pub const PgConnection = struct {
 };
 
 fn extractResult(backing: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
-    const status = c.PQresultStatus(res);
-    if (status != c.PGRES_TUPLES_OK and status != c.PGRES_COMMAND_OK) {
+    const status = ExecStatus.fromCInt(c.PQresultStatus(res));
+    if (status != .tuples_ok and status != .command_ok) {
         c.PQclear(res);
         return error.QueryFailed;
     }
@@ -623,6 +752,61 @@ test "buildEnhancedSchemaFromRows: multiple tables with FK and enum" {
     const users = result.tables[1];
     try std.testing.expectEqualStrings("users", users.name);
     try std.testing.expectEqual(@as(usize, 2), users.columns.len);
+}
+
+test "ConnStatus: fromCInt maps CONNECTION_OK to .ok" {
+    try std.testing.expectEqual(ConnStatus.ok, ConnStatus.fromCInt(c.CONNECTION_OK));
+}
+
+test "ConnStatus: fromCInt maps CONNECTION_BAD to .bad" {
+    try std.testing.expectEqual(ConnStatus.bad, ConnStatus.fromCInt(c.CONNECTION_BAD));
+}
+
+test "ConnStatus: fromCInt unknown value maps to .unknown" {
+    try std.testing.expectEqual(ConnStatus.unknown, ConnStatus.fromCInt(9999));
+}
+
+test "ExecStatus: fromCInt maps PGRES_TUPLES_OK to .tuples_ok" {
+    try std.testing.expectEqual(ExecStatus.tuples_ok, ExecStatus.fromCInt(c.PGRES_TUPLES_OK));
+}
+
+test "ExecStatus: fromCInt maps PGRES_COMMAND_OK to .command_ok" {
+    try std.testing.expectEqual(ExecStatus.command_ok, ExecStatus.fromCInt(c.PGRES_COMMAND_OK));
+}
+
+test "ExecStatus: fromCInt maps PGRES_FATAL_ERROR to .fatal_error" {
+    try std.testing.expectEqual(ExecStatus.fatal_error, ExecStatus.fromCInt(c.PGRES_FATAL_ERROR));
+}
+
+test "ExecStatus: fromCInt unknown value maps to .unknown" {
+    try std.testing.expectEqual(ExecStatus.unknown, ExecStatus.fromCInt(9999));
+}
+
+test "TransactionStatus: fromCInt maps PQTRANS_IDLE to .idle" {
+    try std.testing.expectEqual(TransactionStatus.idle, TransactionStatus.fromCInt(c.PQTRANS_IDLE));
+}
+
+test "TransactionStatus: fromCInt maps PQTRANS_INERROR to .in_error" {
+    try std.testing.expectEqual(TransactionStatus.in_error, TransactionStatus.fromCInt(c.PQTRANS_INERROR));
+}
+
+test "TransactionStatus: fromCInt unknown value maps to .unknown" {
+    try std.testing.expectEqual(TransactionStatus.unknown, TransactionStatus.fromCInt(9999));
+}
+
+test "PgErrorFields: has required optional fields" {
+    const fields = PgErrorFields{
+        .severity = "ERROR",
+        .code = "42P01",
+        .message = "relation does not exist",
+        .detail = null,
+        .hint = null,
+    };
+    try std.testing.expectEqualStrings("ERROR", fields.severity.?);
+    try std.testing.expectEqualStrings("42P01", fields.code.?);
+    try std.testing.expectEqualStrings("relation does not exist", fields.message.?);
+    try std.testing.expect(fields.detail == null);
+    try std.testing.expect(fields.hint == null);
 }
 
 comptime {

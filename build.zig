@@ -117,6 +117,7 @@ pub fn build(b: *std.Build) void {
     addTestMod(b, test_step, mod_export, target, optimize);
     addTestMod(b, test_step, mod_sql, target, optimize);
 
+
     // --- Check step (ZLS build-on-save, compile without linking) ---
     const check_exe = b.addExecutable(.{
         .name = "lux",

@@ -59,6 +59,7 @@ pub fn main() !void {
     const allocator = da.allocator();
 
     var state = web.ServerState.init(allocator);
+    defer state.deinit();
 
     // Auto-connect to Postgres if --pg provided
     if (pg_conninfo) |conninfo| {

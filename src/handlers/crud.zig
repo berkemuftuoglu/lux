@@ -43,7 +43,7 @@ pub fn findColumnInTable(table: postgres.TableInfo, col_name: []const u8) bool {
 pub const readRequestBody = utils.readRequestBody;
 
 pub fn enforceReadOnly(stream: std.net.Stream, state: *const ServerState) !bool {
-    if (state.read_only) {
+    if (state.flags.read_only) {
         try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to make changes.\"}");
         return true;
     }
@@ -1476,7 +1476,7 @@ test "addJournalEntry: delete operation stores table and pk" {
 test "enforceReadOnly: allows when not read-only" {
     const state = ServerState.init(std.testing.allocator);
     // Can't test with a real stream, but verify the logic
-    try std.testing.expect(!state.read_only);
+    try std.testing.expect(!state.flags.read_only);
 }
 
 test "extractJsonObject: extracts key-value pairs" {
