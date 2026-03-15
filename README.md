@@ -195,28 +195,24 @@ See [SECURITY.md](SECURITY.md) for the full security policy.
 
 ### Limitations
 
-Lux is a **local development tool**. It is not designed for production database
-administration. If you need production-grade tooling, use pgAdmin, DBeaver, or
-dedicated DB management software.
+> [!WARNING]
+> Lux is a **local development tool**. It is not designed for production
+> database administration. If you need production-grade tooling, use pgAdmin,
+> DBeaver, or dedicated DB management software.
 
-**Single-threaded server.** Lux handles one request at a time. A slow query
-blocks all other requests (CSS, schema refreshes, etc.) until it completes.
-This is fine when you're the only user on localhost — not fine for shared or
-production use.
-
-**In-memory change journal.** The undo history lives in server memory only. If
-the process crashes or you restart Lux, the journal is gone. It's a session
-safety net, not an audit log.
-
-**Read-only mode is a convenience guard.** It catches accidental writes
-(DELETE without WHERE, etc.) via string-level SQL analysis. It is not a security
-boundary — use PostgreSQL roles (`GRANT SELECT`) for real enforcement.
-
-**Tables without primary keys use `ctid`.** For tables missing a primary key,
-Lux identifies rows by PostgreSQL's internal `ctid` (physical row address).
-If `VACUUM` reorganizes the table between loading and editing, the `ctid` may
-point to a different row. This is extremely unlikely in practice, but the fix
-is simple: add a primary key to your tables.
+> [!NOTE]
+> **Single-threaded server.** A slow query blocks all other requests until it
+> completes. Fine on localhost — not fine for shared use.
+>
+> **In-memory change journal.** Undo history resets when the server restarts.
+> It's a session safety net, not an audit log.
+>
+> **Read-only mode is a convenience guard.** String-level SQL analysis catches
+> accidental writes. Not a security boundary — use PostgreSQL roles for real
+> enforcement.
+>
+> **Tables without primary keys use `ctid`.** If `VACUUM` runs between loading
+> and editing, the physical row address may shift. Fix: add a primary key.
 
 ## Configuration
 
