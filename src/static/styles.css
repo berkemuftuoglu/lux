@@ -378,6 +378,16 @@ body {
 	background: var(--error);
 }
 
+.dot.pulse {
+	animation: dotPulse 0.5s ease-out;
+}
+
+@keyframes dotPulse {
+	0%   { transform: scale(1); box-shadow: 0 0 0 0 currentColor; }
+	50%  { transform: scale(1.4); box-shadow: 0 0 0 4px transparent; }
+	100% { transform: scale(1); box-shadow: 0 0 0 0 transparent; }
+}
+
 .sidebar-section {
 	padding: 10px 12px 6px;
 	font-size: 10px;
@@ -513,12 +523,23 @@ body {
 }
 
 .tree-columns {
-	display: none;
-	padding: 1px 0;
+	max-height: 0;
+	overflow: hidden;
+	transition: max-height 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+	padding: 0 0 0 0;
 }
 
 .tree-columns.open {
-	display: block;
+	max-height: 500px;
+	padding-bottom: 4px;
+}
+
+/* Suppress animation when search hides items */
+.tree-columns.search-hidden {
+	max-height: 0;
+	padding-bottom: 0;
+	transition: none;
+	overflow: hidden;
 }
 
 .tree-col {
@@ -668,8 +689,21 @@ body {
 	overflow: hidden;
 }
 
+@keyframes tabFadeIn {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
 .tab-panel.active {
 	display: flex;
+	animation: tabFadeIn 0.15s ease-out;
 }
 
 /* Toolbar */
@@ -731,6 +765,12 @@ body {
 .toolbar-btn:hover {
 	color: var(--text-primary);
 	background: var(--bg-hover);
+}
+
+.btn:active,
+.toolbar-btn:active {
+	transform: scale(0.97);
+	transition: transform 0.05s ease-in;
 }
 
 .toolbar-btn.primary {
@@ -826,7 +866,7 @@ body {
 
 .grid tbody tr {
 	border-bottom: 1px solid var(--border-subtle);
-	transition: background 0.08s;
+	transition: background 0.1s ease-out;
 	position: relative;
 }
 
@@ -856,6 +896,7 @@ body {
 	color: var(--text-primary);
 	cursor: default;
 	line-height: 34px;
+	transition: background 0.08s, box-shadow 0.1s ease-out;
 }
 
 .grid tbody td.editable {
@@ -1239,6 +1280,37 @@ body {
 	100% {
 		background: transparent;
 	}
+}
+
+@keyframes shimmer {
+	0%   { background-position: -200% 0; }
+	100% { background-position: 200% 0; }
+}
+
+.skeleton-row td {
+	background: linear-gradient(
+		90deg,
+		var(--bg-surface) 25%,
+		var(--bg-hover) 50%,
+		var(--bg-surface) 75%
+	);
+	background-size: 200% 100%;
+	animation: shimmer 1.2s ease-in-out infinite;
+	color: transparent !important;
+	border-radius: 3px;
+	user-select: none;
+	height: 32px;
+}
+
+@keyframes fadeIn {
+	from { opacity: 0; }
+	to   { opacity: 1; }
+}
+
+.sidebar-empty,
+#sidebar-empty,
+#er-empty {
+	animation: fadeIn 0.2s ease-out;
 }
 
 /* FK Autocomplete */
@@ -1764,6 +1836,26 @@ body {
 		opacity: 1;
 		transform: translateY(0) scale(1);
 	}
+}
+
+@keyframes modalOut {
+	from {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+
+	to {
+		opacity: 0;
+		transform: translateY(4px) scale(0.98);
+	}
+}
+
+.modal-overlay.closing .modal {
+	animation: modalOut 0.12s ease-in forwards;
+}
+
+.modal-overlay.closing {
+	pointer-events: none;
 }
 
 .modal-title {
@@ -2969,5 +3061,39 @@ select:focus-visible {
 		animation-iteration-count: 1;
 		transition-duration: 0.01ms;
 		scroll-behavior: auto;
+	}
+
+	.modal-overlay.closing .modal {
+		animation: none;
+	}
+
+	.tab-panel.active {
+		animation: none;
+	}
+
+	.tree-columns {
+		transition: none;
+	}
+
+	.grid tbody td {
+		transition: none;
+	}
+
+	.grid tbody tr {
+		transition: none;
+	}
+
+	.dot.pulse {
+		animation: none;
+	}
+
+	.skeleton-row td {
+		animation: none;
+	}
+
+	.sidebar-empty,
+	#sidebar-empty,
+	#er-empty {
+		animation: none;
 	}
 }

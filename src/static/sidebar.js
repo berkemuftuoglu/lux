@@ -63,7 +63,7 @@ function renderSidebar() {
 		// Hide if doesn't match search
 		if (searchTerm && !table.name.toLowerCase().includes(searchTerm)) {
 			item.style.display = 'none';
-			cols.style.display = 'none';
+			cols.classList.add('search-hidden');
 		}
 
 		item.addEventListener('click', (e) => {
@@ -94,9 +94,9 @@ $('table-search').addEventListener('input', () => {
 			const name = (el.dataset.table || '').toLowerCase();
 			const match = !term || name.includes(term);
 			el.style.display = match ? '' : 'none';
-			// Also hide the columns div right after
+			// Also hide the columns div right after using class (no animation for search)
 			if (el.nextElementSibling?.classList.contains('tree-columns')) {
-				el.nextElementSibling.style.display = match ? '' : 'none';
+				el.nextElementSibling.classList.toggle('search-hidden', !match);
 			}
 		});
 });
