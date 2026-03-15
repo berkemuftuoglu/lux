@@ -38,7 +38,7 @@ pub fn addHistoryEntry(
     }
 }
 
-pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -164,7 +164,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, state: *ServerStat
     try crud.sendQueryResultJson(allocator, stream, &result);
 }
 
-pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -336,7 +336,7 @@ pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
     try writer.writeAll("-- No automatic rollback available for this operation.");
 }
 
-pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -377,7 +377,7 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, state: *
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleHistory(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleHistory(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const alloc = arena;
 
     var json = std.ArrayList(u8){};
@@ -425,7 +425,7 @@ pub fn handleHistory(stream: std.net.Stream, state: *ServerState, arena: std.mem
     try utils.sendResponse(stream, "200 OK", "application/json", json.items);
 }
 
-pub fn handleJournal(stream: std.net.Stream, state: *const ServerState, arena: std.mem.Allocator) !void {
+pub fn handleJournal(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(arena);
 
@@ -454,7 +454,7 @@ pub fn handleJournal(stream: std.net.Stream, state: *const ServerState, arena: s
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");

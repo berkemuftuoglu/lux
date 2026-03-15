@@ -2968,6 +2968,15 @@ body {
 	color: var(--text-secondary);
 }
 
+.welcome-philosophy {
+	font-size: 11px;
+	color: var(--text-muted);
+	text-align: center;
+	margin-top: 16px;
+	font-style: italic;
+	letter-spacing: 0.3px;
+}
+
 /* ==========================================================================
    30. ACCESSIBILITY & FOCUS INDICATORS
    ========================================================================== */

@@ -160,16 +160,25 @@ Any valid PostgreSQL connection string works — local, remote, or cloud
 
 ```
 src/
-├── main.zig         CLI entry point, arg parsing
-├── web.zig          HTTP server, REST API, 329 tests
-├── postgres.zig     libpq connector, schema discovery
+├── server/
+│   ├── main.zig       CLI entry point, arg parsing
+│   └── postgres.zig   libpq connector, schema discovery
+├── handlers/
+│   ├── crud.zig       Insert, update, delete, bulk ops
+│   ├── schema.zig     Connect, refresh, connections
+│   ├── export.zig     CSV/JSON export, DDL, stats
+│   └── sql.zig        SQL execution, history, undo
+├── lib/
+│   ├── utils.zig      HTTP helpers, escaping, CSRF
+│   └── sql_guard.zig  SQL safety analysis (read-only mode)
+├── web.zig            HTTP server, routing, state
 └── static/
-    ├── index.html   UI shell, modals, semantic HTML
-    ├── app.js       Client logic, all interactions
-    └── styles.css   Dark + light themes, responsive
+    ├── index.html     UI shell, semantic HTML
+    ├── css/styles.css Dark + light themes, responsive
+    └── js/            Modular JS (state, grid, crud, sql, ...)
 ```
 
-6 files, ~13K lines. Everything is embedded into the binary via `@embedFile` —
+Everything is embedded into the binary via `@embedFile` —
 no external assets at runtime. The HTTP server is hand-written in Zig with zero
 library dependencies.
 
@@ -183,6 +192,31 @@ library dependencies.
 - Saved connections stored with `0600` permissions
 
 See [SECURITY.md](SECURITY.md) for the full security policy.
+
+### Limitations
+
+Lux is a **local development tool**. It is not designed for production database
+administration. If you need production-grade tooling, use pgAdmin, DBeaver, or
+dedicated DB management software.
+
+**Single-threaded server.** Lux handles one request at a time. A slow query
+blocks all other requests (CSS, schema refreshes, etc.) until it completes.
+This is fine when you're the only user on localhost — not fine for shared or
+production use.
+
+**In-memory change journal.** The undo history lives in server memory only. If
+the process crashes or you restart Lux, the journal is gone. It's a session
+safety net, not an audit log.
+
+**Read-only mode is a convenience guard.** It catches accidental writes
+(DELETE without WHERE, etc.) via string-level SQL analysis. It is not a security
+boundary — use PostgreSQL roles (`GRANT SELECT`) for real enforcement.
+
+**Tables without primary keys use `ctid`.** For tables missing a primary key,
+Lux identifies rows by PostgreSQL's internal `ctid` (physical row address).
+If `VACUUM` reorganizes the table between loading and editing, the `ctid` may
+point to a different row. This is extremely unlikely in practice, but the fix
+is simple: add a primary key to your tables.
 
 ## Configuration
 

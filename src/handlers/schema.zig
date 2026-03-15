@@ -186,9 +186,10 @@ fn findMaxConnectionId(file_content: []const u8) u64 {
 pub fn handleConnect(
     stream: std.net.Stream,
     request: []const u8,
+    _: []const u8,
     state: *ServerState,
     arena: std.mem.Allocator,
-) !void {
+) anyerror!void {
     const allocator = state.allocator;
 
     // Find Content-Length header
@@ -307,7 +308,7 @@ pub fn handleConnect(
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleSchema(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -429,7 +430,7 @@ pub fn handleSchema(stream: std.net.Stream, state: *ServerState, arena: std.mem.
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleReconnect(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const allocator = state.allocator;
 
     const last_ci = state.last_conninfo orelse {
@@ -505,7 +506,7 @@ pub fn handleReconnect(stream: std.net.Stream, state: *ServerState, arena: std.m
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
         return;
@@ -540,7 +541,7 @@ pub fn handleHealthCheck(stream: std.net.Stream, state: *ServerState, arena: std
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, state: *ServerState) !void {
+pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) anyerror!void {
     var extra_buf: [1024]u8 = undefined;
     const body = utils.readRequestBody(stream, request, &extra_buf, 1024) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
@@ -560,13 +561,13 @@ pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, state: 
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleReadOnlyGet(stream: std.net.Stream, state: *const ServerState) !void {
+pub fn handleReadOnlyGet(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) anyerror!void {
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleGetConnections(stream: std.net.Stream, _: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8, _: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const data = readConnectionsFile(arena) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connections\":[]}");
         return;
@@ -574,7 +575,7 @@ pub fn handleGetConnections(stream: std.net.Stream, _: *ServerState, arena: std.
     try utils.sendResponse(stream, "200 OK", "application/json", data);
 }
 
-pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const allocator = arena;
 
     // Parse body
@@ -708,7 +709,7 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, state: 
     try utils.sendResponse(stream, "200 OK", "application/json", id_resp);
 }
 
-pub fn handleDeleteConnection(stream: std.net.Stream, path: []const u8, _: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []const u8, _: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const allocator = arena;
 
     // Parse ID from path: /api/connections/<id>

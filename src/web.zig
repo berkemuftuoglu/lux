@@ -82,8 +82,8 @@ pub const HandlerError = error{
     ConnectionResetByPeer,
 } || postgres.PgError;
 
-/// Unified handler signature: fn(stream, request, path, state, arena) !void
-/// Thin wrappers normalize the 4 actual handler shapes to this one.
+/// Unified handler signature: fn(stream, request, path, state, arena) anyerror!void
+/// All handlers conform to this signature directly — no wrappers needed.
 const HandlerFn = *const fn (std.net.Stream, []const u8, []const u8, *ServerState, std.mem.Allocator) anyerror!void;
 
 /// Map named errors to HTTP responses.
@@ -116,98 +116,6 @@ const Route = struct {
     handler: HandlerFn,
 };
 
-// --- Wrapper functions ---
-// Thin wrappers normalize the 4 actual handler shapes to the unified HandlerFn signature.
-
-// Shape 1: GET exact (stream, state, arena)
-fn wrapSchemaGet(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleSchema(stream, state, arena);
-}
-fn wrapReadOnlyGet(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleReadOnlyGet(stream, state);
-}
-fn wrapGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleGetConnections(stream, state, arena);
-}
-fn wrapHistory(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try sql_mod.handleHistory(stream, state, arena);
-}
-fn wrapJournal(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try sql_mod.handleJournal(stream, state, arena);
-}
-fn wrapHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleHealthCheck(stream, state, arena);
-}
-
-// Shape 2: GET with path prefix (stream, path, state, arena)
-fn wrapTableData(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try crud.handleTableData(stream, path, state, arena);
-}
-fn wrapExport(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try export_mod.handleExport(stream, path, state, arena);
-}
-fn wrapTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try export_mod.handleTableDdl(stream, path, state, arena);
-}
-fn wrapTableStats(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try export_mod.handleTableStats(stream, path, state, arena);
-}
-fn wrapFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try crud.handleFkLookup(stream, path, state, arena);
-}
-fn wrapDeleteConnection(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleDeleteConnection(stream, path, state, arena);
-}
-
-// Shape 3: POST/DELETE exact (stream, request, state, arena)
-fn wrapConnect(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleConnect(stream, request, state, arena);
-}
-fn wrapSql(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try sql_mod.handleSql(stream, request, state, arena);
-}
-fn wrapReadOnlyToggle(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleReadOnlyToggle(stream, request, state);
-}
-fn wrapPostConnection(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try schema_mod.handlePostConnection(stream, request, state, arena);
-}
-fn wrapJournalUndo(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try sql_mod.handleJournalUndo(stream, request, state, arena);
-}
-fn wrapSchemaPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try sql_mod.handleSchemaPreview(stream, request, state, arena);
-}
-fn wrapSqlPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try sql_mod.handleSqlPreview(stream, request, state, arena);
-}
-fn wrapSqlExport(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try export_mod.handleSqlExport(stream, request, state, arena);
-}
-fn wrapUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try crud.handleUpdate(stream, request, state, arena);
-}
-fn wrapDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try crud.handleDeleteRow(stream, request, state, arena);
-}
-fn wrapInsertRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try crud.handleInsertRow(stream, request, state, arena);
-}
-fn wrapReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try schema_mod.handleReconnect(stream, state, arena);
-}
-
-// Shape 4: POST with path (stream, request, path, state, arena) or (stream, path, state, arena)
-fn wrapBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try crud.handleBulkUpdate(stream, request, path, state, arena);
-}
-fn wrapCsvImport(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try export_mod.handleCsvImport(stream, request, path, state, arena);
-}
-fn wrapTruncateTable(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
-    try crud.handleTruncateTable(stream, path, state, arena);
-}
-
 /// Dispatch for /api/tables/* prefix routes, discriminating by suffix.
 /// Order matters: more-specific suffixes checked before bare table data.
 fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
@@ -218,19 +126,19 @@ fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []con
         return export_mod.handleCsvImport(stream, request, path, state, arena);
     }
     if (std.mem.eql(u8, method, "POST") and std.mem.endsWith(u8, path, "/truncate")) {
-        return crud.handleTruncateTable(stream, path, state, arena);
+        return crud.handleTruncateTable(stream, request, path, state, arena);
     }
     if (std.mem.eql(u8, method, "GET") and std.mem.indexOf(u8, path, "/fk-lookup") != null) {
-        return crud.handleFkLookup(stream, path, state, arena);
+        return crud.handleFkLookup(stream, request, path, state, arena);
     }
     if (std.mem.eql(u8, method, "GET") and std.mem.endsWith(u8, path, "/ddl")) {
-        return export_mod.handleTableDdl(stream, path, state, arena);
+        return export_mod.handleTableDdl(stream, request, path, state, arena);
     }
     if (std.mem.eql(u8, method, "GET") and std.mem.endsWith(u8, path, "/stats")) {
-        return export_mod.handleTableStats(stream, path, state, arena);
+        return export_mod.handleTableStats(stream, request, path, state, arena);
     }
     if (std.mem.eql(u8, method, "GET")) {
-        return crud.handleTableData(stream, path, state, arena);
+        return crud.handleTableData(stream, request, path, state, arena);
     }
     try utils.sendResponse(stream, "404 Not Found", "text/plain", "Not Found");
 }
@@ -240,29 +148,29 @@ fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []con
 /// The /api/tables/ prefix uses dispatchTableRoute for suffix discrimination.
 const routes = [_]Route{
     // GET exact routes
-    .{ .method = .GET, .path = "/api/schema", .match = .exact, .handler = wrapSchemaGet },
-    .{ .method = .GET, .path = "/api/settings/read-only", .match = .exact, .handler = wrapReadOnlyGet },
-    .{ .method = .GET, .path = "/api/connections", .match = .exact, .handler = wrapGetConnections },
-    .{ .method = .GET, .path = "/api/history", .match = .exact, .handler = wrapHistory },
-    .{ .method = .GET, .path = "/api/journal", .match = .exact, .handler = wrapJournal },
-    .{ .method = .GET, .path = "/api/health", .match = .exact, .handler = wrapHealthCheck },
+    .{ .method = .GET, .path = "/api/schema", .match = .exact, .handler = schema_mod.handleSchema },
+    .{ .method = .GET, .path = "/api/settings/read-only", .match = .exact, .handler = schema_mod.handleReadOnlyGet },
+    .{ .method = .GET, .path = "/api/connections", .match = .exact, .handler = schema_mod.handleGetConnections },
+    .{ .method = .GET, .path = "/api/history", .match = .exact, .handler = sql_mod.handleHistory },
+    .{ .method = .GET, .path = "/api/journal", .match = .exact, .handler = sql_mod.handleJournal },
+    .{ .method = .GET, .path = "/api/health", .match = .exact, .handler = schema_mod.handleHealthCheck },
     // POST/DELETE exact routes
-    .{ .method = .POST, .path = "/api/connect", .match = .exact, .handler = wrapConnect },
-    .{ .method = .POST, .path = "/api/sql", .match = .exact, .handler = wrapSql },
-    .{ .method = .POST, .path = "/api/settings/read-only", .match = .exact, .handler = wrapReadOnlyToggle },
-    .{ .method = .POST, .path = "/api/connections", .match = .exact, .handler = wrapPostConnection },
-    .{ .method = .POST, .path = "/api/journal/undo", .match = .exact, .handler = wrapJournalUndo },
-    .{ .method = .POST, .path = "/api/sql/schema-preview", .match = .exact, .handler = wrapSchemaPreview },
-    .{ .method = .POST, .path = "/api/sql/preview", .match = .exact, .handler = wrapSqlPreview },
-    .{ .method = .POST, .path = "/api/sql/export", .match = .exact, .handler = wrapSqlExport },
-    .{ .method = .POST, .path = "/api/update", .match = .exact, .handler = wrapUpdate },
-    .{ .method = .POST, .path = "/api/delete-row", .match = .exact, .handler = wrapDeleteRow },
-    .{ .method = .POST, .path = "/api/insert-row", .match = .exact, .handler = wrapInsertRow },
-    .{ .method = .POST, .path = "/api/reconnect", .match = .exact, .handler = wrapReconnect },
+    .{ .method = .POST, .path = "/api/connect", .match = .exact, .handler = schema_mod.handleConnect },
+    .{ .method = .POST, .path = "/api/sql", .match = .exact, .handler = sql_mod.handleSql },
+    .{ .method = .POST, .path = "/api/settings/read-only", .match = .exact, .handler = schema_mod.handleReadOnlyToggle },
+    .{ .method = .POST, .path = "/api/connections", .match = .exact, .handler = schema_mod.handlePostConnection },
+    .{ .method = .POST, .path = "/api/journal/undo", .match = .exact, .handler = sql_mod.handleJournalUndo },
+    .{ .method = .POST, .path = "/api/sql/schema-preview", .match = .exact, .handler = sql_mod.handleSchemaPreview },
+    .{ .method = .POST, .path = "/api/sql/preview", .match = .exact, .handler = sql_mod.handleSqlPreview },
+    .{ .method = .POST, .path = "/api/sql/export", .match = .exact, .handler = export_mod.handleSqlExport },
+    .{ .method = .POST, .path = "/api/update", .match = .exact, .handler = crud.handleUpdate },
+    .{ .method = .POST, .path = "/api/delete-row", .match = .exact, .handler = crud.handleDeleteRow },
+    .{ .method = .POST, .path = "/api/insert-row", .match = .exact, .handler = crud.handleInsertRow },
+    .{ .method = .POST, .path = "/api/reconnect", .match = .exact, .handler = schema_mod.handleReconnect },
     // GET prefix routes
-    .{ .method = .GET, .path = "/api/export/", .match = .prefix, .handler = wrapExport },
+    .{ .method = .GET, .path = "/api/export/", .match = .prefix, .handler = export_mod.handleExport },
     // DELETE prefix routes
-    .{ .method = .DELETE, .path = "/api/connections/", .match = .prefix, .handler = wrapDeleteConnection },
+    .{ .method = .DELETE, .path = "/api/connections/", .match = .prefix, .handler = schema_mod.handleDeleteConnection },
 };
 
 pub const ChangeEntry = struct {
@@ -459,7 +367,10 @@ fn handleConnection(
     var buf: [max_request_size]u8 = undefined;
     var total_read: usize = 0;
 
-    // Read request headers (look for \r\n\r\n)
+    // Buffered header read: loops until \r\n\r\n is found or buffer fills.
+    // Handles headers split across multiple TCP segments (common with slow
+    // clients, proxies, or TLS record boundaries). Each read() appends to
+    // the buffer and rechecks for the header terminator.
     while (total_read < buf.len) {
         const n = stream.read(buf[total_read..]) catch return;
         if (n == 0) return; // Connection closed
@@ -506,7 +417,6 @@ fn handleConnection(
     // Serve index.html (needs special CSP header)
     if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/")) {
         const r = readStaticFile(request_alloc, "src/static/index.html", index_html);
-        // No defer free needed — arena.deinit() at the top handles it
         try utils.sendHtmlResponseWithCsp(stream, r.data);
         return;
     }
@@ -521,7 +431,6 @@ fn handleConnection(
     inline for (static_files) |entry| {
         if (std.mem.eql(u8, path, entry[0])) {
             const r = readStaticFile(request_alloc, entry[2], entry[3]);
-            // No defer free needed — arena.deinit() at the top handles it
             try utils.sendResponse(stream, "200 OK", entry[1], r.data);
             return;
         }

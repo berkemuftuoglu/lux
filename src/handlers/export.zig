@@ -270,7 +270,7 @@ fn buildAndExecuteInsert(
     return true;
 }
 
-pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -383,7 +383,7 @@ pub fn handleExport(stream: std.net.Stream, path: []const u8, state: *ServerStat
     }
 }
 
-pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -488,7 +488,7 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, state: *Serv
     }
 }
 
-pub fn handleTableDdl(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -608,7 +608,7 @@ pub fn handleCsvImport(
     path: []const u8,
     state: *ServerState,
     arena: std.mem.Allocator,
-) !void {
+) anyerror!void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -681,7 +681,6 @@ pub fn handleCsvImport(
         try utils.sendResponse(stream, "400 Bad Request", "application/json", msg);
         return;
     };
-    // No defer needed — arena handles cleanup
 
     // Determine column names for INSERT
     var col_names = std.ArrayList([]const u8){};
@@ -807,10 +806,11 @@ pub fn handleCsvImport(
 
 pub fn handleTableStats(
     stream: std.net.Stream,
+    _: []const u8,
     path: []const u8,
     state: *ServerState,
     arena: std.mem.Allocator,
-) !void {
+) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;

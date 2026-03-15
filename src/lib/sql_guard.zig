@@ -1,3 +1,14 @@
+// sql_guard: Application-level SQL safety analysis for read-only mode.
+//
+// This is a convenience guard, not a security boundary. It prevents accidental
+// writes (fat-finger DELETE without WHERE, etc.) when read-only mode is toggled.
+// It is NOT a substitute for PostgreSQL roles — a determined user can always
+// connect directly. For real enforcement, use a read-only DB role.
+//
+// The guard uses whitelist prefix matching + write-keyword scanning outside
+// string literals, comments, and dollar-quoted blocks. CTE write attacks like
+// `WITH x AS (DELETE ...) SELECT * FROM x` are caught by containsWriteKeyword.
+
 const std = @import("std");
 
 pub const SqlGuardResult = struct {

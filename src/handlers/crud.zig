@@ -326,7 +326,7 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream,
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -590,7 +590,7 @@ pub fn handleTableData(stream: std.net.Stream, path: []const u8, state: *ServerS
     });
 }
 
-pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -735,7 +735,7 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, state: *ServerS
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -866,7 +866,7 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, state: *Serv
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
 }
 
-pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -1011,7 +1011,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, state: *Serv
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -1123,7 +1123,7 @@ pub fn handleFkLookup(stream: std.net.Stream, path: []const u8, state: *ServerSt
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -1237,7 +1237,7 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     }
 }
 
-pub fn handleTruncateTable(stream: std.net.Stream, path: []const u8, state: *ServerState, arena: std.mem.Allocator) !void {
+pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
