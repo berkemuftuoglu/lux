@@ -84,7 +84,7 @@ $('create-table-preview').onclick = () => {
 		toast('Add table name and columns', 'error');
 		return;
 	}
-	sqlEditor.value = ddl.replace(/\\n/g, '\n');
+	sqlEditor.value = ddl;
 	syncHighlight();
 	releaseFocus($('create-table-overlay'));
 	closeModal('create-table-overlay');
@@ -101,7 +101,7 @@ $('create-table-ok').onclick = async () => {
 		toast('Add table name and columns', 'error');
 		return;
 	}
-	const sql = ddl.replace(/\\n/g, '\n');
+	const sql = ddl;
 	releaseFocus($('create-table-overlay'));
 	closeModal('create-table-overlay');
 	try {
