@@ -63,7 +63,7 @@ function buildCreateTableDDL() {
 }
 
 $('btn-create-table').onclick = () => {
-	if (!dbConnected) {
+	if (!State.dbConnected) {
 		toast('Connect first', 'error');
 		return;
 	}

@@ -1,14 +1,14 @@
 // table-ops.js — Insert row, find/replace, DDL viewer, table stats, truncate, CSV import
 
 $('btn-add-row').onclick = () => {
-	if (!currentTable || !dbConnected) return;
-	const meta = getTableMeta(currentTable);
+	if (!State.currentTable || !State.dbConnected) return;
+	const meta = getTableMeta(State.currentTable);
 	if (!meta || !meta.columns) {
 		toast('No column info', 'error');
 		return;
 	}
 
-	$('insert-tbl').textContent = currentTable;
+	$('insert-tbl').textContent = State.currentTable;
 	const container = $('insert-fields');
 	container.innerHTML = '';
 
@@ -90,11 +90,11 @@ $('insert-fields').addEventListener('keydown', (e) => {
 });
 
 $('btn-find-replace').onclick = () => {
-	if (!currentTable || !dbConnected) return;
-	$('fnr-tbl').textContent = currentTable;
+	if (!State.currentTable || !State.dbConnected) return;
+	$('fnr-tbl').textContent = State.currentTable;
 	const select = $('fnr-column');
 	select.innerHTML = '';
-	currentColumns.forEach((col) => {
+	State.currentColumns.forEach((col) => {
 		if (col === 'ctid') return;
 		const opt = document.createElement('option');
 		opt.value = col;
@@ -118,7 +118,7 @@ $('fnr-preview-btn').onclick = async () => {
 	}
 	try {
 		const data = await fetchJson(
-			`/api/tables/${encodeURIComponent(currentTable)}/bulk-update`,
+			`/api/tables/${encodeURIComponent(State.currentTable)}/bulk-update`,
 			{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -149,7 +149,7 @@ $('fnr-ok').onclick = async () => {
 	}
 	try {
 		const data = await fetchJson(
-			`/api/tables/${encodeURIComponent(currentTable)}/bulk-update`,
+			`/api/tables/${encodeURIComponent(State.currentTable)}/bulk-update`,
 			{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
@@ -162,7 +162,7 @@ $('fnr-ok').onclick = async () => {
 		}
 		releaseFocus($('fnr-overlay'));
 		closeModal('fnr-overlay');
-		toast(`Replaced in ${currentTable}`, 'success');
+		toast(`Replaced in ${State.currentTable}`, 'success');
 		bumpJournal();
 		loadTableData();
 	} catch (e) {
@@ -182,14 +182,14 @@ $('fnr-overlay').onclick = (e) => {
 };
 
 $('btn-ddl').onclick = async () => {
-	if (!currentTable) return;
-	$('ddl-title').textContent = `${currentTable} \u2014 DDL`;
+	if (!State.currentTable) return;
+	$('ddl-title').textContent = `${State.currentTable} \u2014 DDL`;
 	$('ddl-content').textContent = 'Loading...';
 	$('ddl-overlay').classList.add('open');
 	trapFocus($('ddl-overlay'));
 	try {
 		const data = await fetchJson(
-			`/api/tables/${encodeURIComponent(currentTable)}/ddl`
+			`/api/tables/${encodeURIComponent(State.currentTable)}/ddl`
 		);
 		if (data.error) $('ddl-content').textContent = `Error: ${data.error}`;
 		else $('ddl-content').textContent = data.ddl || 'No DDL available';
@@ -210,10 +210,10 @@ $('ddl-overlay').onclick = (e) => {
 };
 
 $('btn-stats').onclick = async () => {
-	if (!currentTable) return;
+	if (!State.currentTable) return;
 	try {
 		const data = await fetchJson(
-			`/api/tables/${encodeURIComponent(currentTable)}/stats`
+			`/api/tables/${encodeURIComponent(State.currentTable)}/stats`
 		);
 		if (data.error) {
 			toast(data.error, 'error');
@@ -259,24 +259,24 @@ $('btn-stats').onclick = async () => {
 };
 
 $('btn-truncate').onclick = async () => {
-	if (!currentTable || !dbConnected) return;
+	if (!State.currentTable || !State.dbConnected) return;
 	const ok = await confirm(
 		'Truncate Table',
 		'TRUNCATE TABLE "' +
-			currentTable +
+			State.currentTable +
 			'" \u2014 This will delete ALL rows. This cannot be undone.'
 	);
 	if (!ok) return;
 	try {
 		const data = await fetchJson(
-			`/api/tables/${encodeURIComponent(currentTable)}/truncate`,
+			`/api/tables/${encodeURIComponent(State.currentTable)}/truncate`,
 			{ method: 'POST' }
 		);
 		if (data.error) {
 			toast(data.error, 'error');
 			return;
 		}
-		toast(`Table ${currentTable} truncated`, 'success');
+		toast(`Table ${State.currentTable} truncated`, 'success');
 		bumpJournal();
 		loadTableData();
 	} catch (e) {
@@ -285,11 +285,11 @@ $('btn-truncate').onclick = async () => {
 };
 
 $('btn-import-csv').onclick = () => {
-	if (!currentTable || !dbConnected || readOnlyMode) {
-		if (readOnlyMode) toast('Read-only mode', 'error');
+	if (!State.currentTable || !State.dbConnected || State.readOnlyMode) {
+		if (State.readOnlyMode) toast('Read-only mode', 'error');
 		return;
 	}
-	$('import-tbl').textContent = currentTable;
+	$('import-tbl').textContent = State.currentTable;
 	$('import-csv').value = '';
 	$('import-preview').style.display = 'none';
 	$('import-overlay').classList.add('open');
@@ -309,7 +309,7 @@ $('import-ok').onclick = async () => {
 
 	try {
 		const data = await fetchJson(
-			`/api/tables/${encodeURIComponent(currentTable)}/import`,
+			`/api/tables/${encodeURIComponent(State.currentTable)}/import`,
 			{
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },

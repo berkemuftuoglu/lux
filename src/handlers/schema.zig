@@ -7,6 +7,7 @@ const web = @import("web");
 const log = std.log.scoped(.schema);
 
 const ServerState = web.ServerState;
+const HandlerError = web.HandlerError;
 
 const connections_filename = "connections.json";
 
@@ -168,7 +169,7 @@ pub fn handleConnect(
     _: []const u8,
     state: *ServerState,
     arena: std.mem.Allocator,
-) anyerror!void {
+) HandlerError!void {
     const allocator = state.allocator;
 
     var extra_buf: [4096]u8 = undefined;
@@ -177,7 +178,7 @@ pub fn handleConnect(
         return;
     };
 
-    const conninfo_str = utils.extractJsonField(body, "conninfo") orelse {
+    const conninfo_str = utils.extractJsonField(arena, body, "conninfo") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing conninfo field\"}");
         return;
     };
@@ -246,7 +247,7 @@ pub fn handleConnect(
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -365,7 +366,7 @@ pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state:
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     const allocator = state.allocator;
 
     const last_ci = state.last_conninfo orelse {
@@ -435,7 +436,7 @@ pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, sta
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
         return;
@@ -469,13 +470,13 @@ pub fn handleHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, s
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) anyerror!void {
+pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     var extra_buf: [1024]u8 = undefined;
     const body = utils.readRequestBody(stream, request, &extra_buf, 1024) orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
         return;
     };
-    const enabled_str = utils.extractJsonField(body, "enabled") orelse {
+    const enabled_str = utils.extractJsonField(arena, body, "enabled") orelse {
         state.flags.read_only = !state.flags.read_only;
         var resp_buf: [64]u8 = undefined;
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
@@ -488,13 +489,13 @@ pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, _: []co
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleReadOnlyGet(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) anyerror!void {
+pub fn handleReadOnlyGet(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) HandlerError!void {
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8, _: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8, _: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     const data = readConnectionsFile(arena) catch {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"connections\":[]}");
         return;
@@ -502,7 +503,7 @@ pub fn handleGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8
     try utils.sendResponse(stream, "200 OK", "application/json", data);
 }
 
-pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     const allocator = arena;
 
     var extra_buf: [4096]u8 = undefined;
@@ -511,15 +512,15 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
         return;
     };
 
-    const name = utils.extractJsonField(body, "name") orelse {
+    const name = utils.extractJsonField(arena, body, "name") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing name field\"}");
         return;
     };
-    const conninfo = utils.extractJsonField(body, "conninfo") orelse {
+    const conninfo = utils.extractJsonField(arena, body, "conninfo") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing conninfo field\"}");
         return;
     };
-    const color = utils.extractJsonField(body, "color") orelse "gray";
+    const color = utils.extractJsonField(arena, body, "color") orelse "gray";
 
     const existing = readConnectionsFile(allocator) catch {
         const entry = formatConnectionJson(allocator, 1, name, conninfo, color) catch {
@@ -601,7 +602,7 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
     try utils.sendResponse(stream, "200 OK", "application/json", id_resp);
 }
 
-pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []const u8, _: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []const u8, _: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     const allocator = arena;
 
     const prefix = "/api/connections/";
@@ -620,6 +621,23 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
         return;
     };
 
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, existing, .{}) catch {
+        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
+        return;
+    };
+
+    const conns_val = parsed.value.object.get("connections") orelse {
+        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
+        return;
+    };
+    const conns_arr = switch (conns_val) {
+        .array => |a| a,
+        else => {
+            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
+            return;
+        },
+    };
+
     var new_file = std.ArrayList(u8){};
     const nw = new_file.writer(allocator);
     nw.writeAll("{\"connections\":[") catch {
@@ -629,56 +647,24 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
 
     var found = false;
     var first = true;
-    var pos: usize = 0;
-
-    const arr_start = std.mem.indexOf(u8, existing, "[") orelse {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
-        return;
-    };
-    pos = arr_start + 1;
-
-    while (pos < existing.len) {
-        while (pos < existing.len and (existing[pos] == ' ' or existing[pos] == ',' or existing[pos] == '\n' or existing[pos] == '\r' or existing[pos] == '\t')) pos += 1;
-        if (pos >= existing.len or existing[pos] == ']') break;
-        if (existing[pos] != '{') break;
-
-        var depth: usize = 0;
-        var in_string = false;
-        var obj_end = pos;
-        while (obj_end < existing.len) {
-            const ch = existing[obj_end];
-            if (in_string) {
-                if (ch == '\\' and obj_end + 1 < existing.len) {
-                    obj_end += 2;
-                    continue;
-                }
-                if (ch == '"') in_string = false;
-            } else {
-                if (ch == '"') in_string = true;
-                if (ch == '{') depth += 1;
-                if (ch == '}') {
-                    depth -= 1;
-                    if (depth == 0) {
-                        obj_end += 1;
-                        break;
-                    }
-                }
-            }
-            obj_end += 1;
-        }
-
-        const obj_str = existing[pos..obj_end];
-
-        const obj_id = findMaxConnectionId(obj_str);
+    for (conns_arr.items) |item| {
+        const obj = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const id_val = obj.get("id") orelse continue;
+        const obj_id: u64 = switch (id_val) {
+            .integer => |i| @intCast(@as(u64, @bitCast(@as(i64, i)))),
+            else => continue,
+        };
         if (obj_id == target_id) {
             found = true;
         } else {
             if (!first) nw.writeByte(',') catch return;
-            nw.writeAll(obj_str) catch return;
+            const item_json = std.json.Stringify.valueAlloc(allocator, item, .{}) catch return;
+            nw.writeAll(item_json) catch return;
             first = false;
         }
-
-        pos = obj_end;
     }
 
     nw.writeAll("]}") catch return;

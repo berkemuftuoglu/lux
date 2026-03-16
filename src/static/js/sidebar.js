@@ -2,7 +2,7 @@
 
 async function loadSchema() {
 	try {
-		schemaData = await fetchJson('/api/schema');
+		State.schemaData = await fetchJson('/api/schema');
 		renderSidebar();
 	} catch (_e) {
 		toast('Failed to load schema', 'error');
@@ -16,7 +16,7 @@ function renderSidebar() {
 		.querySelectorAll('.tree-table, .tree-columns')
 		.forEach((el) => el.remove());
 
-	if (!schemaData || !schemaData.tables || schemaData.tables.length === 0) {
+	if (!State.schemaData || !State.schemaData.tables || State.schemaData.tables.length === 0) {
 		$('sidebar-empty').style.display = '';
 		$('table-search-wrap').style.display = 'none';
 		$('table-count').textContent = '';
@@ -24,10 +24,10 @@ function renderSidebar() {
 	}
 
 	$('table-search-wrap').style.display = '';
-	$('table-count').textContent = `(${schemaData.tables.length})`;
+	$('table-count').textContent = `(${State.schemaData.tables.length})`;
 	const searchTerm = ($('table-search').value || '').toLowerCase();
 
-	schemaData.tables.forEach((table) => {
+	State.schemaData.tables.forEach((table) => {
 		const item = document.createElement('div');
 		item.className = 'tree-table';
 		item.dataset.table = table.name;
@@ -113,15 +113,15 @@ function updateDestructiveButtons(enabled) {
 }
 
 function selectTable(name) {
-	currentTable = name;
-	pageOffset = 0;
-	sortCol = null;
-	sortDir = 'asc';
-	columnFilters = {};
-	focusRow = -1;
-	focusCol = -1;
-	selectedRows = new Set();
-	lastSelectedRow = -1;
+	State.currentTable = name;
+	State.pageOffset = 0;
+	State.sortCol = null;
+	State.sortDir = 'asc';
+	State.columnFilters = {};
+	State.focusRow = -1;
+	State.focusCol = -1;
+	State.selectedRows = new Set();
+	State.lastSelectedRow = -1;
 	$('table-toolbar').style.display = 'flex';
 	$('tbl-name').textContent = name;
 	updateDestructiveButtons(true);
@@ -129,23 +129,23 @@ function selectTable(name) {
 }
 
 async function loadTableData() {
-	if (!currentTable) return;
+	if (!State.currentTable) return;
 	let url =
 		'/api/tables/' +
-		encodeURIComponent(currentTable) +
+		encodeURIComponent(State.currentTable) +
 		'/data?limit=' +
-		pageLimit +
+		State.pageLimit +
 		'&offset=' +
-		pageOffset +
+		State.pageOffset +
 		'&count=exact';
-	if (sortCol) url += `&sort=${encodeURIComponent(sortCol)}&dir=${sortDir}`;
-	Object.keys(columnFilters).forEach((col) => {
-		if (columnFilters[col])
+	if (State.sortCol) url += `&sort=${encodeURIComponent(State.sortCol)}&dir=${State.sortDir}`;
+	Object.keys(State.columnFilters).forEach((col) => {
+		if (State.columnFilters[col])
 			url +=
 				'&f.' +
 				encodeURIComponent(col) +
 				'=' +
-				encodeURIComponent(columnFilters[col]);
+				encodeURIComponent(State.columnFilters[col]);
 	});
 
 	showLoading('grid-wrap');
@@ -157,15 +157,15 @@ async function loadTableData() {
 			return;
 		}
 
-		currentColumns = data.columns || [];
-		currentRows = data.rows || [];
-		totalRows = data.total || 0;
-		currentPkMode = data.pk_mode || 'column';
-		currentPkColumns = data.pk_columns || [];
+		State.currentColumns = data.columns || [];
+		State.currentRows = data.rows || [];
+		State.totalRows = data.total || 0;
+		State.currentPkMode = data.pk_mode || 'column';
+		State.currentPkColumns = data.pk_columns || [];
 
-		$('tbl-info').textContent = `${totalRows.toLocaleString()} rows`;
+		$('tbl-info').textContent = `${State.totalRows.toLocaleString()} rows`;
 		$('status-table').textContent =
-			`${currentTable} \u00b7 ${totalRows.toLocaleString()} rows`;
+			`${State.currentTable} \u00b7 ${State.totalRows.toLocaleString()} rows`;
 
 		renderGrid();
 		renderPagination();
@@ -177,8 +177,8 @@ async function loadTableData() {
 }
 
 function getTableMeta(name) {
-	if (!schemaData || !schemaData.tables) return null;
-	return schemaData.tables.find((t) => t.name === name) || null;
+	if (!State.schemaData || !State.schemaData.tables) return null;
+	return State.schemaData.tables.find((t) => t.name === name) || null;
 }
 
 function isNumericType(type) {
@@ -463,7 +463,7 @@ function computeERLayout(tables, fkLinks, boxSizeMap, W, H) {
 }
 
 function drawER() {
-	if (!schemaData || !schemaData.tables || schemaData.tables.length === 0) {
+	if (!State.schemaData || !State.schemaData.tables || State.schemaData.tables.length === 0) {
 		$('er-empty').style.display = 'flex';
 		return;
 	}
@@ -481,7 +481,7 @@ function drawER() {
 	canvas.style.height = `${container.clientHeight}px`;
 	ctx.scale(dpr, dpr);
 
-	const tables = schemaData.tables;
+	const tables = State.schemaData.tables;
 	const W = container.clientWidth;
 	const H = container.clientHeight;
 
@@ -520,8 +520,8 @@ function drawER() {
 	const layoutNodes = computeERLayout(tables, fkLinks, boxSizeMap, W, H);
 
 	const positions = layoutNodes.map((n) => ({
-		x: n.x + erPanX,
-		y: n.y + erPanY,
+		x: n.x + State.erPanX,
+		y: n.y + State.erPanY,
 		w: n.w,
 		h: n.h,
 		table: n.table,
@@ -546,8 +546,8 @@ function drawER() {
 	ctx.scale(dpr, dpr);
 
 	ctx.save();
-	ctx.scale(erZoom, erZoom);
-	ctx.clearRect(0, 0, canvasW / erZoom, canvasH / erZoom);
+	ctx.scale(State.erZoom, State.erZoom);
+	ctx.clearRect(0, 0, canvasW / State.erZoom, canvasH / State.erZoom);
 
 	const hovered = erHoveredTable;
 	const relatedSet = new Set();
@@ -738,17 +738,17 @@ function drawER() {
 }
 
 $('btn-er-zoom-in').onclick = () => {
-	erZoom = Math.min(3, erZoom + 0.2);
+	State.erZoom = Math.min(3, State.erZoom + 0.2);
 	drawER();
 };
 $('btn-er-zoom-out').onclick = () => {
-	erZoom = Math.max(0.3, erZoom - 0.2);
+	State.erZoom = Math.max(0.3, State.erZoom - 0.2);
 	drawER();
 };
 $('btn-er-fit').onclick = () => {
-	erZoom = 1;
-	erPanX = 0;
-	erPanY = 0;
+	State.erZoom = 1;
+	State.erPanX = 0;
+	State.erPanY = 0;
 	drawER();
 };
 
@@ -762,8 +762,8 @@ $('er-canvas').addEventListener('mousedown', (e) => {
 });
 window.addEventListener('mousemove', (e) => {
 	if (erDragging) {
-		erPanX += e.clientX - erLastX;
-		erPanY += e.clientY - erLastY;
+		State.erPanX += e.clientX - erLastX;
+		State.erPanY += e.clientY - erLastY;
 		erLastX = e.clientX;
 		erLastY = e.clientY;
 		drawER();
@@ -772,8 +772,8 @@ window.addEventListener('mousemove', (e) => {
 	const canvas = $('er-canvas');
 	if (!canvas || !$('panel-er').classList.contains('active')) return;
 	const rect = canvas.getBoundingClientRect();
-	const mx = (e.clientX - rect.left) / erZoom;
-	const my = (e.clientY - rect.top) / erZoom;
+	const mx = (e.clientX - rect.left) / State.erZoom;
+	const my = (e.clientY - rect.top) / State.erZoom;
 	let found = null;
 	for (const p of erPositions) {
 		if (mx >= p.x && mx <= p.x + p.w && my >= p.y && my <= p.y + p.h) {

@@ -281,41 +281,47 @@ fn hexVal(ch: u8) ?u4 {
     return null;
 }
 
-// Minimal JSON string field extractor — avoids pulling in a full JSON parser.
-pub fn extractJsonField(body: []const u8, field_name: []const u8) ?[]const u8 {
-    var search_pos: usize = 0;
-    while (search_pos < body.len) {
-        const quote_pos = std.mem.indexOfScalarPos(u8, body, search_pos, '"') orelse return null;
-        if (quote_pos + 1 + field_name.len + 1 > body.len) return null;
-        const after_quote = body[quote_pos + 1 ..];
-        if (after_quote.len >= field_name.len + 1 and
-            std.mem.eql(u8, after_quote[0..field_name.len], field_name) and
-            after_quote[field_name.len] == '"')
-        {
-            var pos = quote_pos + 1 + field_name.len + 1;
-            while (pos < body.len and (body[pos] == ' ' or body[pos] == ':')) pos += 1;
-            if (pos >= body.len or body[pos] != '"') return null;
-            pos += 1;
-            const start = pos;
-            while (pos < body.len) {
-                if (body[pos] == '\\' and pos + 1 < body.len) {
-                    pos += 2;
-                    continue;
-                }
-                if (body[pos] == '"') {
-                    return body[start..pos];
-                }
-                pos += 1;
-            }
-            return null;
+pub fn extractJsonField(allocator: std.mem.Allocator, body: []const u8, field_name: []const u8) ?[]const u8 {
+    var scanner = std.json.Scanner.initCompleteInput(allocator, body);
+    defer scanner.deinit();
+    if ((scanner.next() catch return null) != .object_begin) return null;
+
+    while (true) {
+        const key_tok = scanner.nextAlloc(allocator, .alloc_if_needed) catch return null;
+        const key = switch (key_tok) {
+            .string, .allocated_string => |s| s,
+            .object_end => return null,
+            else => return null,
+        };
+        const val_tok = scanner.nextAlloc(allocator, .alloc_if_needed) catch return null;
+        if (std.mem.eql(u8, key, field_name)) {
+            return switch (val_tok) {
+                .string, .allocated_string => |s| s,
+                else => null,
+            };
         }
-        search_pos = quote_pos + 1;
+        // Skip nested values (objects, arrays)
+        switch (val_tok) {
+            .object_begin, .array_begin => skipJsonValue(&scanner) orelse return null,
+            else => {},
+        }
     }
-    return null;
 }
 
-pub fn extractJsonQuery(body: []const u8) ?[]const u8 {
-    return extractJsonField(body, "query");
+fn skipJsonValue(scanner: *std.json.Scanner) ?void {
+    var depth: usize = 1;
+    while (depth > 0) {
+        const tok = scanner.next() catch return null;
+        switch (tok) {
+            .object_begin, .array_begin => depth += 1,
+            .object_end, .array_end => depth -= 1,
+            else => {},
+        }
+    }
+}
+
+pub fn extractJsonQuery(allocator: std.mem.Allocator, body: []const u8) ?[]const u8 {
+    return extractJsonField(allocator, body, "query");
 }
 
 pub fn readRequestBody(
@@ -349,25 +355,25 @@ pub fn readRequestBody(
 
 test "extractJsonQuery: simple query" {
     const body = "{\"query\": \"Sum all values\"}";
-    const result = extractJsonQuery(body);
+    const result = extractJsonQuery(std.heap.page_allocator, body);
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("Sum all values", result.?);
 }
 
 test "extractJsonQuery: no whitespace" {
     const body = "{\"query\":\"test\"}";
-    const result = extractJsonQuery(body);
+    const result = extractJsonQuery(std.heap.page_allocator, body);
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("test", result.?);
 }
 
 test "extractJsonQuery: missing field" {
     const body = "{\"other\": \"value\"}";
-    try std.testing.expect(extractJsonQuery(body) == null);
+    try std.testing.expect(extractJsonQuery(std.heap.page_allocator, body) == null);
 }
 
 test "extractJsonQuery: empty body" {
-    try std.testing.expect(extractJsonQuery("") == null);
+    try std.testing.expect(extractJsonQuery(std.heap.page_allocator, "") == null);
 }
 
 test "findContentLength: standard header" {
@@ -455,47 +461,47 @@ test "writeJsonEscaped: mixed special chars" {
 
 test "extractJsonQuery: query with escaped quotes inside" {
     const body = "{\"query\": \"say \\\"hello\\\"\"}";
-    const result = extractJsonQuery(body);
+    const result = extractJsonQuery(std.heap.page_allocator, body);
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("say \\\"hello\\\"", result.?);
+    try std.testing.expectEqualStrings("say \"hello\"", result.?);
 }
 
 test "extractJsonQuery: multiple keys finds query" {
     const body = "{\"other\": 42, \"query\": \"test query\", \"extra\": true}";
-    const result = extractJsonQuery(body);
+    const result = extractJsonQuery(std.heap.page_allocator, body);
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("test query", result.?);
 }
 
 test "extractJsonQuery: whitespace variations" {
     const body = "{  \"query\"  :  \"spaced out\"  }";
-    const result = extractJsonQuery(body);
+    const result = extractJsonQuery(std.heap.page_allocator, body);
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("spaced out", result.?);
 }
 
 test "extractJsonQuery: malformed no closing quote" {
     const body = "{\"query\": \"unterminated}";
-    try std.testing.expect(extractJsonQuery(body) == null);
+    try std.testing.expect(extractJsonQuery(std.heap.page_allocator, body) == null);
 }
 
 test "extractJsonField: extracts non-query fields" {
     const body = "{\"conninfo\": \"postgresql://localhost/db\", \"table\": \"orders\"}";
-    const conninfo = extractJsonField(body, "conninfo");
+    const conninfo = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(conninfo != null);
     try std.testing.expectEqualStrings("postgresql://localhost/db", conninfo.?);
-    const table = extractJsonField(body, "table");
+    const table = extractJsonField(std.heap.page_allocator, body, "table");
     try std.testing.expect(table != null);
     try std.testing.expectEqualStrings("orders", table.?);
 }
 
 test "extractJsonField: returns null for missing field" {
     const body = "{\"query\": \"test\"}";
-    try std.testing.expect(extractJsonField(body, "missing") == null);
+    try std.testing.expect(extractJsonField(std.heap.page_allocator, body, "missing") == null);
 }
 
 test "extractJsonField: empty body" {
-    try std.testing.expect(extractJsonField("", "query") == null);
+    try std.testing.expect(extractJsonField(std.heap.page_allocator, "", "query") == null);
 }
 
 test "eqlLower: case insensitive match" {
@@ -703,79 +709,79 @@ test "parseQueryParam: multiple same params uses first" {
 
 test "extractJsonField: connection string with special chars" {
     const body = "{\"conninfo\":\"postgresql://user:p@ss@localhost:5432/mydb?sslmode=require\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("postgresql://user:p@ss@localhost:5432/mydb?sslmode=require", result.?);
 }
 
 test "extractJsonField: connection string with escaped quotes" {
     const body = "{\"conninfo\":\"host=localhost dbname=\\\"my db\\\"\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("host=localhost dbname=\\\"my db\\\"", result.?);
+    try std.testing.expectEqualStrings("host=localhost dbname=\"my db\"", result.?);
 }
 
 test "extractJsonField: multiple fields extracts correct one" {
     const body = "{\"env\":\"dev\",\"conninfo\":\"postgresql://localhost/db\",\"ssl\":\"require\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("postgresql://localhost/db", result.?);
 }
 
 test "extractJsonField: field with unicode" {
     const body = "{\"conninfo\":\"postgresql://user@localhost/caf\\u00e9\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
 }
 
 test "extractJsonField: empty value" {
     const body = "{\"conninfo\":\"\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("", result.?);
 }
 
 test "extractJsonField: value with colons and slashes" {
     const body = "{\"conninfo\":\"postgresql://admin:s3cr3t@db.example.com:5432/production\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("postgresql://admin:s3cr3t@db.example.com:5432/production", result.?);
 }
 
 test "extractJsonField: value with newlines escaped" {
     const body = "{\"sql\":\"SELECT\\n* FROM\\nusers\"}";
-    const result = extractJsonField(body, "sql");
+    const result = extractJsonField(std.heap.page_allocator, body, "sql");
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("SELECT\\n* FROM\\nusers", result.?);
+    try std.testing.expectEqualStrings("SELECT\n* FROM\nusers", result.?);
 }
 
 test "extractJsonField: whitespace around colon" {
     const body = "{\"conninfo\" : \"localhost\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("localhost", result.?);
 }
 
 test "extractJsonField: null body" {
-    const result = extractJsonField("", "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, "", "conninfo");
     try std.testing.expect(result == null);
 }
 
 test "extractJsonField: body with only braces" {
-    const result = extractJsonField("{}", "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, "{}", "conninfo");
     try std.testing.expect(result == null);
 }
 
 test "extractJsonField: partial field name match should not match" {
     const body = "{\"conninfo_extra\":\"wrong\",\"conninfo\":\"right\"}";
-    const result = extractJsonField(body, "conninfo");
+    const result = extractJsonField(std.heap.page_allocator, body, "conninfo");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("right", result.?);
 }
 
 test "extractJsonField: field with number value returns null" {
     const body = "{\"count\":42}";
-    const result = extractJsonField(body, "count");
+    const result = extractJsonField(std.heap.page_allocator, body, "count");
     try std.testing.expect(result == null);
 }
 
@@ -1124,57 +1130,57 @@ test "escapeIdentifier: normal string still works" {
 
 test "extractJsonField: nested escaped quotes in value" {
     const body = "{\"key\": \"value with \\\"nested\\\" quotes\"}";
-    const result = extractJsonField(body, "key");
+    const result = extractJsonField(std.heap.page_allocator, body, "key");
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("value with \\\"nested\\\" quotes", result.?);
+    try std.testing.expectEqualStrings("value with \"nested\" quotes", result.?);
 }
 
 test "extractJsonField: very long value" {
     const long_val = "a" ** 500;
     const body = "{\"data\": \"" ++ long_val ++ "\"}";
-    const result = extractJsonField(body, "data");
+    const result = extractJsonField(std.heap.page_allocator, body, "data");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(usize, 500), result.?.len);
 }
 
 test "extractJsonField: value with backslash sequences" {
     const body = "{\"path\": \"C:\\\\Users\\\\test\\\\file.txt\"}";
-    const result = extractJsonField(body, "path");
+    const result = extractJsonField(std.heap.page_allocator, body, "path");
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("C:\\\\Users\\\\test\\\\file.txt", result.?);
+    try std.testing.expectEqualStrings("C:\\Users\\test\\file.txt", result.?);
 }
 
 test "extractJsonField: field name that is substring of another" {
     const body = "{\"name\": \"Alice\", \"username\": \"bob\"}";
-    const result = extractJsonField(body, "name");
+    const result = extractJsonField(std.heap.page_allocator, body, "name");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("Alice", result.?);
 }
 
 test "extractJsonField: value is a single character" {
     const body = "{\"x\": \"y\"}";
-    const result = extractJsonField(body, "x");
+    const result = extractJsonField(std.heap.page_allocator, body, "x");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("y", result.?);
 }
 
 test "extractJsonField: unicode value" {
     const body = "{\"greeting\": \"\\u3053\\u3093\\u306b\\u3061\\u306f\"}";
-    const result = extractJsonField(body, "greeting");
+    const result = extractJsonField(std.heap.page_allocator, body, "greeting");
     try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("\\u3053\\u3093\\u306b\\u3061\\u306f", result.?);
+    try std.testing.expectEqualStrings("\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}", result.?);
 }
 
 test "extractJsonField: multiple colons in value" {
     const body = "{\"url\": \"http://host:8080/path:sub\"}";
-    const result = extractJsonField(body, "url");
+    const result = extractJsonField(std.heap.page_allocator, body, "url");
     try std.testing.expect(result != null);
     try std.testing.expectEqualStrings("http://host:8080/path:sub", result.?);
 }
 
 test "extractJsonField: field not found in deeply nested body" {
     const body = "{\"outer\": {\"inner\": \"val\"}, \"other\": \"test\"}";
-    const result = extractJsonField(body, "missing");
+    const result = extractJsonField(std.heap.page_allocator, body, "missing");
     try std.testing.expect(result == null);
 }
 

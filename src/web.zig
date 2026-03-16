@@ -69,9 +69,9 @@ pub const HandlerError = error{
     ConnectionResetByPeer,
 } || postgres.PgError;
 
-const HandlerFn = *const fn (std.net.Stream, []const u8, []const u8, *ServerState, std.mem.Allocator) anyerror!void;
+const HandlerFn = *const fn (std.net.Stream, []const u8, []const u8, *ServerState, std.mem.Allocator) HandlerError!void;
 
-fn handleRequestError(stream: std.net.Stream, err: anyerror) void {
+fn handleRequestError(stream: std.net.Stream, err: HandlerError) void {
     const status_and_body = switch (err) {
         error.OutOfMemory => .{ "500 Internal Server Error", "{\"error\":\"Out of memory\"}" },
         error.ConnectionFailed => .{ "200 OK", "{\"error\":\"Database connection failed\"}" },
@@ -86,7 +86,6 @@ fn handleRequestError(stream: std.net.Stream, err: anyerror) void {
         error.MissingField => .{ "400 Bad Request", "{\"error\":\"Missing required field\"}" },
         // Client disconnected — nothing to send
         error.BrokenPipe, error.ConnectionResetByPeer => return,
-        else => .{ "500 Internal Server Error", "{\"error\":\"Internal server error\"}" },
     };
     utils.sendResponse(stream, status_and_body[0], "application/json", status_and_body[1]) catch return;
 }
@@ -99,7 +98,7 @@ const Route = struct {
 };
 
 // Order matters: more-specific suffixes must come before the catch-all GET.
-fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (std.mem.eql(u8, method, "POST") and std.mem.endsWith(u8, path, "/bulk-update")) {
         return crud.handleBulkUpdate(stream, request, path, state, arena);
     }

@@ -56,16 +56,16 @@ $('conn-input').addEventListener('keydown', (e) => {
 });
 
 $('btn-export-csv').onclick = () => {
-	if (currentTable)
-		window.location.href = `/api/export/${encodeURIComponent(currentTable)}?format=csv`;
+	if (State.currentTable)
+		window.location.href = `/api/export/${encodeURIComponent(State.currentTable)}?format=csv`;
 };
 $('btn-export-json').onclick = () => {
-	if (currentTable)
-		window.location.href = `/api/export/${encodeURIComponent(currentTable)}?format=json`;
+	if (State.currentTable)
+		window.location.href = `/api/export/${encodeURIComponent(State.currentTable)}?format=json`;
 };
 
 $('btn-refresh').onclick = async () => {
-	if (dbConnected) {
+	if (State.dbConnected) {
 		await loadSchema();
 		toast('Schema refreshed', 'success');
 	}
@@ -112,8 +112,8 @@ document.addEventListener('keydown', (e) => {
 	if (
 		(e.ctrlKey || e.metaKey) &&
 		e.key === 'f' &&
-		currentTable &&
-		dbConnected
+		State.currentTable &&
+		State.dbConnected
 	) {
 		if ($('panel-tables').classList.contains('active')) {
 			e.preventDefault();
@@ -162,23 +162,23 @@ document.addEventListener('keydown', (e) => {
 			tip.remove();
 			return;
 		}
-		if (editingCell) {
+		if (State.editingCell) {
 			cancelEdit();
 			return;
 		}
-		if (selectedRows.size > 0) {
-			selectedRows.clear();
-			lastSelectedRow = -1;
+		if (State.selectedRows.size > 0) {
+			State.selectedRows.clear();
+			State.lastSelectedRow = -1;
 			updateRowSelection();
 		} else {
-			focusRow = -1;
-			focusCol = -1;
+			State.focusRow = -1;
+			State.focusCol = -1;
 			updateCellFocus();
 		}
 	}
 	if (
 		e.key === '?' &&
-		!editingCell &&
+		!State.editingCell &&
 		document.activeElement.tagName !== 'INPUT' &&
 		document.activeElement.tagName !== 'TEXTAREA' &&
 		document.activeElement.tagName !== 'SELECT'
@@ -196,54 +196,54 @@ document.addEventListener('keydown', (e) => {
 	}
 	if ((e.ctrlKey || e.metaKey) && e.key === 's') {
 		e.preventDefault();
-		if (dbConnected) $('save-conn-btn').click();
+		if (State.dbConnected) $('save-conn-btn').click();
 	}
 	if (
-		!editingCell &&
+		!State.editingCell &&
 		$('panel-tables').classList.contains('active') &&
-		currentRows.length > 0 &&
+		State.currentRows.length > 0 &&
 		document.activeElement.tagName !== 'INPUT' &&
 		document.activeElement.tagName !== 'TEXTAREA'
 	) {
 		const dCols = displayCols();
-		const maxRow = currentRows.length - 1;
+		const maxRow = State.currentRows.length - 1;
 		const maxCol = dCols.length - 1;
 		if (e.key === 'ArrowDown') {
 			e.preventDefault();
-			focusRow = Math.min(focusRow + 1, maxRow);
-			if (focusCol < 0) focusCol = 0;
+			State.focusRow = Math.min(State.focusRow + 1, maxRow);
+			if (State.focusCol < 0) State.focusCol = 0;
 			updateCellFocus();
 		}
 		if (e.key === 'ArrowUp') {
 			e.preventDefault();
-			focusRow = Math.max(focusRow - 1, 0);
-			if (focusCol < 0) focusCol = 0;
+			State.focusRow = Math.max(State.focusRow - 1, 0);
+			if (State.focusCol < 0) State.focusCol = 0;
 			updateCellFocus();
 		}
 		if (e.key === 'ArrowRight') {
 			e.preventDefault();
-			focusCol = Math.min(focusCol + 1, maxCol);
-			if (focusRow < 0) focusRow = 0;
+			State.focusCol = Math.min(State.focusCol + 1, maxCol);
+			if (State.focusRow < 0) State.focusRow = 0;
 			updateCellFocus();
 		}
 		if (e.key === 'ArrowLeft') {
 			e.preventDefault();
-			focusCol = Math.max(focusCol - 1, 0);
-			if (focusRow < 0) focusRow = 0;
+			State.focusCol = Math.max(State.focusCol - 1, 0);
+			if (State.focusRow < 0) State.focusRow = 0;
 			updateCellFocus();
 		}
-		if (e.key === 'Tab' && focusRow >= 0) {
+		if (e.key === 'Tab' && State.focusRow >= 0) {
 			e.preventDefault();
-			if (e.shiftKey) focusCol = Math.max(focusCol - 1, 0);
-			else focusCol = Math.min(focusCol + 1, maxCol);
+			if (e.shiftKey) State.focusCol = Math.max(State.focusCol - 1, 0);
+			else State.focusCol = Math.min(State.focusCol + 1, maxCol);
 			updateCellFocus();
 		}
-		if (e.key === 'Enter' && focusRow >= 0 && focusCol >= 0) {
+		if (e.key === 'Enter' && State.focusRow >= 0 && State.focusCol >= 0) {
 			e.preventDefault();
 			const rows = $('grid-body').querySelectorAll('tr');
-			if (focusRow < rows.length) {
-				const cells = rows[focusRow].querySelectorAll('td.editable');
-				if (focusCol < cells.length) startEdit(cells[focusCol]);
+			if (State.focusRow < rows.length) {
+				const cells = rows[State.focusRow].querySelectorAll('td.editable');
+				if (State.focusCol < cells.length) startEdit(cells[State.focusCol]);
 			}
 		}
 	}
@@ -256,8 +256,8 @@ async function init() {
 	try {
 		const data = await fetchJson('/api/schema');
 		if (data.tables && data.tables.length > 0) {
-			schemaData = data;
-			dbConnected = true;
+			State.schemaData = data;
+			State.dbConnected = true;
 			updateConnUI();
 			showConnStatus(true, `${data.tables.length} tables`);
 			renderSidebar();
@@ -361,7 +361,7 @@ window.addEventListener('resize', () => {
 		resizeTh.style.minWidth = `${newW}px`;
 		resizeTh.style.maxWidth = `${newW}px`;
 		const col = resizeTh.dataset.col;
-		if (col) columnWidths[col] = newW;
+		if (col) State.columnWidths[col] = newW;
 	});
 
 	document.addEventListener('mouseup', () => {

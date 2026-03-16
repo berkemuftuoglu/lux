@@ -19,7 +19,7 @@ async function doConnect() {
 			showConnStatus(false, data.error);
 			toast(data.error, 'error');
 		} else {
-			dbConnected = true;
+			State.dbConnected = true;
 			showConnStatus(true, `${data.tables} tables`);
 			updateConnUI();
 			await loadSchema();
@@ -47,16 +47,16 @@ function showConnStatus(ok, msg) {
 }
 
 function updateConnUI() {
-	$('hdr-dot').classList.toggle('connected', dbConnected);
-	$('status-dot').classList.toggle('ok', dbConnected);
-	$('status-conn').textContent = dbConnected ? 'Connected' : 'Not connected';
-	$('save-conn-btn').style.display = dbConnected ? '' : 'none';
+	$('hdr-dot').classList.toggle('connected', State.dbConnected);
+	$('status-dot').classList.toggle('ok', State.dbConnected);
+	$('status-conn').textContent = State.dbConnected ? 'Connected' : 'Not connected';
+	$('save-conn-btn').style.display = State.dbConnected ? '' : 'none';
 }
 
 function startHealthCheck() {
-	if (healthCheckInterval) clearInterval(healthCheckInterval);
-	healthCheckInterval = setInterval(async () => {
-		if (!dbConnected) return;
+	if (State.healthCheckInterval) clearInterval(State.healthCheckInterval);
+	State.healthCheckInterval = setInterval(async () => {
+		if (!State.dbConnected) return;
 		try {
 			const data = await fetchJson('/api/health');
 			if (data.status === 'error' || data.status === 'disconnected') {
@@ -242,7 +242,7 @@ $('reconnect-btn').onclick = async () => {
 			toast(data.error, 'error');
 		} else {
 			$('reconnect-banner').classList.remove('show');
-			dbConnected = true;
+			State.dbConnected = true;
 			updateConnUI();
 			await loadSchema();
 			toast('Reconnected', 'success');

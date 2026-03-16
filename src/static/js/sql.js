@@ -257,7 +257,7 @@ function buildACList(prefix) {
 	const results = [];
 	const seen = new Set();
 
-	if (schemaData?.tables) {
+	if (State.schemaData?.tables) {
 		schemaData.tables.forEach((t) => {
 			if (t.name.toLowerCase().startsWith(p) && !seen.has(t.name)) {
 				results.push({ text: t.name, type: 'tbl' });
@@ -535,7 +535,7 @@ function renderSQLResult(data, elapsed) {
 				: 'OK') +
 			timeStr +
 			'</div>';
-		if (currentTable) loadTableData();
+		if (State.currentTable) loadTableData();
 		return;
 	}
 
@@ -587,7 +587,7 @@ function renderSQLResult(data, elapsed) {
 			resultsInfo.appendChild(jsonBtn);
 		}
 	}
-	lastSqlQuery = sqlEditor.value.trim();
+	State.lastSqlQuery = sqlEditor.value.trim();
 }
 
 function formatSQL(sql) {
@@ -740,7 +740,7 @@ function formatSQL(sql) {
 }
 
 async function exportSqlResults(format) {
-	const sql = lastSqlQuery;
+	const sql = State.lastSqlQuery;
 	if (!sql) {
 		toast('No query to export', 'error');
 		return;

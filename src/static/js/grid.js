@@ -1,34 +1,34 @@
 // grid.js — Data grid rendering, cell focus, pagination, context menu, row selection, bulk ops
 
 function displayCols() {
-	return currentPkMode === 'ctid'
-		? currentColumns.filter((c) => c !== 'ctid')
-		: currentColumns;
+	return State.currentPkMode === 'ctid'
+		? State.currentColumns.filter((c) => c !== 'ctid')
+		: State.currentColumns;
 }
 
 function renderGrid() {
-	const meta = getTableMeta(currentTable);
+	const meta = getTableMeta(State.currentTable);
 	const colMeta = {};
 	if (meta) meta.columns.forEach((c) => (colMeta[c.name] = c));
 
-	const pkSet = new Set(currentPkColumns);
+	const pkSet = new Set(State.currentPkColumns);
 	const cols = displayCols();
 
 	let headHtml = '<tr><th class="row-num-col">#</th>';
 	cols.forEach((col) => {
-		const sorted = sortCol === col;
+		const sorted = State.sortCol === col;
 		const arrow = sorted
-			? sortDir === 'asc'
+			? State.sortDir === 'asc'
 				? ' &#9650;'
 				: ' &#9660;'
 			: ' <span class="sort-arrow">&#9650;</span>';
-		const thStyle = columnWidths[col]
+		const thStyle = State.columnWidths[col]
 			? ' style="width:' +
-				columnWidths[col] +
+				State.columnWidths[col] +
 				'px;min-width:' +
-				columnWidths[col] +
+				State.columnWidths[col] +
 				'px;max-width:' +
-				columnWidths[col] +
+				State.columnWidths[col] +
 				'px"'
 			: '';
 		headHtml +=
@@ -47,7 +47,7 @@ function renderGrid() {
 
 	headHtml += '<tr class="filter-row"><th></th>';
 	cols.forEach((col) => {
-		const val = columnFilters[col] || '';
+		const val = State.columnFilters[col] || '';
 		headHtml +=
 			'<th><input class="col-filter" data-col="' +
 			escHtml(col) +
@@ -63,10 +63,10 @@ function renderGrid() {
 		.forEach((th) => {
 			th.onclick = () => {
 				const col = th.dataset.col;
-				if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+				if (State.sortCol === col) State.sortDir = State.sortDir === 'asc' ? 'desc' : 'asc';
 				else {
-					sortCol = col;
-					sortDir = 'asc';
+					State.sortCol = col;
+					State.sortDir = 'asc';
 				}
 				loadTableData();
 			};
@@ -78,21 +78,21 @@ function renderGrid() {
 		.forEach((input) => {
 			input.onclick = (e) => e.stopPropagation();
 			input.addEventListener('input', () => {
-				columnFilters[input.dataset.col] = input.value;
+				State.columnFilters[input.dataset.col] = input.value;
 				clearTimeout(filterTimer);
 				filterTimer = setTimeout(() => {
-					pageOffset = 0;
+					State.pageOffset = 0;
 					loadTableData();
 				}, 400);
 			});
 		});
 
-	if (currentRows.length === 0) {
+	if (State.currentRows.length === 0) {
 		$('data-grid').classList.add('hidden');
 		$('table-empty').style.display = '';
 		$('table-empty').innerHTML =
 			'<div class="grid-empty" style="display:flex;flex-direction:column;align-items:center"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="3" y1="15" x2="21" y2="15"/><line x1="9" y1="3" x2="9" y2="21"/></svg><div>No rows in ' +
-			escHtml(currentTable) +
+			escHtml(State.currentTable) +
 			'</div></div>';
 		$('pagination').classList.add('hidden');
 		return;
@@ -102,8 +102,8 @@ function renderGrid() {
 	$('data-grid').classList.remove('hidden');
 
 	let bodyHtml = '';
-	currentRows.forEach((row, ri) => {
-		const isSelected = selectedRows.has(ri);
+	State.currentRows.forEach((row, ri) => {
+		const isSelected = State.selectedRows.has(ri);
 		bodyHtml +=
 			'<tr' +
 			(isSelected ? ' class="selected"' : '') +
@@ -114,10 +114,10 @@ function renderGrid() {
 			'<td class="row-num" data-ridx="' +
 			ri +
 			'" title="Click for details, Shift+Click to select">' +
-			(pageOffset + ri + 1) +
+			(State.pageOffset + ri + 1) +
 			'</td>';
 		cols.forEach((col, _ci) => {
-			const dataIdx = currentColumns.indexOf(col);
+			const dataIdx = State.currentColumns.indexOf(col);
 			const val = row[dataIdx];
 			const cm = colMeta[col];
 			const type = cm ? cm.type || '' : '';
@@ -205,8 +205,8 @@ function renderGrid() {
 							/* clipboard not available in insecure context */
 						});
 				}
-				focusRow = parseInt(td.dataset.row, 10);
-				focusCol = Array.from(
+				State.focusRow = parseInt(td.dataset.row, 10);
+				State.focusCol = Array.from(
 					td.parentElement.querySelectorAll('td.editable')
 				).indexOf(td);
 				updateCellFocus();
@@ -226,15 +226,15 @@ function renderGrid() {
 		.forEach((td) => {
 			td.addEventListener('click', (e) => {
 				const ri = parseInt(td.dataset.ridx, 10);
-				if (e.shiftKey && lastSelectedRow >= 0) {
-					const from = Math.min(lastSelectedRow, ri);
-					const to = Math.max(lastSelectedRow, ri);
-					for (let i = from; i <= to; i++) selectedRows.add(i);
+				if (e.shiftKey && State.lastSelectedRow >= 0) {
+					const from = Math.min(State.lastSelectedRow, ri);
+					const to = Math.max(State.lastSelectedRow, ri);
+					for (let i = from; i <= to; i++) State.selectedRows.add(i);
 					updateRowSelection();
 				} else if (e.ctrlKey || e.metaKey) {
-					if (selectedRows.has(ri)) selectedRows.delete(ri);
-					else selectedRows.add(ri);
-					lastSelectedRow = ri;
+					if (State.selectedRows.has(ri)) State.selectedRows.delete(ri);
+					else State.selectedRows.add(ri);
+					State.lastSelectedRow = ri;
 					updateRowSelection();
 				} else {
 					showRowDetail(ri);
@@ -252,7 +252,7 @@ function renderGrid() {
 		showContextMenu(e.clientX, e.clientY, ri, col, td);
 	});
 
-	if (focusRow >= 0 && focusCol >= 0) updateCellFocus();
+	if (State.focusRow >= 0 && State.focusCol >= 0) updateCellFocus();
 }
 
 function updateCellFocus() {
@@ -260,34 +260,34 @@ function updateCellFocus() {
 		.querySelectorAll('td.cell-focus')
 		.forEach((td) => td.classList.remove('cell-focus'));
 	const rows = $('grid-body').querySelectorAll('tr');
-	if (focusRow >= 0 && focusRow < rows.length) {
-		const cells = rows[focusRow].querySelectorAll('td.editable');
-		if (focusCol >= 0 && focusCol < cells.length) {
-			cells[focusCol].classList.add('cell-focus');
-			cells[focusCol].scrollIntoView({ block: 'nearest', inline: 'nearest' });
+	if (State.focusRow >= 0 && State.focusRow < rows.length) {
+		const cells = rows[State.focusRow].querySelectorAll('td.editable');
+		if (State.focusCol >= 0 && State.focusCol < cells.length) {
+			cells[State.focusCol].classList.add('cell-focus');
+			cells[State.focusCol].scrollIntoView({ block: 'nearest', inline: 'nearest' });
 		}
 	}
 }
 
 function renderPagination() {
-	if (totalRows <= pageLimit && pageOffset === 0) {
+	if (State.totalRows <= State.pageLimit && State.pageOffset === 0) {
 		$('pagination').classList.add('hidden');
 		return;
 	}
 	$('pagination').classList.remove('hidden');
-	const start = pageOffset + 1;
-	const end = Math.min(pageOffset + currentRows.length, totalRows);
-	$('page-info').textContent = `${start}\u2013${end} of ${totalRows}`;
-	$('page-prev').disabled = pageOffset === 0;
-	$('page-next').disabled = pageOffset + pageLimit >= totalRows;
+	const start = State.pageOffset + 1;
+	const end = Math.min(State.pageOffset + State.currentRows.length, State.totalRows);
+	$('page-info').textContent = `${start}\u2013${end} of ${State.totalRows}`;
+	$('page-prev').disabled = State.pageOffset === 0;
+	$('page-next').disabled = State.pageOffset + State.pageLimit >= State.totalRows;
 }
 
 $('page-prev').onclick = () => {
-	pageOffset = Math.max(0, pageOffset - pageLimit);
+	State.pageOffset = Math.max(0, State.pageOffset - State.pageLimit);
 	loadTableData();
 };
 $('page-next').onclick = () => {
-	pageOffset += pageLimit;
+	State.pageOffset += State.pageLimit;
 	loadTableData();
 };
 
@@ -338,13 +338,13 @@ function showContextMenu(x, y, rowIdx, colName, td) {
 			if (action === 'set-null') setToNull(rowIdx, colName, td);
 			if (action === 'detail') showRowDetail(rowIdx);
 			if (action === 'filter') {
-				columnFilters[colName] = val;
-				pageOffset = 0;
+				State.columnFilters[colName] = val;
+				State.pageOffset = 0;
 				loadTableData();
 			}
 			if (action === 'select') {
-				selectedRows.add(rowIdx);
-				lastSelectedRow = rowIdx;
+				State.selectedRows.add(rowIdx);
+				State.lastSelectedRow = rowIdx;
 				updateRowSelection();
 			}
 			if (action === 'delete') deleteRow(rowIdx);
@@ -360,8 +360,8 @@ function copyRowAsJSON(rowIdx) {
 	const cols = displayCols();
 	const obj = {};
 	cols.forEach((col) => {
-		const idx = currentColumns.indexOf(col);
-		obj[col] = currentRows[rowIdx][idx];
+		const idx = State.currentColumns.indexOf(col);
+		obj[col] = State.currentRows[rowIdx][idx];
 	});
 	copyToClipboard(JSON.stringify(obj, null, 2))
 		.then(() => toast('Row copied as JSON', 'success'))
@@ -371,14 +371,14 @@ function copyRowAsJSON(rowIdx) {
 function copyRowAsInsert(rowIdx) {
 	const cols = displayCols();
 	const vals = cols.map((col) => {
-		const idx = currentColumns.indexOf(col);
-		const v = currentRows[rowIdx][idx];
+		const idx = State.currentColumns.indexOf(col);
+		const v = State.currentRows[rowIdx][idx];
 		if (v === null || v === 'NULL' || v === undefined) return 'NULL';
 		return `'${String(v).replace(/'/g, "''")}'`;
 	});
 	const sql =
 		'INSERT INTO "' +
-		currentTable +
+		State.currentTable +
 		'" (' +
 		cols.map((c) => `"${c.replace(/"/g, '""')}"`).join(', ') +
 		') VALUES (' +
@@ -394,64 +394,64 @@ function updateRowSelection() {
 		.querySelectorAll('tr')
 		.forEach((tr) => {
 			const ri = parseInt(tr.dataset.ridx, 10);
-			tr.classList.toggle('selected', selectedRows.has(ri));
+			tr.classList.toggle('selected', State.selectedRows.has(ri));
 		});
 	updateBulkBar();
 }
 
 function updateBulkBar() {
 	const bar = $('bulk-bar');
-	if (selectedRows.size > 0) {
+	if (State.selectedRows.size > 0) {
 		bar.classList.add('show');
-		$('bulk-count').textContent = `${selectedRows.size} selected`;
+		$('bulk-count').textContent = `${State.selectedRows.size} selected`;
 	} else {
 		bar.classList.remove('show');
 	}
 }
 
 $('bulk-deselect').onclick = () => {
-	selectedRows.clear();
-	lastSelectedRow = -1;
+	State.selectedRows.clear();
+	State.lastSelectedRow = -1;
 	updateRowSelection();
 };
 
 $('bulk-delete').onclick = async () => {
-	if (readOnlyMode) {
+	if (State.readOnlyMode) {
 		toast('Read-only mode', 'error');
 		return;
 	}
-	if (selectedRows.size === 0) return;
+	if (State.selectedRows.size === 0) return;
 	const ok = await confirm(
-		`Delete ${selectedRows.size} rows`,
+		`Delete ${State.selectedRows.size} rows`,
 		'Are you sure you want to delete ' +
-			selectedRows.size +
+			State.selectedRows.size +
 			' rows from "' +
-			currentTable +
+			State.currentTable +
 			'"?'
 	);
 	if (!ok) return;
 
 	let deleted = 0;
-	for (const ri of [...selectedRows].sort((a, b) => b - a)) {
+	for (const ri of [...State.selectedRows].sort((a, b) => b - a)) {
 		let pkCol, pkVal;
-		if (currentPkMode === 'ctid') {
+		if (State.currentPkMode === 'ctid') {
 			pkCol = 'ctid';
-			const ctidIdx = currentColumns.indexOf('ctid');
-			pkVal = currentRows[ri][ctidIdx];
+			const ctidIdx = State.currentColumns.indexOf('ctid');
+			pkVal = State.currentRows[ri][ctidIdx];
 		} else {
-			pkCol = currentPkColumns[0] || currentColumns[0];
-			const pkIdx = currentColumns.indexOf(pkCol);
-			pkVal = currentRows[ri][pkIdx];
+			pkCol = State.currentPkColumns[0] || State.currentColumns[0];
+			const pkIdx = State.currentColumns.indexOf(pkCol);
+			pkVal = State.currentRows[ri][pkIdx];
 		}
 		try {
 			const data = await fetchJson('/api/delete-row', {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
 				body: JSON.stringify({
-					table: currentTable,
+					table: State.currentTable,
 					pk_column: pkCol,
 					pk_value: pkVal,
-					pk_mode: currentPkMode,
+					pk_mode: State.currentPkMode,
 				}),
 			});
 			if (!data.error) deleted++;
@@ -459,8 +459,8 @@ $('bulk-delete').onclick = async () => {
 			/* continue deleting remaining rows */
 		}
 	}
-	selectedRows.clear();
-	lastSelectedRow = -1;
+	State.selectedRows.clear();
+	State.lastSelectedRow = -1;
 	if (deleted > 0) toast(`Deleted ${deleted} rows`, 'success');
 	else toast('Failed to delete rows', 'error');
 	bumpJournal();
@@ -468,14 +468,14 @@ $('bulk-delete').onclick = async () => {
 };
 
 $('bulk-copy-json').onclick = () => {
-	if (selectedRows.size === 0) return;
+	if (State.selectedRows.size === 0) return;
 	const cols = displayCols();
-	const objs = [...selectedRows]
+	const objs = [...State.selectedRows]
 		.sort((a, b) => a - b)
 		.map((ri) => {
 			const obj = {};
 			cols.forEach((col) => {
-				obj[col] = currentRows[ri][currentColumns.indexOf(col)];
+				obj[col] = State.currentRows[ri][State.currentColumns.indexOf(col)];
 			});
 			return obj;
 		});
@@ -485,19 +485,19 @@ $('bulk-copy-json').onclick = () => {
 };
 
 $('bulk-copy-sql').onclick = () => {
-	if (selectedRows.size === 0) return;
+	if (State.selectedRows.size === 0) return;
 	const cols = displayCols();
-	const stmts = [...selectedRows]
+	const stmts = [...State.selectedRows]
 		.sort((a, b) => a - b)
 		.map((ri) => {
 			const vals = cols.map((col) => {
-				const v = currentRows[ri][currentColumns.indexOf(col)];
+				const v = State.currentRows[ri][State.currentColumns.indexOf(col)];
 				if (v === null || v === 'NULL' || v === undefined) return 'NULL';
 				return `'${String(v).replace(/'/g, "''")}'`;
 			});
 			return (
 				'INSERT INTO "' +
-				currentTable +
+				State.currentTable +
 				'" (' +
 				cols.map((c) => `"${c.replace(/"/g, '""')}"`).join(', ') +
 				') VALUES (' +
@@ -512,14 +512,14 @@ $('bulk-copy-sql').onclick = () => {
 
 function showRowDetail(rowIdx) {
 	const cols = displayCols();
-	const meta = getTableMeta(currentTable);
+	const meta = getTableMeta(State.currentTable);
 	$('detail-title').textContent =
-		`${currentTable} \u2014 Row ${pageOffset + rowIdx + 1}`;
+		`${State.currentTable} \u2014 Row ${State.pageOffset + rowIdx + 1}`;
 
 	let html = '';
 	cols.forEach((col) => {
-		const idx = currentColumns.indexOf(col);
-		const val = currentRows[rowIdx][idx];
+		const idx = State.currentColumns.indexOf(col);
+		const val = State.currentRows[rowIdx][idx];
 		const isNull = val === null || val === 'NULL' || val === undefined;
 		const cm = meta ? meta.columns.find((c) => c.name === col) : null;
 		const type = cm ? cm.type || '' : '';
@@ -546,11 +546,11 @@ $('detail-copy').onclick = () => {
 	const titleText = $('detail-title').textContent;
 	const match = titleText.match(/Row (\d+)/);
 	if (!match) return;
-	const rowIdx = parseInt(match[1], 10) - 1 - pageOffset;
-	if (rowIdx < 0 || rowIdx >= currentRows.length) return;
+	const rowIdx = parseInt(match[1], 10) - 1 - State.pageOffset;
+	if (rowIdx < 0 || rowIdx >= State.currentRows.length) return;
 	const obj = {};
 	cols.forEach((col) => {
-		obj[col] = currentRows[rowIdx][currentColumns.indexOf(col)];
+		obj[col] = State.currentRows[rowIdx][State.currentColumns.indexOf(col)];
 	});
 	copyToClipboard(JSON.stringify(obj, null, 2))
 		.then(() => toast('Row copied as JSON', 'success'))

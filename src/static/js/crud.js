@@ -6,8 +6,8 @@ let fkIndex = -1;
 let fkSelecting = false;
 
 function getColumnMeta(tableName, colName) {
-	if (!schemaData || !schemaData.tables) return null;
-	const tbl = schemaData.tables.find((t) => t.name === tableName);
+	if (!State.schemaData || !State.schemaData.tables) return null;
+	const tbl = State.schemaData.tables.find((t) => t.name === tableName);
 	if (!tbl) return null;
 	return tbl.columns.find((c) => c.name === colName) || null;
 }
@@ -79,20 +79,20 @@ function hideFkDropdown() {
 }
 
 function startEdit(td) {
-	if (readOnlyMode) {
+	if (State.readOnlyMode) {
 		toast('Read-only mode', 'error');
 		return;
 	}
-	if (editingCell) cancelEdit();
+	if (State.editingCell) cancelEdit();
 
 	const row = parseInt(td.dataset.row, 10);
 	const col = td.dataset.col;
 	const dataIdx = parseInt(td.dataset.idx, 10);
-	const val = currentRows[row][dataIdx];
+	const val = State.currentRows[row][dataIdx];
 	const isNull = val === null || val === 'NULL' || val === undefined;
 
-	editingCell = { td, row, col, dataIdx, originalVal: val };
-	const hasFk = isFkColumn(currentTable, col);
+	State.editingCell = { td, row, col, dataIdx, originalVal: val };
+	const hasFk = isFkColumn(State.currentTable, col);
 
 	td.classList.add('editing');
 	const input = document.createElement('input');
@@ -104,9 +104,9 @@ function startEdit(td) {
 	input.select();
 
 	if (hasFk) {
-		showFkDropdown(input, currentTable, col);
+		showFkDropdown(input, State.currentTable, col);
 		input.addEventListener('input', () =>
-			showFkDropdown(input, currentTable, col)
+			showFkDropdown(input, State.currentTable, col)
 		);
 	}
 
@@ -159,9 +159,9 @@ function updateFkSelection() {
 }
 
 function cancelEdit() {
-	if (!editingCell) return;
-	const { td, row, dataIdx } = editingCell;
-	const val = currentRows[row][dataIdx];
+	if (!State.editingCell) return;
+	const { td, row, dataIdx } = State.editingCell;
+	const val = State.currentRows[row][dataIdx];
 	td.classList.remove('editing');
 	if (val === null || val === 'NULL' || val === undefined) {
 		td.className = 'editable null-val';
@@ -170,12 +170,12 @@ function cancelEdit() {
 		td.className = 'editable';
 		td.textContent = val;
 	}
-	editingCell = null;
+	State.editingCell = null;
 }
 
 async function saveEdit() {
-	if (!editingCell) return;
-	const { td, row, col, dataIdx, originalVal } = editingCell;
+	if (!State.editingCell) return;
+	const { td, row, col, dataIdx, originalVal } = State.editingCell;
 	const input = td.querySelector('input');
 	if (!input) {
 		cancelEdit();
@@ -189,17 +189,17 @@ async function saveEdit() {
 	}
 
 	let pkCol, pkVal;
-	if (currentPkMode === 'ctid') {
+	if (State.currentPkMode === 'ctid') {
 		pkCol = 'ctid';
-		const ctidIdx = currentColumns.indexOf('ctid');
-		pkVal = currentRows[row][ctidIdx];
+		const ctidIdx = State.currentColumns.indexOf('ctid');
+		pkVal = State.currentRows[row][ctidIdx];
 	} else {
-		pkCol = currentPkColumns[0] || currentColumns[0];
-		const pkIdx = currentColumns.indexOf(pkCol);
-		pkVal = currentRows[row][pkIdx];
+		pkCol = State.currentPkColumns[0] || State.currentColumns[0];
+		const pkIdx = State.currentColumns.indexOf(pkCol);
+		pkVal = State.currentRows[row][pkIdx];
 	}
 
-	editingCell = null;
+	State.editingCell = null;
 	td.classList.remove('editing');
 
 	try {
@@ -207,12 +207,12 @@ async function saveEdit() {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				table: currentTable,
+				table: State.currentTable,
 				column: col,
 				value: newVal,
 				pk_column: pkCol,
 				pk_value: pkVal,
-				pk_mode: currentPkMode,
+				pk_mode: State.currentPkMode,
 				old_value: originalVal || '',
 			}),
 		});
@@ -223,7 +223,7 @@ async function saveEdit() {
 			return;
 		}
 
-		currentRows[row][dataIdx] = newVal;
+		State.currentRows[row][dataIdx] = newVal;
 		td.textContent = newVal;
 		td.className = 'editable';
 		td.classList.add('saved-flash');
@@ -237,26 +237,26 @@ async function saveEdit() {
 }
 
 async function deleteRow(rowIdx) {
-	if (readOnlyMode) {
+	if (State.readOnlyMode) {
 		toast('Read-only mode', 'error');
 		return;
 	}
 
 	let pkCol, pkVal;
-	if (currentPkMode === 'ctid') {
+	if (State.currentPkMode === 'ctid') {
 		pkCol = 'ctid';
-		const ctidIdx = currentColumns.indexOf('ctid');
-		pkVal = currentRows[rowIdx][ctidIdx];
+		const ctidIdx = State.currentColumns.indexOf('ctid');
+		pkVal = State.currentRows[rowIdx][ctidIdx];
 	} else {
-		pkCol = currentPkColumns[0] || currentColumns[0];
-		const pkIdx = currentColumns.indexOf(pkCol);
-		pkVal = currentRows[rowIdx][pkIdx];
+		pkCol = State.currentPkColumns[0] || State.currentColumns[0];
+		const pkIdx = State.currentColumns.indexOf(pkCol);
+		pkVal = State.currentRows[rowIdx][pkIdx];
 	}
 
 	const ok = await confirm(
 		'Delete Row',
 		'DELETE FROM "' +
-			currentTable +
+			State.currentTable +
 			'" WHERE "' +
 			pkCol +
 			'" = \'' +
@@ -270,15 +270,15 @@ async function deleteRow(rowIdx) {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				table: currentTable,
+				table: State.currentTable,
 				pk_column: pkCol,
 				pk_value: pkVal,
-				pk_mode: currentPkMode,
+				pk_mode: State.currentPkMode,
 			}),
 		});
 		if (data.error) toast(data.error, 'error');
 		else {
-			toast(`Row deleted from ${currentTable}`, 'success');
+			toast(`Row deleted from ${State.currentTable}`, 'success');
 			bumpJournal();
 			loadTableData();
 		}
@@ -288,7 +288,7 @@ async function deleteRow(rowIdx) {
 }
 
 async function submitInsert() {
-	const meta = getTableMeta(currentTable);
+	const meta = getTableMeta(State.currentTable);
 	if (!meta) return;
 	const values = {};
 	let hasValues = false;
@@ -314,7 +314,7 @@ async function submitInsert() {
 	releaseFocus($('insert-overlay'));
 	$('insert-overlay').classList.remove('open');
 	try {
-		const payload = { table: currentTable };
+		const payload = { table: State.currentTable };
 		if (hasValues) payload.values = values;
 		const data = await fetchJson('/api/insert-row', {
 			method: 'POST',
@@ -323,7 +323,7 @@ async function submitInsert() {
 		});
 		if (data.error) toast(data.error, 'error');
 		else {
-			toast(`Row inserted into ${currentTable}`, 'success');
+			toast(`Row inserted into ${State.currentTable}`, 'success');
 			bumpJournal();
 			loadTableData();
 		}
@@ -333,40 +333,40 @@ async function submitInsert() {
 }
 
 async function setToNull(rowIdx, colName, td) {
-	if (readOnlyMode) {
+	if (State.readOnlyMode) {
 		toast('Read-only mode', 'error');
 		return;
 	}
 	let pkCol, pkVal;
-	if (currentPkMode === 'ctid') {
+	if (State.currentPkMode === 'ctid') {
 		pkCol = 'ctid';
-		const ctidIdx = currentColumns.indexOf('ctid');
-		pkVal = currentRows[rowIdx][ctidIdx];
+		const ctidIdx = State.currentColumns.indexOf('ctid');
+		pkVal = State.currentRows[rowIdx][ctidIdx];
 	} else {
-		pkCol = currentPkColumns[0] || currentColumns[0];
-		const pkIdx = currentColumns.indexOf(pkCol);
-		pkVal = currentRows[rowIdx][pkIdx];
+		pkCol = State.currentPkColumns[0] || State.currentColumns[0];
+		const pkIdx = State.currentColumns.indexOf(pkCol);
+		pkVal = State.currentRows[rowIdx][pkIdx];
 	}
-	const dataIdx = currentColumns.indexOf(colName);
-	const oldVal = currentRows[rowIdx][dataIdx];
+	const dataIdx = State.currentColumns.indexOf(colName);
+	const oldVal = State.currentRows[rowIdx][dataIdx];
 
 	try {
 		const data = await fetchJson('/api/update', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				table: currentTable,
+				table: State.currentTable,
 				column: colName,
 				value: '__NULL__',
 				pk_column: pkCol,
 				pk_value: pkVal,
-				pk_mode: currentPkMode,
+				pk_mode: State.currentPkMode,
 				old_value: oldVal || '',
 			}),
 		});
 		if (data.error) toast(data.error, 'error');
 		else {
-			currentRows[rowIdx][dataIdx] = null;
+			State.currentRows[rowIdx][dataIdx] = null;
 			td.className = 'editable null-val';
 			td.textContent = 'NULL';
 			td.classList.add('saved-flash');
@@ -382,9 +382,9 @@ async function setToNull(rowIdx, colName, td) {
 $('btn-readonly').onclick = async () => {
 	try {
 		const data = await fetchJson('/api/settings/read-only', { method: 'POST' });
-		readOnlyMode = data.read_only;
+		State.readOnlyMode = data.read_only;
 		updateReadOnlyUI();
-		toast(readOnlyMode ? 'Read-only enabled' : 'Read-only disabled', 'info');
+		toast(State.readOnlyMode ? 'Read-only enabled' : 'Read-only disabled', 'info');
 	} catch (_e) {
 		toast('Failed to toggle', 'error');
 	}
@@ -393,7 +393,7 @@ $('btn-readonly').onclick = async () => {
 async function loadReadOnly() {
 	try {
 		const data = await fetchJson('/api/settings/read-only');
-		readOnlyMode = data.read_only;
+		State.readOnlyMode = data.read_only;
 		updateReadOnlyUI();
 	} catch (_e) {
 		/* non-critical: read-only status unknown until connected */
@@ -401,18 +401,18 @@ async function loadReadOnly() {
 }
 
 function updateReadOnlyUI() {
-	$('btn-readonly').classList.toggle('active', readOnlyMode);
-	$('status-ro').classList.toggle('show', readOnlyMode);
+	$('btn-readonly').classList.toggle('active', State.readOnlyMode);
+	$('status-ro').classList.toggle('show', State.readOnlyMode);
 }
 
 function bumpJournal() {
-	journalCount++;
+	State.journalCount++;
 	const badge = $('journal-badge');
-	badge.textContent = journalCount;
+	badge.textContent = State.journalCount;
 	badge.classList.add('show');
 }
 function clearJournalBadge() {
-	journalCount = 0;
+	State.journalCount = 0;
 	$('journal-badge').classList.remove('show');
 }
 
@@ -527,7 +527,7 @@ async function loadJournal() {
 					else {
 						toast('Change undone', 'success');
 						loadJournal();
-						if (currentTable) loadTableData();
+						if (State.currentTable) loadTableData();
 					}
 				} catch (_e) {
 					toast('Undo failed', 'error');

@@ -5,6 +5,7 @@ const web = @import("web");
 const crud = @import("crud");
 
 const ServerState = web.ServerState;
+const HandlerError = web.HandlerError;
 
 const ExportError = error{
     OutOfMemory,
@@ -244,7 +245,7 @@ fn buildAndExecuteInsert(
     return true;
 }
 
-pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -349,7 +350,7 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
     }
 }
 
-pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -389,7 +390,7 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u
         body = body[0..content_length];
     }
 
-    const sql_text = utils.extractJsonField(body, "sql") orelse {
+    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -404,7 +405,7 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     }
 
-    const format = utils.extractJsonField(body, "format") orelse "csv";
+    const format = utils.extractJsonField(arena, body, "format") orelse "csv";
     const is_csv = std.mem.eql(u8, format, "csv");
     const is_json = std.mem.eql(u8, format, "json");
     if (!is_csv and !is_json) {
@@ -450,7 +451,7 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u
     }
 }
 
-pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -564,7 +565,7 @@ pub fn handleCsvImport(
     path: []const u8,
     state: *ServerState,
     arena: std.mem.Allocator,
-) anyerror!void {
+) HandlerError!void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -608,7 +609,7 @@ pub fn handleCsvImport(
         return;
     };
 
-    const csv_content = utils.extractJsonField(body, "csv") orelse {
+    const csv_content = utils.extractJsonField(arena, body, "csv") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing csv field\"}");
         return;
     };
@@ -618,7 +619,7 @@ pub fn handleCsvImport(
         return;
     }
 
-    const has_header_str = utils.extractJsonField(body, "has_header");
+    const has_header_str = utils.extractJsonField(arena, body, "has_header");
     const has_header = if (has_header_str) |h| !std.mem.eql(u8, h, "false") else true;
 
     const csv_result = parseCsvContent(allocator, csv_content) catch |err| {
@@ -751,7 +752,7 @@ pub fn handleTableStats(
     path: []const u8,
     state: *ServerState,
     arena: std.mem.Allocator,
-) anyerror!void {
+) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;

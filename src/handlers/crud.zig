@@ -6,6 +6,7 @@ const web = @import("web");
 const log = std.log.scoped(.crud);
 
 const ServerState = web.ServerState;
+const HandlerError = web.HandlerError;
 const ChangeEntry = web.ChangeEntry;
 const max_journal_entries = web.max_journal_entries;
 
@@ -306,7 +307,7 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream,
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -490,7 +491,10 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
 
     var count_buf = std.ArrayList(u8){};
     if (!use_exact_count) {
-        const esc_count_tn = try utils.escapeStringValue(allocator, table_name);
+        const esc_count_tn = utils.escapeStringValue(allocator, table_name) catch |e| switch (e) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidCharacter => return error.InvalidData,
+        };
         try count_buf.writer(allocator).print("SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables WHERE relname = '{s}'", .{esc_count_tn});
     } else {
         try count_buf.writer(allocator).print("SELECT COUNT(*) FROM \"{s}\"{s}", .{ table_name, where_clause });
@@ -550,7 +554,7 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     });
 }
 
-pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -565,28 +569,28 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
         return;
     };
 
-    const table_name = utils.extractJsonField(body, "table") orelse {
+    const table_name = utils.extractJsonField(arena, body, "table") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table field\"}");
         return;
     };
-    const column_name = utils.extractJsonField(body, "column") orelse {
+    const column_name = utils.extractJsonField(arena, body, "column") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing column field\"}");
         return;
     };
-    const value = utils.extractJsonField(body, "value") orelse {
+    const value = utils.extractJsonField(arena, body, "value") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing value field\"}");
         return;
     };
-    const pk_column = utils.extractJsonField(body, "pk_column") orelse {
+    const pk_column = utils.extractJsonField(arena, body, "pk_column") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_column field\"}");
         return;
     };
-    const pk_value = utils.extractJsonField(body, "pk_value") orelse {
+    const pk_value = utils.extractJsonField(arena, body, "pk_value") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_value field\"}");
         return;
     };
 
-    const pk_mode = utils.extractJsonField(body, "pk_mode") orelse "column";
+    const pk_mode = utils.extractJsonField(arena, body, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
     const tables = state.schema_tables orelse {
@@ -676,7 +680,7 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
     };
     defer pg_result.deinit();
 
-    const old_value_field = utils.extractJsonField(body, "old_value") orelse "";
+    const old_value_field = utils.extractJsonField(arena, body, "old_value") orelse "";
     const journal_id = addJournalEntry(state, table_name, "update", column_name, old_value_field, value, pk_column, pk_value) catch |err| blk: {
         log.warn("journal entry failed: {s}", .{@errorName(err)});
         break :blk @as(u64, 0);
@@ -687,7 +691,7 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
     try utils.sendResponse(stream, "200 OK", "application/json", resp);
 }
 
-pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -702,20 +706,20 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     };
 
-    const table_name = utils.extractJsonField(body, "table") orelse {
+    const table_name = utils.extractJsonField(arena, body, "table") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table field\"}");
         return;
     };
-    const pk_column = utils.extractJsonField(body, "pk_column") orelse {
+    const pk_column = utils.extractJsonField(arena, body, "pk_column") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_column field\"}");
         return;
     };
-    const pk_value = utils.extractJsonField(body, "pk_value") orelse {
+    const pk_value = utils.extractJsonField(arena, body, "pk_value") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_value field\"}");
         return;
     };
 
-    const pk_mode = utils.extractJsonField(body, "pk_mode") orelse "column";
+    const pk_mode = utils.extractJsonField(arena, body, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
     const tables = state.schema_tables orelse {
@@ -812,7 +816,7 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
     try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
 }
 
-pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -827,7 +831,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
         return;
     };
 
-    const table_name = utils.extractJsonField(body, "table") orelse {
+    const table_name = utils.extractJsonField(arena, body, "table") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table field\"}");
         return;
     };
@@ -950,7 +954,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -1056,7 +1060,7 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -1088,19 +1092,19 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
         return;
     };
 
-    const column = utils.extractJsonField(body, "column") orelse {
+    const column = utils.extractJsonField(arena, body, "column") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing column field\"}");
         return;
     };
-    const find_val = utils.extractJsonField(body, "find") orelse {
+    const find_val = utils.extractJsonField(arena, body, "find") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing find field\"}");
         return;
     };
-    const replace_val = utils.extractJsonField(body, "replace") orelse {
+    const replace_val = utils.extractJsonField(arena, body, "replace") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing replace field\"}");
         return;
     };
-    const force_str = utils.extractJsonField(body, "force") orelse "false";
+    const force_str = utils.extractJsonField(arena, body, "force") orelse "false";
     const force = std.mem.eql(u8, force_str, "true");
 
     if (!findColumnInTable(table_info, column)) {
@@ -1166,7 +1170,7 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
     }
 }
 
-pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (try enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");

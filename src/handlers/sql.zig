@@ -8,6 +8,7 @@ const crud = @import("crud");
 const log = std.log.scoped(.sql);
 
 const ServerState = web.ServerState;
+const HandlerError = web.HandlerError;
 const QueryHistoryEntry = web.QueryHistoryEntry;
 const max_history_entries = web.max_history_entries;
 
@@ -37,7 +38,7 @@ pub fn addHistoryEntry(
     }
 }
 
-pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -55,7 +56,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, sta
         return;
     };
 
-    const sql_text = utils.extractJsonField(body, "sql") orelse {
+    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -70,7 +71,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, sta
         return;
     }
 
-    const force = utils.extractJsonField(body, "force");
+    const force = utils.extractJsonField(arena, body, "force");
     const is_forced = if (force) |f| std.mem.eql(u8, f, "true") else false;
     if (!is_forced) {
         const guard = sql_guard.analyzeSql(sql_text);
@@ -126,7 +127,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, sta
     try crud.sendQueryResultJson(allocator, stream, &result);
 }
 
-pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
         return;
@@ -137,7 +138,7 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const 
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
         return;
     };
-    const sql_text = utils.extractJsonField(body, "sql") orelse {
+    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -282,7 +283,7 @@ pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
     try writer.writeAll("-- No automatic rollback available for this operation.");
 }
 
-pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -294,7 +295,7 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, _: []con
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
         return;
     };
-    const sql_text = utils.extractJsonField(body, "sql") orelse {
+    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -320,7 +321,7 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, _: []con
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleHistory(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleHistory(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     const alloc = arena;
 
     var json = std.ArrayList(u8){};
@@ -367,7 +368,7 @@ pub fn handleHistory(stream: std.net.Stream, _: []const u8, _: []const u8, state
     try utils.sendResponse(stream, "200 OK", "application/json", json.items);
 }
 
-pub fn handleJournal(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleJournal(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(arena);
 
@@ -396,7 +397,7 @@ pub fn handleJournal(stream: std.net.Stream, _: []const u8, _: []const u8, state
     try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
 }
 
-pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
+pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
     if (try crud.enforceReadOnly(stream, state)) return;
     if (!state.hasDbConnection()) {
         try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
@@ -410,7 +411,7 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const
         return;
     };
 
-    const id_str = utils.extractJsonField(body, "id") orelse {
+    const id_str = utils.extractJsonField(arena, body, "id") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing id field\"}");
         return;
     };
