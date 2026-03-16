@@ -15,10 +15,12 @@ jobs:
       - name: Install libpq-dev
         run: sudo apt-get update && sudo apt-get install -y libpq-dev
 
+      # TODO: switch to mlugg/setup-zig@v1 once mirrors carry 0.15.2
       - name: Setup Zig
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.15.2
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-linux-x86_64-0.15.2" >> "$GITHUB_PATH"
 
       - name: Run tests
         run: zig build test
