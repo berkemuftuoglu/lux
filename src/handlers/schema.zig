@@ -171,40 +171,11 @@ pub fn handleConnect(
 ) anyerror!void {
     const allocator = state.allocator;
 
-    const content_length = utils.findContentLength(request) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing Content-Length\"}");
-        return;
-    };
-
-    if (content_length > 4096) {
-        try utils.sendResponse(stream, "413 Payload Too Large", "application/json", "{\"error\":\"Request too large\"}");
-        return;
-    }
-
-    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Malformed request\"}");
-        return;
-    };
-    const body_start = header_end + 4;
-    var body = request[body_start..];
-
     var extra_buf: [4096]u8 = undefined;
-    if (body.len < content_length) {
-        const already_have = body.len;
-        @memcpy(extra_buf[0..already_have], body);
-        var read_so_far = already_have;
-        while (read_so_far < content_length) {
-            const n = stream.read(extra_buf[read_so_far..content_length]) catch {
-                try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Read failed\"}");
-                return;
-            };
-            if (n == 0) break;
-            read_so_far += n;
-        }
-        body = extra_buf[0..read_so_far];
-    } else {
-        body = body[0..content_length];
-    }
+    const body = utils.readRequestBody(stream, request, &extra_buf, 4096) orelse {
+        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+        return;
+    };
 
     const conninfo_str = utils.extractJsonField(body, "conninfo") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing conninfo field\"}");
@@ -534,37 +505,11 @@ pub fn handleGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8
 pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) anyerror!void {
     const allocator = arena;
 
-    const content_length = utils.findContentLength(request) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing Content-Length\"}");
-        return;
-    };
-    if (content_length > 4096) {
-        try utils.sendResponse(stream, "413 Payload Too Large", "application/json", "{\"error\":\"Request too large\"}");
-        return;
-    }
-    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Malformed request\"}");
-        return;
-    };
-    const body_start = header_end + 4;
-    var body = request[body_start..];
     var extra_buf: [4096]u8 = undefined;
-    if (body.len < content_length) {
-        const already_have = body.len;
-        @memcpy(extra_buf[0..already_have], body);
-        var read_so_far = already_have;
-        while (read_so_far < content_length) {
-            const n = stream.read(extra_buf[read_so_far..content_length]) catch {
-                try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Read failed\"}");
-                return;
-            };
-            if (n == 0) break;
-            read_so_far += n;
-        }
-        body = extra_buf[0..read_so_far];
-    } else {
-        body = body[0..content_length];
-    }
+    const body = utils.readRequestBody(stream, request, &extra_buf, 4096) orelse {
+        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+        return;
+    };
 
     const name = utils.extractJsonField(body, "name") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing name field\"}");

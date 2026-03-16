@@ -3,10 +3,10 @@ FROM alpine:3.21 AS build
 
 RUN apk add --no-cache curl xz postgresql-dev musl-dev
 
-# Install Zig 0.13.0 (pinned for reproducible builds)
-RUN curl -L https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz \
+# Install Zig 0.15.2 (pinned for reproducible builds)
+RUN curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz \
     | tar -xJ -C /opt \
-    && ln -s /opt/zig-linux-x86_64-0.13.0/zig /usr/local/bin/zig
+    && ln -s /opt/zig-linux-x86_64-0.15.2/zig /usr/local/bin/zig
 
 WORKDIR /app
 

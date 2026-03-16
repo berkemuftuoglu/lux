@@ -74,7 +74,8 @@ function startHealthCheck() {
 
 async function loadSavedConnections() {
 	try {
-		const conns = await fetchJson('/api/connections');
+		const resp = await fetchJson('/api/connections');
+		const conns = resp.connections || [];
 		const container = $('saved-conns');
 		if (!Array.isArray(conns) || conns.length === 0) {
 			container.classList.remove('show');

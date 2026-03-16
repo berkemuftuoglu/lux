@@ -183,7 +183,7 @@ async function saveEdit() {
 	}
 	const newVal = input.value;
 
-	if (newVal === (originalVal || '')) {
+	if (originalVal !== null && newVal === originalVal) {
 		cancelEdit();
 		return;
 	}

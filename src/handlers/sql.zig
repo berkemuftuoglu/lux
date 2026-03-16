@@ -45,44 +45,15 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, sta
 
     const allocator = arena;
 
-    const content_length = utils.findContentLength(request) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing Content-Length\"}");
-        return;
-    };
-
     const max_sql_body = 65536; // 64KB — enough for multi-statement scripts
-    if (content_length > max_sql_body) {
-        try utils.sendResponse(stream, "413 Payload Too Large", "application/json", "{\"error\":\"SQL too large (max 64KB)\"}");
-        return;
-    }
-
-    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Malformed request\"}");
-        return;
-    };
-    const body_start = header_end + 4;
-    var body = request[body_start..];
-
     const extra_buf = allocator.alloc(u8, max_sql_body) catch {
         try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
         return;
     };
-    if (body.len < content_length) {
-        const already_have = body.len;
-        @memcpy(extra_buf[0..already_have], body);
-        var read_so_far = already_have;
-        while (read_so_far < content_length) {
-            const n = stream.read(extra_buf[read_so_far..content_length]) catch {
-                try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Read failed\"}");
-                return;
-            };
-            if (n == 0) break;
-            read_so_far += n;
-        }
-        body = extra_buf[0..read_so_far];
-    } else {
-        body = body[0..content_length];
-    }
+    const body = crud.readRequestBody(stream, request, extra_buf, max_sql_body) orelse {
+        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+        return;
+    };
 
     const sql_text = utils.extractJsonField(body, "sql") orelse {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
@@ -468,17 +439,24 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const
     const w = sql_buf.writer(allocator);
 
     if (std.mem.eql(u8, entry.operation, "update")) {
-        const escaped_old = utils.escapeStringValue(allocator, entry.old_value) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
-            return;
-        };
         const escaped_pk = utils.escapeStringValue(allocator, entry.pk_value) catch {
             try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
             return;
         };
-        try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\" = '{s}'", .{
-            entry.table_name, entry.column_name, escaped_old, entry.pk_column, escaped_pk,
-        });
+        if (entry.old_value.len == 0) {
+            // Empty old_value represents SQL NULL in the journal
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = NULL WHERE \"{s}\" = '{s}'", .{
+                entry.table_name, entry.column_name, entry.pk_column, escaped_pk,
+            });
+        } else {
+            const escaped_old = utils.escapeStringValue(allocator, entry.old_value) catch {
+                try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+                return;
+            };
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\" = '{s}'", .{
+                entry.table_name, entry.column_name, escaped_old, entry.pk_column, escaped_pk,
+            });
+        }
     } else if (std.mem.eql(u8, entry.operation, "delete")) {
         try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Undo delete not yet supported\"}");
         return;
