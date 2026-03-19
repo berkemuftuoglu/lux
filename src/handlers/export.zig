@@ -288,9 +288,8 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         }
     }
 
-    const query_string = if (std.mem.indexOfScalar(u8, req.url.path, '?')) |qi| req.url.path[qi + 1 ..] else "";
-    var fmt_buf: [8]u8 = undefined;
-    const format_param = utils.parseStringQueryParam(query_string, "format", &fmt_buf) orelse "csv";
+    const qs = try req.query();
+    const format_param = qs.get("format") orelse "csv";
 
     const is_csv = std.mem.eql(u8, format_param, "csv");
     const is_json = std.mem.eql(u8, format_param, "json");
@@ -355,12 +354,12 @@ pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
     const allocator = res.arena;
     const pool = state.pool.?;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+    const sql_text = utils.getJsonString(obj, "sql") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -375,7 +374,7 @@ pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     }
 
-    const format = utils.extractJsonField(allocator, body, "format") orelse "csv";
+    const format = utils.getJsonString(obj, "format") orelse "csv";
     const is_csv = std.mem.eql(u8, format, "csv");
     const is_json = std.mem.eql(u8, format, "json");
     if (!is_csv and !is_json) {
@@ -522,12 +521,12 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     };
 
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const csv_content = utils.extractJsonField(allocator, body, "csv") orelse {
+    const csv_content = utils.getJsonString(obj, "csv") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing csv field\"}");
         return;
     };
@@ -537,7 +536,7 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     }
 
-    const has_header_str = utils.extractJsonField(allocator, body, "has_header");
+    const has_header_str = utils.getJsonString(obj, "has_header");
     const has_header = if (has_header_str) |h| !std.mem.eql(u8, h, "false") else true;
 
     const csv_result = parseCsvContent(allocator, csv_content) catch |err| {

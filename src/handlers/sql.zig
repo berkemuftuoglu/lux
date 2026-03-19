@@ -58,12 +58,12 @@ pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Respons
 
     const allocator = res.arena;
     const pool = state.pool.?;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+    const sql_text = utils.getJsonString(obj, "sql") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -78,7 +78,7 @@ pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Respons
         return;
     }
 
-    const force = utils.extractJsonField(allocator, body, "force");
+    const force = utils.getJsonString(obj, "force");
     const is_forced = if (force) |f| std.mem.eql(u8, f, "true") else false;
     if (!is_forced) {
         const guard = sql_guard.analyzeSql(sql_text);
@@ -139,11 +139,11 @@ pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.
     }
     const allocator = res.arena;
     const pool = state.pool.?;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
-    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+    const sql_text = utils.getJsonString(obj, "sql") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -279,11 +279,11 @@ pub fn handleSchemaPreview(handler: *web.Handler, req: *httpz.Request, res: *htt
         return;
     }
     const allocator = res.arena;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
-    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+    const sql_text = utils.getJsonString(obj, "sql") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
@@ -399,12 +399,12 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
 
     const allocator = res.arena;
     const pool = state.pool.?;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const id_str = utils.extractJsonField(allocator, body, "id") orelse {
+    const id_str = utils.getJsonString(obj, "id") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing id field\"}");
         return;
     };

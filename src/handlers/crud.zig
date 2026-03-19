@@ -94,59 +94,22 @@ fn formatRowAsJsonCompact(allocator: std.mem.Allocator, col_names: []const []con
     return buf.toOwnedSlice(allocator);
 }
 
-fn extractJsonObject(allocator: std.mem.Allocator, body: []const u8, field_name: []const u8) ?[]KVPair {
-    var search_pos: usize = 0;
-    const obj_start = while (search_pos < body.len) {
-        const quote_pos = std.mem.indexOfScalarPos(u8, body, search_pos, '"') orelse return null;
-        if (quote_pos + 1 + field_name.len + 1 > body.len) return null;
-        const after_quote = body[quote_pos + 1 ..];
-        if (after_quote.len >= field_name.len + 1 and
-            std.mem.eql(u8, after_quote[0..field_name.len], field_name) and
-            after_quote[field_name.len] == '"')
-        {
-            var pos = quote_pos + 1 + field_name.len + 1;
-            while (pos < body.len and (body[pos] == ' ' or body[pos] == ':' or body[pos] == '\t' or body[pos] == '\n')) pos += 1;
-            if (pos >= body.len or body[pos] != '{') return null;
-            break pos + 1; // skip the opening brace
-        }
-        search_pos = quote_pos + 1;
-    } else return null;
+fn extractValuesFromJsonObject(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ?[]KVPair {
+    const values_val = obj.get("values") orelse return null;
+    const inner = switch (values_val) {
+        .object => |o| o,
+        else => return null,
+    };
 
     var pairs = std.ArrayList(KVPair){};
-    var pos = obj_start;
-    while (pos < body.len) {
-        while (pos < body.len and (body[pos] == ' ' or body[pos] == ',' or body[pos] == '\t' or body[pos] == '\n' or body[pos] == '\r')) pos += 1;
-        if (pos >= body.len or body[pos] == '}') break;
-
-        if (body[pos] != '"') break;
-        pos += 1;
-        const key_start = pos;
-        while (pos < body.len and body[pos] != '"') pos += 1;
-        if (pos >= body.len) break;
-        const key = body[key_start..pos];
-        pos += 1; // skip closing quote
-
-        while (pos < body.len and (body[pos] == ' ' or body[pos] == ':' or body[pos] == '\t')) pos += 1;
-        if (pos >= body.len) break;
-
-        if (pos + 4 <= body.len and std.mem.eql(u8, body[pos..][0..4], "null")) {
-            pairs.append(allocator, .{ .key = key, .value = "__NULL__" }) catch {
-                pairs.deinit(allocator);
-                return null;
-            };
-            pos += 4;
-            continue;
-        }
-
-        if (body[pos] != '"') break;
-        pos += 1;
-        const val_start = pos;
-        while (pos < body.len and body[pos] != '"') pos += 1;
-        if (pos >= body.len) break;
-        const val = body[val_start..pos];
-        pos += 1; // skip closing quote
-
-        pairs.append(allocator, .{ .key = key, .value = val }) catch {
+    var it = inner.iterator();
+    while (it.next()) |entry| {
+        const value: []const u8 = switch (entry.value_ptr.*) {
+            .null => "__NULL__",
+            .string => |s| s,
+            else => continue,
+        };
+        pairs.append(allocator, .{ .key = entry.key_ptr.*, .value = value }) catch {
             pairs.deinit(allocator);
             return null;
         };
@@ -314,11 +277,6 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, res: *httpz.Response, p
     sendJsonResponse(res, json_buf.items);
 }
 
-/// Extract query string from the raw URL path (everything after '?')
-fn getQueryString(raw_path: []const u8) []const u8 {
-    if (std.mem.indexOfScalar(u8, raw_path, '?')) |qi| return raw_path[qi + 1 ..] else return "";
-}
-
 pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
     if (!state.hasDbConnection()) {
@@ -327,7 +285,6 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     }
 
     const allocator = res.arena;
-    const path = req.url.path;
     const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
@@ -358,18 +315,20 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
 
-    const query_string = getQueryString(path);
+    const qs = try req.query();
 
     var limit: usize = 50;
     var offset: usize = 0;
-    utils.parseQueryParam(query_string, "limit", &limit);
-    utils.parseQueryParam(query_string, "offset", &offset);
+    if (qs.get("limit")) |v| {
+        limit = std.fmt.parseInt(usize, v, 10) catch 50;
+    }
+    if (qs.get("offset")) |v| {
+        offset = std.fmt.parseInt(usize, v, 10) catch 0;
+    }
     if (limit > 10000) limit = 10000;
 
-    var sort_col_buf: [128]u8 = undefined;
-    const sort_col = utils.parseStringQueryParam(query_string, "sort", &sort_col_buf);
-    var dir_buf: [8]u8 = undefined;
-    const dir_param = utils.parseStringQueryParam(query_string, "dir", &dir_buf);
+    const sort_col = qs.get("sort");
+    const dir_param = qs.get("dir");
     const sort_dir: []const u8 = if (dir_param) |d| (if (std.mem.eql(u8, d, "desc")) @as([]const u8, "DESC") else "ASC") else "ASC";
 
     if (sort_col) |col| {
@@ -384,15 +343,17 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
 
-    var count_exact_buf: [8]u8 = undefined;
-    const count_mode = utils.parseStringQueryParam(query_string, "count", &count_exact_buf);
+    const count_mode = qs.get("count");
     const use_exact_count_param = if (count_mode) |m| std.mem.eql(u8, m, "exact") else false;
 
+    // Filters use "f.column=value" query params -- parse from raw URL since httpz
+    // query() doesn't handle dotted keys specially
+    const raw_query_string = if (std.mem.indexOfScalar(u8, req.url.path, '?')) |qi| req.url.path[qi + 1 ..] else "";
     const FilterEntry = struct { column: []const u8, value: []const u8 };
     var filters: [16]FilterEntry = undefined;
     var filter_count: usize = 0;
     {
-        var fiter = std.mem.splitScalar(u8, query_string, '&');
+        var fiter = std.mem.splitScalar(u8, raw_query_string, '&');
         while (fiter.next()) |param| {
             if (std.mem.startsWith(u8, param, "f.") and param.len > 2) {
                 if (std.mem.indexOfScalar(u8, param, '=')) |eq| {
@@ -416,10 +377,8 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     const has_filters = filter_count > 0;
     const use_exact_count = use_exact_count_param or has_filters;
 
-    var after_buf: [256]u8 = undefined;
-    const after_cursor = utils.parseStringQueryParam(query_string, "after", &after_buf);
-    var before_buf: [256]u8 = undefined;
-    const before_cursor = utils.parseStringQueryParam(query_string, "before", &before_buf);
+    const after_cursor = qs.get("after");
+    const before_cursor = qs.get("before");
 
     var table_has_pk = true;
     var pk_col_name: ?[]const u8 = null;
@@ -549,33 +508,33 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
 
     const allocator = res.arena;
     const pool = state.pool.?;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const table_name = utils.extractJsonField(allocator, body, "table") orelse {
+    const table_name = utils.getJsonString(obj, "table") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
         return;
     };
-    const column_name = utils.extractJsonField(allocator, body, "column") orelse {
+    const column_name = utils.getJsonString(obj, "column") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing column field\"}");
         return;
     };
-    const value = utils.extractJsonField(allocator, body, "value") orelse {
+    const value = utils.getJsonString(obj, "value") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing value field\"}");
         return;
     };
-    const pk_column = utils.extractJsonField(allocator, body, "pk_column") orelse {
+    const pk_column = utils.getJsonString(obj, "pk_column") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing pk_column field\"}");
         return;
     };
-    const pk_value = utils.extractJsonField(allocator, body, "pk_value") orelse {
+    const pk_value = utils.getJsonString(obj, "pk_value") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing pk_value field\"}");
         return;
     };
 
-    const pk_mode = utils.extractJsonField(allocator, body, "pk_mode") orelse "column";
+    const pk_mode = utils.getJsonString(obj, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
     const tables = state.schema_tables orelse {
@@ -648,7 +607,7 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
     };
     defer pg_result.deinit();
 
-    const old_value_field = utils.extractJsonField(allocator, body, "old_value") orelse "";
+    const old_value_field = utils.getJsonString(obj, "old_value") orelse "";
     const journal_id = addJournalEntry(state, table_name, "update", column_name, old_value_field, value, pk_column, pk_value) catch |err| blk: {
         log.warn("journal entry failed: {s}", .{@errorName(err)});
         break :blk @as(u64, 0);
@@ -669,25 +628,25 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
     const allocator = res.arena;
     const pool = state.pool.?;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const table_name = utils.extractJsonField(allocator, body, "table") orelse {
+    const table_name = utils.getJsonString(obj, "table") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
         return;
     };
-    const pk_column = utils.extractJsonField(allocator, body, "pk_column") orelse {
+    const pk_column = utils.getJsonString(obj, "pk_column") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing pk_column field\"}");
         return;
     };
-    const pk_value = utils.extractJsonField(allocator, body, "pk_value") orelse {
+    const pk_value = utils.getJsonString(obj, "pk_value") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing pk_value field\"}");
         return;
     };
 
-    const pk_mode = utils.extractJsonField(allocator, body, "pk_mode") orelse "column";
+    const pk_mode = utils.getJsonString(obj, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
     const tables = state.schema_tables orelse {
@@ -773,12 +732,12 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
     const allocator = res.arena;
     const pool = state.pool.?;
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const table_name = utils.extractJsonField(allocator, body, "table") orelse {
+    const table_name = utils.getJsonString(obj, "table") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
         return;
     };
@@ -792,7 +751,7 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     }
 
-    const values = extractJsonObject(allocator, body, "values");
+    const values = extractValuesFromJsonObject(allocator, obj);
 
     if (values) |pairs| {
         const table_info = findTableInSchema(tables, table_name) orelse {
@@ -899,15 +858,13 @@ pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
         return;
     };
 
-    const qs = getQueryString(req.url.path);
+    const qs = try req.query();
 
-    var col_buf: [128]u8 = undefined;
-    const column = utils.parseStringQueryParam(qs, "column", &col_buf) orelse {
+    const column = qs.get("column") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing column param\"}");
         return;
     };
-    var search_buf: [256]u8 = undefined;
-    const search = utils.parseStringQueryParam(qs, "search", &search_buf) orelse "";
+    const search = qs.get("search") orelse "";
 
     const etables = state.enhanced_schema orelse {
         sendJsonResponse(res, "{\"error\":\"No enhanced schema\"}");
@@ -938,7 +895,9 @@ pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
     };
 
     var fk_limit: usize = 20;
-    utils.parseQueryParam(qs, "limit", &fk_limit);
+    if (qs.get("limit")) |v| {
+        fk_limit = std.fmt.parseInt(usize, v, 10) catch 20;
+    }
     if (fk_limit > 100) fk_limit = 100;
 
     var sql_buf = std.ArrayList(u8){};
@@ -1004,24 +963,24 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         return;
     };
 
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const column = utils.extractJsonField(allocator, body, "column") orelse {
+    const column = utils.getJsonString(obj, "column") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing column field\"}");
         return;
     };
-    const find_val = utils.extractJsonField(allocator, body, "find") orelse {
+    const find_val = utils.getJsonString(obj, "find") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing find field\"}");
         return;
     };
-    const replace_val = utils.extractJsonField(allocator, body, "replace") orelse {
+    const replace_val = utils.getJsonString(obj, "replace") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing replace field\"}");
         return;
     };
-    const force_str = utils.extractJsonField(allocator, body, "force") orelse "false";
+    const force_str = utils.getJsonString(obj, "force") orelse "false";
     const force = std.mem.eql(u8, force_str, "true");
 
     if (!findColumnInTable(table_info, column)) {

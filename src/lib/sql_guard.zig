@@ -10,6 +10,7 @@
 // `WITH x AS (DELETE ...) SELECT * FROM x` are caught by containsWriteKeyword.
 
 const std = @import("std");
+const utils = @import("utils");
 
 pub const SqlGuardResult = struct {
     is_destructive: bool,
@@ -23,21 +24,21 @@ pub fn analyzeSql(sql: []const u8) SqlGuardResult {
     if (i >= sql.len) return .{ .is_destructive = false, .operation = "", .warning = "" };
     const rest = sql[i..];
 
-    if (rest.len >= 4 and matchesIgnoreCase(rest, "DROP")) {
+    if (rest.len >= 4 and utils.matchesIgnoreCase(rest, "DROP")) {
         return .{ .is_destructive = true, .operation = "DROP", .warning = "This will permanently drop the object. This cannot be undone." };
     }
-    if (rest.len >= 8 and matchesIgnoreCase(rest, "TRUNCATE")) {
+    if (rest.len >= 8 and utils.matchesIgnoreCase(rest, "TRUNCATE")) {
         return .{ .is_destructive = true, .operation = "TRUNCATE", .warning = "This will delete ALL rows from the table. This cannot be undone." };
     }
-    if (rest.len >= 5 and matchesIgnoreCase(rest, "ALTER")) {
+    if (rest.len >= 5 and utils.matchesIgnoreCase(rest, "ALTER")) {
         return .{ .is_destructive = true, .operation = "ALTER", .warning = "This will modify the table schema. Review carefully." };
     }
-    if (rest.len >= 6 and matchesIgnoreCase(rest, "DELETE")) {
+    if (rest.len >= 6 and utils.matchesIgnoreCase(rest, "DELETE")) {
         if (!containsIgnoreCaseWord(sql, "WHERE")) {
             return .{ .is_destructive = true, .operation = "DELETE", .warning = "DELETE without WHERE clause will delete ALL rows." };
         }
     }
-    if (rest.len >= 6 and matchesIgnoreCase(rest, "UPDATE")) {
+    if (rest.len >= 6 and utils.matchesIgnoreCase(rest, "UPDATE")) {
         if (!containsIgnoreCaseWord(sql, "WHERE")) {
             return .{ .is_destructive = true, .operation = "UPDATE", .warning = "UPDATE without WHERE clause will update ALL rows." };
         }
@@ -135,19 +136,19 @@ pub fn isSqlReadSafe(sql: []const u8) bool {
     if (i >= sql.len) return false;
     const rest = sql[i..];
 
-    if (rest.len >= 6 and matchesIgnoreCase(rest[0..6], "SELECT")) return true;
-    if (rest.len >= 4 and matchesIgnoreCase(rest[0..4], "SHOW")) return true;
+    if (rest.len >= 6 and utils.matchesIgnoreCase(rest[0..6], "SELECT")) return true;
+    if (rest.len >= 4 and utils.matchesIgnoreCase(rest[0..4], "SHOW")) return true;
     // EXPLAIN ANALYZE actually executes the inner query, so check it for writes
-    if (rest.len >= 7 and matchesIgnoreCase(rest[0..7], "EXPLAIN")) {
+    if (rest.len >= 7 and utils.matchesIgnoreCase(rest[0..7], "EXPLAIN")) {
         var ei: usize = 7;
         while (i + ei < sql.len and (sql[i + ei] == ' ' or sql[i + ei] == '\t' or sql[i + ei] == '\n' or sql[i + ei] == '\r')) ei += 1;
-        if (rest.len >= ei + 7 and matchesIgnoreCase(rest[ei .. ei + 7], "ANALYZE")) {
+        if (rest.len >= ei + 7 and utils.matchesIgnoreCase(rest[ei .. ei + 7], "ANALYZE")) {
             return !containsWriteKeyword(sql);
         }
         return true;
     }
 
-    if (rest.len >= 4 and matchesIgnoreCase(rest[0..4], "WITH")) {
+    if (rest.len >= 4 and utils.matchesIgnoreCase(rest[0..4], "WITH")) {
         return !containsWriteKeyword(sql);
     }
 
@@ -216,7 +217,7 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
         const at_word_start = (i == 0) or !isAlphanumUnderscore(sql[i - 1]);
         if (at_word_start) {
             for (keywords) |kw| {
-                if (i + kw.len <= sql.len and matchesIgnoreCase(sql[i .. i + kw.len], kw)) {
+                if (i + kw.len <= sql.len and utils.matchesIgnoreCase(sql[i .. i + kw.len], kw)) {
                     const end = i + kw.len;
                     if (end >= sql.len or !isAlphanumUnderscore(sql[end])) {
                         return true;
@@ -229,22 +230,11 @@ pub fn containsWriteKeyword(sql: []const u8) bool {
     return false;
 }
 
-fn matchesIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (haystack.len < needle.len) return false;
-    for (needle, 0..) |c, idx| {
-        const h = haystack[idx];
-        const lower_h = if (h >= 'A' and h <= 'Z') h + 32 else h;
-        const lower_c = if (c >= 'A' and c <= 'Z') c + 32 else c;
-        if (lower_h != lower_c) return false;
-    }
-    return true;
-}
-
 pub fn containsIgnoreCaseWord(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;
     const limit = haystack.len - needle.len + 1;
     for (0..limit) |idx| {
-        if (matchesIgnoreCase(haystack[idx..], needle)) {
+        if (utils.matchesIgnoreCase(haystack[idx..], needle)) {
             const before_ok = idx == 0 or !isAlpha(haystack[idx - 1]);
             const after_idx = idx + needle.len;
             const after_ok = after_idx >= haystack.len or !isAlpha(haystack[after_idx]);

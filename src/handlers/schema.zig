@@ -28,19 +28,8 @@ fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
 }
 
 fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8, conninfo: []const u8, color: []const u8) ConnectionFileError![]u8 {
-    var buf = std.ArrayList(u8){};
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
-    w.writeAll("{\"id\":") catch return error.OutOfMemory;
-    w.print("{d}", .{id}) catch return error.OutOfMemory;
-    w.writeAll(",\"name\":\"") catch return error.OutOfMemory;
-    utils.writeJsonEscaped(w, name) catch return error.OutOfMemory;
-    w.writeAll("\",\"conninfo\":\"") catch return error.OutOfMemory;
-    utils.writeJsonEscaped(w, conninfo) catch return error.OutOfMemory;
-    w.writeAll("\",\"color\":\"") catch return error.OutOfMemory;
-    utils.writeJsonEscaped(w, color) catch return error.OutOfMemory;
-    w.writeAll("\"}") catch return error.OutOfMemory;
-    return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    const entry = .{ .id = id, .name = name, .conninfo = conninfo, .color = color };
+    return std.json.Stringify.valueAlloc(allocator, entry, .{}) catch return error.OutOfMemory;
 }
 
 fn getConfigDir(allocator: std.mem.Allocator) ConnectionFileError![]u8 {
@@ -155,21 +144,15 @@ fn writeConnectionsFile(allocator: std.mem.Allocator, data: []const u8) Connecti
     file.writeAll(data) catch return error.WriteFailed;
 }
 
-fn findMaxConnectionId(file_content: []const u8) u64 {
+const ConnectionEntry = struct { id: u64 = 0, name: []const u8 = "", conninfo: []const u8 = "", color: []const u8 = "" };
+const ConnectionsFile = struct { connections: []const ConnectionEntry = &.{} };
+
+fn findMaxConnectionId(allocator: std.mem.Allocator, file_content: []const u8) u64 {
+    const parsed = std.json.parseFromSlice(ConnectionsFile, allocator, file_content, .{ .ignore_unknown_fields = true }) catch return 0;
+    defer parsed.deinit();
     var max_id: u64 = 0;
-    var pos: usize = 0;
-    while (pos < file_content.len) {
-        const id_key = "\"id\":";
-        const idx = std.mem.indexOfPos(u8, file_content, pos, id_key) orelse break;
-        var vp = idx + id_key.len;
-        while (vp < file_content.len and file_content[vp] == ' ') vp += 1;
-        var end = vp;
-        while (end < file_content.len and file_content[end] >= '0' and file_content[end] <= '9') end += 1;
-        if (end > vp) {
-            const id_val = std.fmt.parseInt(u64, file_content[vp..end], 10) catch 0;
-            if (id_val > max_id) max_id = id_val;
-        }
-        pos = end;
+    for (parsed.value.connections) |conn| {
+        if (conn.id > max_id) max_id = conn.id;
     }
     return max_id;
 }
@@ -179,12 +162,12 @@ pub fn handleConnect(handler: *web.Handler, req: *httpz.Request, res: *httpz.Res
     const allocator = state.allocator;
     const arena = res.arena;
 
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const conninfo_str = utils.extractJsonField(arena, body, "conninfo") orelse {
+    const conninfo_str = utils.getJsonString(obj, "conninfo") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing conninfo field\"}");
         return;
     };
@@ -449,13 +432,12 @@ pub fn handleHealthCheck(handler: *web.Handler, _: *httpz.Request, res: *httpz.R
 
 pub fn handleReadOnlyToggle(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
-    const arena = res.arena;
 
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
-    const enabled_str = utils.extractJsonField(arena, body, "enabled") orelse {
+    const enabled_str = utils.getJsonString(obj, "enabled") orelse {
         state.flags.read_only = !state.flags.read_only;
         var resp_buf: [64]u8 = undefined;
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
@@ -488,20 +470,20 @@ pub fn handlePostConnection(handler: *web.Handler, req: *httpz.Request, res: *ht
     const state = handler.state;
     const allocator = res.arena;
 
-    const body = req.body() orelse {
+    const obj = (try req.jsonObject()) orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const name = utils.extractJsonField(allocator, body, "name") orelse {
+    const name = utils.getJsonString(obj, "name") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing name field\"}");
         return;
     };
-    const conninfo = utils.extractJsonField(allocator, body, "conninfo") orelse {
+    const conninfo = utils.getJsonString(obj, "conninfo") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing conninfo field\"}");
         return;
     };
-    const color = utils.extractJsonField(allocator, body, "color") orelse "gray";
+    const color = utils.getJsonString(obj, "color") orelse "gray";
 
     const existing = readConnectionsFile(allocator) catch {
         const entry = formatConnectionJson(allocator, 1, name, conninfo, color) catch {
@@ -526,7 +508,7 @@ pub fn handlePostConnection(handler: *web.Handler, req: *httpz.Request, res: *ht
         return;
     };
 
-    const max_id = findMaxConnectionId(existing);
+    const max_id = findMaxConnectionId(allocator, existing);
     const new_id = @max(max_id + 1, state.next_connection_id);
     state.next_connection_id = new_id + 1;
 
@@ -661,95 +643,29 @@ pub fn handleDeleteConnection(handler: *web.Handler, req: *httpz.Request, res: *
     sendJsonResponse(res, "{\"ok\":true}");
 }
 
-test "formatConnectionJson: basic entry" {
+test "formatConnectionJson: roundtrips through std.json" {
     const allocator = std.testing.allocator;
-    const json = try formatConnectionJson(allocator, 1, "My DB", "postgresql://localhost/test", "green");
+    const json = try formatConnectionJson(allocator, 1, "My DB", "pg://localhost", "green");
     defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"My DB\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"conninfo\":\"postgresql://localhost/test\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"color\":\"green\"") != null);
+    const parsed = try std.json.parseFromSlice(ConnectionEntry, allocator, json, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(@as(u64, 1), parsed.value.id);
+    try std.testing.expectEqualStrings("My DB", parsed.value.name);
 }
 
-test "formatConnectionJson: escapes special characters in name" {
-    const allocator = std.testing.allocator;
-    const json = try formatConnectionJson(allocator, 2, "Test \"DB\"", "pg://localhost", "blue");
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "Test \\\"DB\\\"") != null);
-}
-
-test "formatConnectionJson: large ID" {
-    const allocator = std.testing.allocator;
-    const json = try formatConnectionJson(allocator, 999999, "Prod", "pg://prod", "red");
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":999999") != null);
-}
-
-test "formatConnectionJson: empty name and conninfo" {
-    const allocator = std.testing.allocator;
-    const json = try formatConnectionJson(allocator, 0, "", "", "");
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":0") != null);
-}
-
-test "formatConnectionJson: name with quotes and backslashes" {
-    const allocator = std.testing.allocator;
-    const json = try formatConnectionJson(allocator, 1, "my\\\"db", "pg://x", "red");
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":1") != null);
-}
-
-test "formatConnectionJson: id zero" {
-    const allocator = std.testing.allocator;
-    const json = try formatConnectionJson(allocator, 0, "test", "pg://test", "gray");
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":0") != null);
-}
-
-test "findMaxConnectionId: no ids" {
-    const result = findMaxConnectionId("{\"connections\":[]}");
-    try std.testing.expectEqual(@as(u64, 0), result);
-}
-
-test "findMaxConnectionId: single id" {
-    const result = findMaxConnectionId("{\"connections\":[{\"id\":5,\"name\":\"test\"}]}");
-    try std.testing.expectEqual(@as(u64, 5), result);
-}
-
-test "findMaxConnectionId: multiple ids" {
-    const result = findMaxConnectionId("{\"connections\":[{\"id\":3},{\"id\":7},{\"id\":2}]}");
+test "findMaxConnectionId: finds max across multiple entries" {
+    const result = findMaxConnectionId(std.testing.allocator, "{\"connections\":[{\"id\":3},{\"id\":7},{\"id\":2}]}");
     try std.testing.expectEqual(@as(u64, 7), result);
 }
 
-test "findMaxConnectionId: empty string" {
-    const result = findMaxConnectionId("");
+test "findMaxConnectionId: empty connections returns zero" {
+    const result = findMaxConnectionId(std.testing.allocator, "{\"connections\":[]}");
     try std.testing.expectEqual(@as(u64, 0), result);
 }
 
-test "findMaxConnectionId: id at boundaries" {
-    const result = findMaxConnectionId("{\"id\":100}");
-    try std.testing.expectEqual(@as(u64, 100), result);
-}
-
-test "findMaxConnectionId: multiple ids with whitespace" {
-    const result = findMaxConnectionId("{\"connections\":[{\"id\": 3},{\"id\": 7}]}");
-    try std.testing.expectEqual(@as(u64, 7), result);
-}
-
-test "findMaxConnectionId: id with leading zeros" {
-    const result = findMaxConnectionId("{\"id\":007}");
-    try std.testing.expectEqual(@as(u64, 7), result);
-}
-
-test "findMaxConnectionId: id key without number" {
-    const result = findMaxConnectionId("{\"id\":\"string\"}");
+test "findMaxConnectionId: invalid json returns zero" {
+    const result = findMaxConnectionId(std.testing.allocator, "garbage");
     try std.testing.expectEqual(@as(u64, 0), result);
-}
-
-test "findMaxConnectionId: very large id" {
-    const result = findMaxConnectionId("{\"id\":18446744073709551614}");
-    try std.testing.expect(result > 0);
 }
 
 test "getConfigFilePath: returns path ending with connections.json" {

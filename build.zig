@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod_sql_guard.addImport("utils", mod_utils);
     const mod_postgres = b.createModule(.{
         .root_source_file = b.path("src/server/postgres.zig"),
         .target = target,
