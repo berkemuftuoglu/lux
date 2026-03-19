@@ -1,0 +1,40 @@
+.status-bar {
+	height: 24px;
+	background: var(--bg-surface);
+	border-top: 1px solid var(--border);
+	padding: 0 14px;
+	font-size: 10px;
+	color: var(--text-muted);
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-shrink: 0;
+	font-family: var(--font-mono);
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	transition:
+		background var(--transition),
+		border-color var(--transition);
+}
+
+.status-bar .dot {
+	width: 5px;
+	height: 5px;
+	border-radius: 50%;
+	background: var(--error);
+	transition: background 0.3s;
+}
+
+.status-bar .dot.ok {
+	background: var(--success);
+}
+
+.status-bar .ro-badge {
+	color: var(--warning);
+	font-weight: 600;
+	display: none;
+}
+
+.status-bar .ro-badge.show {
+	display: inline;
+}

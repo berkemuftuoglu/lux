@@ -24,6 +24,15 @@
       "complexity": {
         "noImportantStyles": "off"
       },
+      "nursery": {
+        "noExcessiveLinesPerFile": {
+          "level": "error",
+          "options": {
+            "maxLines": 600,
+            "skipBlankLines": true
+          }
+        }
+      },
       "suspicious": {
         "noVar": "error",
         "noConsole": "error",

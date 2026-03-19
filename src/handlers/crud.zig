@@ -252,7 +252,7 @@ pub fn sendTableDataJson(
     meta: TableDataMeta,
 ) !void {
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
+    // no defer deinit — res.arena owns this memory until the response is sent
     const w = json_buf.writer(allocator);
 
     try w.print("{{\"total\":{d},\"limit\":{d},\"offset\":{d},\"count_exact\":{s},\"pk_mode\":\"{s}\",\"pagination\":\"{s}\",", .{
@@ -305,7 +305,6 @@ pub fn sendTableDataJson(
 
 pub fn sendQueryResultJson(allocator: std.mem.Allocator, res: *httpz.Response, pg_result: *postgres.QueryResult) !void {
     var json_buf = std.ArrayList(u8){};
-    defer json_buf.deinit(allocator);
     const w = json_buf.writer(allocator);
 
     try w.print("{{\"row_count\":{d},", .{pg_result.n_rows});

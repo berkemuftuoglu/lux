@@ -410,10 +410,17 @@ function bumpJournal() {
 	const badge = $('journal-badge');
 	badge.textContent = State.journalCount;
 	badge.classList.add('show');
+	const railBadge = $('rail-journal-badge');
+	if (railBadge) {
+		railBadge.textContent = State.journalCount;
+		railBadge.classList.add('show');
+	}
 }
 function clearJournalBadge() {
 	State.journalCount = 0;
 	$('journal-badge').classList.remove('show');
+	const railBadge = $('rail-journal-badge');
+	if (railBadge) railBadge.classList.remove('show');
 }
 
 async function loadJournal() {

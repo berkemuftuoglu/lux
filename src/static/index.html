@@ -5,8 +5,23 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="description" content="Lux — lightweight, local-first PostgreSQL web client">
 <title>Lux</title>
-<link rel="stylesheet" href="/css/styles.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='2' y='2' width='20' height='20' rx='6' fill='%237c8df4'/><path d='M8 7v10h7' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
+<link rel="stylesheet" href="/css/variables.css">
+<link rel="stylesheet" href="/css/base.css">
+<link rel="stylesheet" href="/css/layout.css">
+<link rel="stylesheet" href="/css/sidebar.css">
+<link rel="stylesheet" href="/css/tabs.css">
+<link rel="stylesheet" href="/css/toolbar.css">
+<link rel="stylesheet" href="/css/grid.css">
+<link rel="stylesheet" href="/css/pagination.css">
+<link rel="stylesheet" href="/css/sql-editor.css">
+<link rel="stylesheet" href="/css/er-diagram.css">
+<link rel="stylesheet" href="/css/journal.css">
+<link rel="stylesheet" href="/css/status-bar.css">
+<link rel="stylesheet" href="/css/modals.css">
+<link rel="stylesheet" href="/css/toast.css">
+<link rel="stylesheet" href="/css/overlays.css">
+<link rel="stylesheet" href="/css/utilities.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect x='2' y='2' width='20' height='20' rx='6' fill='%239d4300'/><path d='M8 7v10h7' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/></svg>">
 </head>
 <body>
 
@@ -15,11 +30,8 @@
 
 <!-- Header -->
 <header class="header">
-  <button class="sidebar-toggle" id="sidebar-toggle" aria-label="Toggle sidebar">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
-  </button>
-  <div class="logo">
-    <svg viewBox="0 0 24 24" fill="none"><rect x="2" y="2" width="20" height="20" rx="6" fill="url(#lg)"/><path d="M8 7v10h7" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="lg" x1="2" y1="2" x2="22" y2="22"><stop stop-color="#7c8df4"/><stop offset="1" stop-color="#5a6ad6"/></linearGradient></defs></svg>
+<div class="logo">
+    <svg viewBox="0 0 24 24" fill="none"><rect x="2" y="2" width="20" height="20" rx="6" fill="url(#lg)"/><path d="M8 7v10h7" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="lg" x1="2" y1="2" x2="22" y2="22"><stop stop-color="#9d4300"/><stop offset="1" stop-color="#f97316"/></linearGradient></defs></svg>
     Lux
   </div>
   <span class="version-badge">v0.1</span>
@@ -44,6 +56,36 @@
 
 <!-- Main -->
 <main class="main" aria-label="Main content">
+
+  <!-- Nav Rail -->
+  <aside class="nav-rail" id="nav-rail" aria-label="Main navigation">
+    <span class="rail-logo">Lux</span>
+    <span class="rail-version">v0.1</span>
+    <nav>
+      <button class="rail-btn active" data-rail="tables" title="Table Browser" aria-label="Table Browser">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        <span class="rail-label">Tables</span>
+      </button>
+      <button class="rail-btn" data-rail="sql" title="SQL Editor" aria-label="SQL Editor">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+        <span class="rail-label">SQL</span>
+      </button>
+      <button class="rail-btn" data-rail="er" title="Schema" aria-label="Schema">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="3" width="8" height="6" rx="1"/><rect x="14" y="3" width="8" height="6" rx="1"/><rect x="8" y="15" width="8" height="6" rx="1"/><line x1="6" y1="9" x2="12" y2="15"/><line x1="18" y1="9" x2="12" y2="15"/></svg>
+        <span class="rail-label">Schema</span>
+      </button>
+      <button class="rail-btn" data-rail="journal" title="Journal" aria-label="Journal">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span class="rail-label">Journal</span>
+        <span class="badge rail-badge" id="rail-journal-badge">0</span>
+      </button>
+      <div class="rail-spacer"></div>
+      <button class="rail-btn" id="rail-settings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        <span class="rail-label">Settings</span>
+      </button>
+    </nav>
+  </aside>
 
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar" aria-label="Tables sidebar">

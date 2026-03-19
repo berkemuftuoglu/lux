@@ -1,0 +1,242 @@
+.header {
+	height: 48px;
+	background: var(--bg-elevated);
+	border-bottom: 1px solid var(--border);
+	display: flex;
+	align-items: center;
+	padding: 0 20px;
+	gap: 10px;
+	flex-shrink: 0;
+	z-index: 10;
+	transition:
+		background var(--transition),
+		border-color var(--transition);
+	position: relative;
+}
+
+.logo {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 17px;
+	font-weight: 900;
+	color: var(--accent);
+	letter-spacing: -0.04em;
+}
+
+.logo svg {
+	width: 22px;
+	height: 22px;
+	flex-shrink: 0;
+}
+
+.header-spacer {
+	flex: 1;
+}
+
+.header-btn {
+	height: 32px;
+	padding: 0 12px;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 5px;
+	transition: all var(--transition);
+	font-family: var(--font-ui);
+}
+
+.header-btn:hover {
+	color: var(--text-primary);
+	background: var(--bg-hover);
+}
+
+.header-btn.active {
+	background: var(--accent-muted);
+	color: var(--accent);
+}
+
+.header-btn svg {
+	width: 14px;
+	height: 14px;
+}
+
+.conn-dot {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--error);
+	flex-shrink: 0;
+	transition: background 0.3s;
+	box-shadow: 0 0 0 2px rgba(244, 112, 103, 0.2);
+}
+
+.conn-dot.connected {
+	background: var(--success);
+	box-shadow: 0 0 0 2px rgba(74, 222, 128, 0.2);
+}
+
+.version-badge {
+	font-size: 10px;
+	color: var(--text-muted);
+	font-family: var(--font-mono);
+	opacity: 0.6;
+}
+
+.main {
+	flex: 1;
+	display: flex;
+	overflow: hidden;
+}
+
+.nav-rail {
+	width: var(--nav-rail-width);
+	background: var(--bg-surface);
+	border-right: 1px solid var(--border);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	padding: 16px 0;
+	flex-shrink: 0;
+	z-index: 15;
+	transition: background var(--transition), border-color var(--transition);
+}
+
+.nav-rail .rail-logo {
+	font-size: 18px;
+	font-weight: 900;
+	color: var(--accent);
+	letter-spacing: -0.05em;
+	margin-bottom: 6px;
+	cursor: default;
+	user-select: none;
+}
+
+.nav-rail .rail-version {
+	font-size: 9px;
+	color: var(--text-muted);
+	font-family: var(--font-mono);
+	opacity: 0.5;
+	margin-bottom: 20px;
+}
+
+.nav-rail nav {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 4px;
+	width: 100%;
+	flex: 1;
+}
+
+.nav-rail .rail-btn {
+	width: 52px;
+	height: 52px;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 3px;
+	background: transparent;
+	border: none;
+	border-left: 2px solid transparent;
+	color: var(--text-muted);
+	cursor: pointer;
+	border-radius: 0;
+	transition: all 0.12s;
+	padding: 0;
+	opacity: 0.7;
+	font-family: var(--font-ui);
+}
+
+.nav-rail .rail-btn svg {
+	width: 20px;
+	height: 20px;
+	stroke-width: 1.5;
+}
+
+.nav-rail .rail-btn .rail-label {
+	font-size: 9px;
+	font-weight: 500;
+	letter-spacing: 0.01em;
+	line-height: 1;
+}
+
+.nav-rail .rail-btn:hover {
+	opacity: 1;
+	color: var(--text-secondary);
+	background: var(--bg-hover);
+}
+
+.nav-rail .rail-btn.active {
+	opacity: 1;
+	color: var(--accent);
+	border-left-color: var(--accent);
+	font-weight: 700;
+}
+
+.nav-rail .rail-spacer {
+	flex: 1;
+}
+
+.breadcrumb {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 13px;
+	font-weight: 500;
+}
+
+.breadcrumb .bc-sep {
+	color: var(--text-muted);
+	opacity: 0.4;
+	font-size: 11px;
+}
+
+.breadcrumb .bc-item {
+	color: var(--text-muted);
+}
+
+.breadcrumb .bc-item.current {
+	color: var(--accent);
+	font-weight: 600;
+}
+
+.nav-rail .rail-btn .rail-badge {
+	min-width: 14px;
+	height: 14px;
+	padding: 0 4px;
+	background: var(--error);
+	color: #fff;
+	font-size: 9px;
+	font-weight: 700;
+	border-radius: 7px;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	position: absolute;
+	top: 4px;
+	right: 4px;
+}
+
+.nav-rail .rail-btn .rail-badge.show {
+	display: flex;
+}
+
+.nav-rail .rail-btn {
+	position: relative;
+}
+
+.tab-bar {
+	display: none;
+}
+
+.header .logo,
+.header .version-badge {
+	display: none;
+}

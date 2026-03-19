@@ -1,0 +1,92 @@
+.toolbar {
+	height: 40px;
+	background: var(--bg-elevated);
+	border-bottom: 1px solid var(--border);
+	display: flex;
+	align-items: center;
+	padding: 0 14px;
+	gap: 8px;
+	flex-shrink: 0;
+	transition:
+		background var(--transition),
+		border-color var(--transition);
+	position: relative;
+	z-index: 1;
+}
+
+.toolbar-title {
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--text-bright);
+	margin-right: 2px;
+	font-family: var(--font-mono);
+	letter-spacing: -0.01em;
+}
+
+.toolbar-info {
+	font-size: 11px;
+	color: var(--text-muted);
+	font-family: var(--font-mono);
+	opacity: 0.7;
+}
+
+.toolbar-spacer {
+	flex: 1;
+}
+
+.toolbar-btn {
+	height: 28px;
+	padding: 0 10px;
+	background: transparent;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	color: var(--text-muted);
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	transition: all var(--transition);
+	font-family: var(--font-ui);
+	white-space: nowrap;
+}
+
+.toolbar-btn:hover {
+	color: var(--text-primary);
+	background: var(--bg-hover);
+}
+
+.btn:active,
+.toolbar-btn:active {
+	transform: scale(0.97);
+	transition: transform 0.05s ease-in;
+}
+
+.toolbar-btn.primary {
+	background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+	color: var(--accent-text);
+	border-color: transparent;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+	box-shadow: 0 2px 0 0 rgba(157, 67, 0, 0.15);
+}
+
+.toolbar-btn.primary:hover {
+	background: linear-gradient(135deg, var(--accent-hover), var(--accent));
+	border-color: transparent;
+	transform: translateY(-1px);
+	box-shadow: 0 3px 8px rgba(157, 67, 0, 0.2);
+}
+
+.toolbar-btn svg {
+	width: 12px;
+	height: 12px;
+}
+
+.toolbar-sep {
+	width: 1px;
+	height: 16px;
+	background: var(--border);
+	margin: 0 2px;
+}

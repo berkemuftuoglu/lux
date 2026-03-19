@@ -25,7 +25,22 @@ fn readStaticFile(allocator: std.mem.Allocator, disk_path: []const u8, embedded:
 }
 
 const static_files = .{
-    .{ "/css/styles.css", "text/css", "src/static/css/styles.css", @embedFile("static/css/styles.css") },
+    .{ "/css/variables.css", "text/css", "src/static/css/variables.css", @embedFile("static/css/variables.css") },
+    .{ "/css/base.css", "text/css", "src/static/css/base.css", @embedFile("static/css/base.css") },
+    .{ "/css/layout.css", "text/css", "src/static/css/layout.css", @embedFile("static/css/layout.css") },
+    .{ "/css/sidebar.css", "text/css", "src/static/css/sidebar.css", @embedFile("static/css/sidebar.css") },
+    .{ "/css/tabs.css", "text/css", "src/static/css/tabs.css", @embedFile("static/css/tabs.css") },
+    .{ "/css/toolbar.css", "text/css", "src/static/css/toolbar.css", @embedFile("static/css/toolbar.css") },
+    .{ "/css/grid.css", "text/css", "src/static/css/grid.css", @embedFile("static/css/grid.css") },
+    .{ "/css/pagination.css", "text/css", "src/static/css/pagination.css", @embedFile("static/css/pagination.css") },
+    .{ "/css/sql-editor.css", "text/css", "src/static/css/sql-editor.css", @embedFile("static/css/sql-editor.css") },
+    .{ "/css/er-diagram.css", "text/css", "src/static/css/er-diagram.css", @embedFile("static/css/er-diagram.css") },
+    .{ "/css/journal.css", "text/css", "src/static/css/journal.css", @embedFile("static/css/journal.css") },
+    .{ "/css/status-bar.css", "text/css", "src/static/css/status-bar.css", @embedFile("static/css/status-bar.css") },
+    .{ "/css/modals.css", "text/css", "src/static/css/modals.css", @embedFile("static/css/modals.css") },
+    .{ "/css/toast.css", "text/css", "src/static/css/toast.css", @embedFile("static/css/toast.css") },
+    .{ "/css/overlays.css", "text/css", "src/static/css/overlays.css", @embedFile("static/css/overlays.css") },
+    .{ "/css/utilities.css", "text/css", "src/static/css/utilities.css", @embedFile("static/css/utilities.css") },
     .{ "/js/state.js", "application/javascript", "src/static/js/state.js", @embedFile("static/js/state.js") },
     .{ "/js/utils.js", "application/javascript", "src/static/js/utils.js", @embedFile("static/js/utils.js") },
     .{ "/js/connection.js", "application/javascript", "src/static/js/connection.js", @embedFile("static/js/connection.js") },
@@ -470,8 +485,8 @@ test "isValidPath: space 0x20 is valid" {
     try std.testing.expect(isValidPath("/api/search?q=hello world"));
 }
 
-test "static_files tuple: has 14 JS/CSS entries" {
-    try std.testing.expectEqual(@as(usize, 14), static_files.len);
+test "static_files tuple: has 29 JS/CSS entries" {
+    try std.testing.expectEqual(@as(usize, 29), static_files.len);
 }
 
 comptime {

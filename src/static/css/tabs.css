@@ -1,0 +1,98 @@
+.tab-bar {
+	height: 36px;
+	background: var(--bg-surface);
+	border-bottom: 1px solid var(--border);
+	display: none;
+	align-items: stretch;
+	padding: 0 8px;
+	gap: 0;
+	flex-shrink: 0;
+	transition:
+		background var(--transition),
+		border-color var(--transition);
+}
+
+.tab {
+	height: 100%;
+	padding: 0 16px;
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--text-muted);
+	background: transparent;
+	border: none;
+	border-bottom: 2px solid transparent;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+	transition:
+		color 0.12s,
+		border-color 0.15s,
+		background 0.12s;
+	font-family: var(--font-ui);
+	position: relative;
+}
+
+.tab:hover {
+	color: var(--text-secondary);
+	background: var(--bg-hover);
+}
+
+.tab.active {
+	color: var(--text-bright);
+	font-weight: 600;
+	border-bottom-color: var(--accent);
+}
+
+.tab svg {
+	width: 13px;
+	height: 13px;
+	opacity: 0.4;
+}
+
+.tab.active svg {
+	opacity: 0.75;
+}
+
+.tab .badge {
+	min-width: 16px;
+	height: 16px;
+	padding: 0 5px;
+	background: var(--error);
+	color: var(--accent-text);
+	font-size: 10px;
+	font-weight: 700;
+	border-radius: 8px;
+	display: none;
+	align-items: center;
+	justify-content: center;
+}
+
+.tab .badge.show {
+	display: flex;
+}
+
+.tab-panel {
+	flex: 1;
+	display: none;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+@keyframes tabFadeIn {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+.tab-panel.active {
+	display: flex;
+	animation: tabFadeIn 0.15s ease-out;
+}

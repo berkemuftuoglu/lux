@@ -32,21 +32,40 @@ else if (window.matchMedia('(prefers-color-scheme: light)').matches)
 	setTheme('light');
 else setTheme('dark');
 
-$$('.tab').forEach((tab) => {
-	tab.addEventListener('click', () => {
-		$$('.tab').forEach((t) => {
-			t.classList.remove('active');
-			t.setAttribute('aria-selected', 'false');
-		});
-		$$('.tab-panel').forEach((p) => p.classList.remove('active'));
+function switchTab(tabName) {
+	$$('.tab').forEach((t) => {
+		t.classList.remove('active');
+		t.setAttribute('aria-selected', 'false');
+	});
+	$$('.tab-panel').forEach((p) => p.classList.remove('active'));
+	const tab = document.querySelector(`.tab[data-tab="${tabName}"]`);
+	if (tab) {
 		tab.classList.add('active');
 		tab.setAttribute('aria-selected', 'true');
-		$(`panel-${tab.dataset.tab}`).classList.add('active');
-		if (tab.dataset.tab === 'journal') {
-			loadJournal();
-			clearJournalBadge();
-		}
-		if (tab.dataset.tab === 'er') drawER();
+	}
+	const panel = $(`panel-${tabName}`);
+	if (panel) panel.classList.add('active');
+	if (tabName === 'journal') {
+		loadJournal();
+		clearJournalBadge();
+	}
+	if (tabName === 'er') drawER();
+}
+
+$$('.tab').forEach((tab) => {
+	tab.addEventListener('click', () => {
+		switchTab(tab.dataset.tab);
+		$$('.rail-btn').forEach((r) => r.classList.remove('active'));
+		const railBtn = document.querySelector(`.rail-btn[data-rail="${tab.dataset.tab}"]`);
+		if (railBtn) railBtn.classList.add('active');
+	});
+});
+
+$$('.rail-btn[data-rail]').forEach((btn) => {
+	btn.addEventListener('click', () => {
+		$$('.rail-btn').forEach((r) => r.classList.remove('active'));
+		btn.classList.add('active');
+		switchTab(btn.dataset.rail);
 	});
 });
 
