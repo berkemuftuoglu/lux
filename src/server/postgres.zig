@@ -1,7 +1,5 @@
 const std = @import("std");
-const c = @cImport({
-    @cInclude("libpq-fe.h");
-});
+const pg = @import("pg");
 
 const log = std.log.scoped(.postgres);
 
@@ -13,71 +11,6 @@ pub const PgError = error{
     InvalidData,
 };
 
-pub const ConnStatus = enum {
-    ok,
-    bad,
-    unknown,
-
-    pub fn fromCInt(value: c_uint) ConnStatus {
-        return switch (value) {
-            c.CONNECTION_OK => .ok,
-            c.CONNECTION_BAD => .bad,
-            else => .unknown,
-        };
-    }
-};
-
-pub const ExecStatus = enum {
-    empty_query,
-    command_ok,
-    tuples_ok,
-    copy_out,
-    copy_in,
-    bad_response,
-    nonfatal_error,
-    fatal_error,
-    copy_both,
-    single_tuple,
-    pipeline_sync,
-    pipeline_aborted,
-    unknown,
-
-    pub fn fromCInt(value: c_uint) ExecStatus {
-        return switch (value) {
-            c.PGRES_EMPTY_QUERY => .empty_query,
-            c.PGRES_COMMAND_OK => .command_ok,
-            c.PGRES_TUPLES_OK => .tuples_ok,
-            c.PGRES_COPY_OUT => .copy_out,
-            c.PGRES_COPY_IN => .copy_in,
-            c.PGRES_BAD_RESPONSE => .bad_response,
-            c.PGRES_NONFATAL_ERROR => .nonfatal_error,
-            c.PGRES_FATAL_ERROR => .fatal_error,
-            c.PGRES_COPY_BOTH => .copy_both,
-            c.PGRES_SINGLE_TUPLE => .single_tuple,
-            else => .unknown,
-        };
-    }
-};
-
-pub const TransactionStatus = enum {
-    idle,
-    active,
-    in_trans,
-    in_error,
-    unknown,
-
-    pub fn fromCInt(value: c_uint) TransactionStatus {
-        return switch (value) {
-            c.PQTRANS_IDLE => .idle,
-            c.PQTRANS_ACTIVE => .active,
-            c.PQTRANS_INTRANS => .in_trans,
-            c.PQTRANS_INERROR => .in_error,
-            c.PQTRANS_UNKNOWN => .unknown,
-            else => .unknown,
-        };
-    }
-};
-
 pub const PgErrorFields = struct {
     severity: ?[]const u8,
     code: ?[]const u8,
@@ -85,321 +18,6 @@ pub const PgErrorFields = struct {
     detail: ?[]const u8,
     hint: ?[]const u8,
 };
-
-// Returned slices point into libpq memory — only valid until PQclear.
-fn extractErrorFields(res: *c.PGresult) PgErrorFields {
-    return .{
-        .severity = blk: {
-            const p = c.PQresultErrorField(res, c.PG_DIAG_SEVERITY);
-            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
-        },
-        .code = blk: {
-            const p = c.PQresultErrorField(res, c.PG_DIAG_SQLSTATE);
-            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
-        },
-        .message = blk: {
-            const p = c.PQresultErrorField(res, c.PG_DIAG_MESSAGE_PRIMARY);
-            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
-        },
-        .detail = blk: {
-            const p = c.PQresultErrorField(res, c.PG_DIAG_MESSAGE_DETAIL);
-            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
-        },
-        .hint = blk: {
-            const p = c.PQresultErrorField(res, c.PG_DIAG_MESSAGE_HINT);
-            break :blk if (p != null) std.mem.sliceTo(p, 0) else null;
-        },
-    };
-}
-
-pub const PgConnection = struct {
-    conn: *c.PGconn,
-    last_error_fields: ?PgErrorFields = null,
-
-    pub fn connect(conninfo: [*:0]const u8) PgError!PgConnection {
-        const conn = c.PQconnectdb(conninfo) orelse return error.ConnectionFailed;
-        if (ConnStatus.fromCInt(c.PQstatus(conn)) != .ok) {
-            c.PQfinish(conn);
-            return error.ConnectionFailed;
-        }
-        return PgConnection{ .conn = conn };
-    }
-
-    /// Returns the connection even on failure so the caller can read the error message.
-    pub fn connectVerbose(conninfo: [*:0]const u8) PgError!PgConnection {
-        const conn = c.PQconnectdb(conninfo) orelse return error.ConnectionFailed;
-        return PgConnection{ .conn = conn };
-    }
-
-    pub fn isOk(self: *const PgConnection) bool {
-        return ConnStatus.fromCInt(c.PQstatus(self.conn)) == .ok;
-    }
-
-    pub fn isHealthy(self: *const PgConnection) bool {
-        if (ConnStatus.fromCInt(c.PQstatus(self.conn)) != .ok) return false;
-        return TransactionStatus.fromCInt(c.PQtransactionStatus(self.conn)) == .idle;
-    }
-
-    pub fn resetIfNeeded(self: *PgConnection) void {
-        if (TransactionStatus.fromCInt(c.PQtransactionStatus(self.conn)) == .in_error) {
-            log.info("connection in failed transaction state, sending ROLLBACK", .{});
-            const res = c.PQexec(self.conn, "ROLLBACK");
-            if (res) |r| c.PQclear(r);
-        }
-    }
-
-    pub fn deinit(self: *PgConnection) void {
-        c.PQfinish(self.conn);
-        self.* = undefined;
-    }
-
-    pub fn errorMessage(self: *const PgConnection) []const u8 {
-        if (self.last_error_fields) |ef| {
-            if (ef.message) |msg| return msg;
-        }
-        const msg = c.PQerrorMessage(self.conn);
-        if (msg == null) return "";
-        return std.mem.sliceTo(msg, 0);
-    }
-
-    /// PQexecParams enforces single-statement execution (no injection via semicolons).
-    pub fn runQuery(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
-        self.last_error_fields = null;
-        const res = c.PQexecParams(
-            self.conn,
-            sql,
-            0,
-            null,
-            null,
-            null,
-            null,
-            0,
-        ) orelse return error.QueryFailed;
-        return self.extractResultCapturingErrors(allocator, res);
-    }
-
-    /// PQexec allows multi-statement scripts — used only for the SQL editor endpoint.
-    pub fn runQueryMulti(self: *PgConnection, allocator: std.mem.Allocator, sql: [*:0]const u8) PgError!QueryResult {
-        self.last_error_fields = null;
-        const res = c.PQexec(self.conn, sql) orelse return error.QueryFailed;
-        return self.extractResultCapturingErrors(allocator, res);
-    }
-
-    fn extractResultCapturingErrors(self: *PgConnection, backing: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
-        const status = ExecStatus.fromCInt(c.PQresultStatus(res));
-        if (status != .tuples_ok and status != .command_ok) {
-            self.last_error_fields = extractErrorFields(res);
-            c.PQclear(res);
-            return error.QueryFailed;
-        }
-        return extractResult(backing, res);
-    }
-
-    pub fn fetchSchema(self: *PgConnection, backing: std.mem.Allocator) PgError!SchemaInfo {
-        const sql =
-            "SELECT table_name, column_name, data_type " ++
-            "FROM information_schema.columns " ++
-            "WHERE table_schema = 'public' " ++
-            "ORDER BY table_name, ordinal_position";
-
-        const res = c.PQexecParams(self.conn, sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
-        defer c.PQclear(res);
-        if (ExecStatus.fromCInt(c.PQresultStatus(res)) != .tuples_ok) return error.QueryFailed;
-
-        var arena = std.heap.ArenaAllocator.init(backing);
-        errdefer arena.deinit();
-        const alloc = arena.allocator();
-
-        const n_rows: usize = @intCast(c.PQntuples(res));
-        var tables = std.ArrayList(TableInfo){};
-        var current_table: ?[]const u8 = null;
-        var current_columns = std.ArrayList(ColumnInfo){};
-
-        for (0..n_rows) |row_idx| {
-            const tname = getStringField(alloc, res, row_idx, 0) catch return error.OutOfMemory;
-            const cname = getStringField(alloc, res, row_idx, 1) catch return error.OutOfMemory;
-            const dtype = getStringField(alloc, res, row_idx, 2) catch return error.OutOfMemory;
-
-            if (current_table == null or !std.mem.eql(u8, current_table.?, tname)) {
-                if (current_table != null) {
-                    tables.append(alloc, .{
-                        .name = current_table.?,
-                        .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
-                    }) catch return error.OutOfMemory;
-                    current_columns = std.ArrayList(ColumnInfo){};
-                }
-                current_table = tname;
-            }
-
-            current_columns.append(alloc, .{ .name = cname, .data_type = dtype }) catch return error.OutOfMemory;
-        }
-
-        if (current_table != null) {
-            tables.append(alloc, .{
-                .name = current_table.?,
-                .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
-            }) catch return error.OutOfMemory;
-        }
-
-        return SchemaInfo{
-            .tables = tables.toOwnedSlice(alloc) catch return error.OutOfMemory,
-            .arena = arena,
-        };
-    }
-
-    pub fn fetchEnhancedSchema(self: *PgConnection, backing: std.mem.Allocator) PgError!EnhancedSchemaInfo {
-        const col_sql =
-            "SELECT c.table_name, c.column_name, c.data_type, c.is_nullable, c.column_default, " ++
-            "CASE WHEN pk.column_name IS NOT NULL THEN 'true' ELSE 'false' END AS is_primary_key " ++
-            "FROM information_schema.columns c " ++
-            "LEFT JOIN (" ++
-            "SELECT kcu.table_name, kcu.column_name " ++
-            "FROM information_schema.table_constraints tc " ++
-            "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " ++
-            "WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public'" ++
-            ") pk ON c.table_name = pk.table_name AND c.column_name = pk.column_name " ++
-            "WHERE c.table_schema = 'public' ORDER BY c.table_name, c.ordinal_position";
-
-        const col_res = c.PQexecParams(self.conn, col_sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
-        defer c.PQclear(col_res);
-        if (ExecStatus.fromCInt(c.PQresultStatus(col_res)) != .tuples_ok) return error.QueryFailed;
-
-        const fk_sql =
-            "SELECT kcu.table_name, kcu.column_name, ccu.table_name AS target_table, ccu.column_name AS target_column " ++
-            "FROM information_schema.table_constraints tc " ++
-            "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " ++
-            "JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema " ++
-            "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'";
-
-        const fk_res = c.PQexecParams(self.conn, fk_sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
-        defer c.PQclear(fk_res);
-        if (ExecStatus.fromCInt(c.PQresultStatus(fk_res)) != .tuples_ok) return error.QueryFailed;
-
-        const enum_sql =
-            "SELECT c.relname, a.attname, e.enumlabel " ++
-            "FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid " ++
-            "JOIN pg_attribute a ON a.atttypid = t.oid JOIN pg_class cc ON a.attrelid = cc.oid " ++
-            "JOIN pg_namespace n ON cc.relnamespace = n.oid " ++
-            "WHERE n.nspname = 'public' ORDER BY cc.relname, a.attname, e.enumsortorder";
-
-        const enum_res = c.PQexecParams(self.conn, enum_sql, 0, null, null, null, null, 0) orelse return error.QueryFailed;
-        defer c.PQclear(enum_res);
-
-        // Slices reference PGresult memory — valid until the deferred PQclear calls above.
-        var tmp = std.heap.ArenaAllocator.init(backing);
-        defer tmp.deinit();
-        const t = tmp.allocator();
-
-        const col_n: usize = @intCast(c.PQntuples(col_res));
-        const col_data = t.alloc(ColumnRowData, col_n) catch return error.OutOfMemory;
-        for (0..col_n) |i| {
-            col_data[i] = .{
-                .table_name = getStringFieldNoAlloc(col_res, i, 0),
-                .col_name = getStringFieldNoAlloc(col_res, i, 1),
-                .data_type = getStringFieldNoAlloc(col_res, i, 2),
-                .is_nullable = getStringFieldNoAlloc(col_res, i, 3),
-                .col_default = getStringFieldNoAlloc(col_res, i, 4),
-                .is_pk = getStringFieldNoAlloc(col_res, i, 5),
-            };
-        }
-
-        const fk_n: usize = if (ExecStatus.fromCInt(c.PQresultStatus(fk_res)) == .tuples_ok)
-            @intCast(c.PQntuples(fk_res))
-        else
-            0;
-        const fk_data = t.alloc(FkRowData, fk_n) catch return error.OutOfMemory;
-        for (0..fk_n) |i| {
-            fk_data[i] = .{
-                .table = getStringFieldNoAlloc(fk_res, i, 0),
-                .column = getStringFieldNoAlloc(fk_res, i, 1),
-                .target_table = getStringFieldNoAlloc(fk_res, i, 2),
-                .target_column = getStringFieldNoAlloc(fk_res, i, 3),
-            };
-        }
-
-        const enum_n: usize = if (ExecStatus.fromCInt(c.PQresultStatus(enum_res)) == .tuples_ok)
-            @intCast(c.PQntuples(enum_res))
-        else
-            0;
-        const enum_data = t.alloc(EnumRowData, enum_n) catch return error.OutOfMemory;
-        for (0..enum_n) |i| {
-            enum_data[i] = .{
-                .table = getStringFieldNoAlloc(enum_res, i, 0),
-                .column = getStringFieldNoAlloc(enum_res, i, 1),
-                .label = getStringFieldNoAlloc(enum_res, i, 2),
-            };
-        }
-
-        return buildEnhancedSchemaFromRows(backing, col_data, fk_data, enum_data);
-    }
-};
-
-fn extractResult(backing: std.mem.Allocator, res: *c.PGresult) PgError!QueryResult {
-    const status = ExecStatus.fromCInt(c.PQresultStatus(res));
-    if (status != .tuples_ok and status != .command_ok) {
-        c.PQclear(res);
-        return error.QueryFailed;
-    }
-
-    var arena = std.heap.ArenaAllocator.init(backing);
-    errdefer arena.deinit();
-    const alloc = arena.allocator();
-
-    const n_rows: usize = @intCast(c.PQntuples(res));
-    const n_cols: usize = @intCast(c.PQnfields(res));
-
-    const col_names = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-    for (0..n_cols) |col_idx| {
-        const name_ptr = c.PQfname(res, @intCast(col_idx));
-        if (name_ptr == null) {
-            col_names[col_idx] = "";
-        } else {
-            col_names[col_idx] = alloc.dupe(u8, std.mem.sliceTo(name_ptr, 0)) catch return error.OutOfMemory;
-        }
-    }
-
-    const rows = alloc.alloc([][]const u8, n_rows) catch return error.OutOfMemory;
-    for (0..n_rows) |row_idx| {
-        const row_data = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
-        for (0..n_cols) |col_idx| {
-            if (c.PQgetisnull(res, @intCast(row_idx), @intCast(col_idx)) != 0) {
-                row_data[col_idx] = "NULL";
-            } else {
-                const val_ptr = c.PQgetvalue(res, @intCast(row_idx), @intCast(col_idx));
-                if (val_ptr == null) {
-                    row_data[col_idx] = "";
-                } else {
-                    row_data[col_idx] = alloc.dupe(u8, std.mem.sliceTo(val_ptr, 0)) catch return error.OutOfMemory;
-                }
-            }
-        }
-        rows[row_idx] = row_data;
-    }
-
-    c.PQclear(res);
-
-    return QueryResult{
-        .col_names = col_names,
-        .rows = rows,
-        .n_cols = n_cols,
-        .n_rows = n_rows,
-        .arena = arena,
-    };
-}
-
-fn getStringFieldNoAlloc(res: *c.PGresult, row: usize, col_idx: usize) []const u8 {
-    if (c.PQgetisnull(res, @intCast(row), @intCast(col_idx)) != 0) return "";
-    const val_ptr = c.PQgetvalue(res, @intCast(row), @intCast(col_idx));
-    if (val_ptr == null) return "";
-    return std.mem.sliceTo(val_ptr, 0);
-}
-
-fn getStringField(allocator: std.mem.Allocator, res: *c.PGresult, row: usize, col: usize) ![]const u8 {
-    const val_ptr = c.PQgetvalue(res, @intCast(row), @intCast(col));
-    if (val_ptr == null) return "";
-    const val_slice = std.mem.sliceTo(val_ptr, 0);
-    return allocator.dupe(u8, val_slice);
-}
 
 pub const QueryResult = struct {
     col_names: [][]const u8,
@@ -500,6 +118,246 @@ pub const EnumRowData = struct {
     column: []const u8,
     label: []const u8,
 };
+
+/// Create a connection pool from a PostgreSQL URI string.
+pub fn initPool(allocator: std.mem.Allocator, uri_string: []const u8) PgError!*pg.Pool {
+    const uri = std.Uri.parse(uri_string) catch return error.ConnectionFailed;
+    const pool = pg.Pool.initUri(allocator, uri, .{
+        .size = 5,
+        .timeout = 10 * std.time.ms_per_s,
+    }) catch |err| {
+        if (err == error.PG) {
+            log.err("pool init failed with PostgreSQL error", .{});
+        } else {
+            log.err("pool init failed: {s}", .{@errorName(err)});
+        }
+        return error.ConnectionFailed;
+    };
+    return pool;
+}
+
+/// Execute a single SQL statement and collect results into a QueryResult.
+/// SQL must have values already interpolated (no parameterized queries).
+pub fn runQuery(pool: *pg.Pool, backing: std.mem.Allocator, sql: []const u8) PgError!QueryResult {
+    var conn = pool.acquire() catch return error.ConnectionFailed;
+    defer conn.release();
+    return runQueryOnConn(conn, backing, sql);
+}
+
+/// Execute a query on an already-acquired connection (for transaction use).
+pub fn runQueryOnConn(conn: *pg.Conn, backing: std.mem.Allocator, sql: []const u8) PgError!QueryResult {
+    var result = conn.queryOpts(sql, .{}, .{ .column_names = true }) catch |err| {
+        if (err == error.PG) {
+            if (conn.err) |pge| {
+                log.warn("query failed: {s}", .{pge.message});
+            }
+        }
+        return error.QueryFailed;
+    };
+    defer result.deinit();
+    return extractResult(backing, result);
+}
+
+/// Get the error message from a connection after a PG error.
+pub fn connErrorMessage(conn: *pg.Conn) []const u8 {
+    if (conn.err) |pge| return pge.message;
+    return "Unknown error";
+}
+
+/// Get structured error fields from a connection.
+pub fn connErrorFields(conn: *pg.Conn) PgErrorFields {
+    if (conn.err) |pge| {
+        return .{
+            .severity = pge.severity,
+            .code = pge.code,
+            .message = pge.message,
+            .detail = pge.detail,
+            .hint = pge.hint,
+        };
+    }
+    return .{ .severity = null, .code = null, .message = null, .detail = null, .hint = null };
+}
+
+fn extractResult(backing: std.mem.Allocator, result: *pg.Result) PgError!QueryResult {
+    var arena = std.heap.ArenaAllocator.init(backing);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
+
+    const n_cols = result.number_of_columns;
+
+    const col_names = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
+    for (result.column_names, 0..) |name, i| {
+        col_names[i] = alloc.dupe(u8, name) catch return error.OutOfMemory;
+    }
+
+    var rows_list = std.ArrayList([][]const u8){};
+
+    while (true) {
+        const maybe_row = result.next() catch return error.QueryFailed;
+        const row = maybe_row orelse break;
+
+        const row_data = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
+        for (0..n_cols) |col_idx| {
+            // pg.zig returns binary data; read as optional bytes and convert to text
+            const maybe_val: ?[]const u8 = row.get(?[]const u8, col_idx) catch null;
+            if (maybe_val) |val| {
+                row_data[col_idx] = alloc.dupe(u8, val) catch return error.OutOfMemory;
+            } else {
+                row_data[col_idx] = "NULL";
+            }
+        }
+        rows_list.append(alloc, row_data) catch return error.OutOfMemory;
+    }
+
+    const n_rows = rows_list.items.len;
+    return QueryResult{
+        .col_names = col_names,
+        .rows = rows_list.toOwnedSlice(alloc) catch return error.OutOfMemory,
+        .n_cols = n_cols,
+        .n_rows = n_rows,
+        .arena = arena,
+    };
+}
+
+pub fn fetchSchema(pool: *pg.Pool, backing: std.mem.Allocator) PgError!SchemaInfo {
+    const sql =
+        "SELECT table_name::text, column_name::text, data_type::text " ++
+        "FROM information_schema.columns " ++
+        "WHERE table_schema = 'public' " ++
+        "ORDER BY table_name, ordinal_position";
+
+    var conn = pool.acquire() catch return error.ConnectionFailed;
+    defer conn.release();
+
+    var result = conn.queryOpts(sql, .{}, .{ .column_names = true }) catch return error.QueryFailed;
+    defer result.deinit();
+
+    var arena = std.heap.ArenaAllocator.init(backing);
+    errdefer arena.deinit();
+    const alloc = arena.allocator();
+
+    var tables = std.ArrayList(TableInfo){};
+    var current_table: ?[]const u8 = null;
+    var current_columns = std.ArrayList(ColumnInfo){};
+
+    while (true) {
+        const maybe_row = result.next() catch return error.QueryFailed;
+        const row = maybe_row orelse break;
+
+        const tname = alloc.dupe(u8, row.get([]const u8, 0) catch return error.InvalidData) catch return error.OutOfMemory;
+        const cname = alloc.dupe(u8, row.get([]const u8, 1) catch return error.InvalidData) catch return error.OutOfMemory;
+        const dtype = alloc.dupe(u8, row.get([]const u8, 2) catch return error.InvalidData) catch return error.OutOfMemory;
+
+        if (current_table == null or !std.mem.eql(u8, current_table.?, tname)) {
+            if (current_table != null) {
+                tables.append(alloc, .{
+                    .name = current_table.?,
+                    .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
+                }) catch return error.OutOfMemory;
+                current_columns = std.ArrayList(ColumnInfo){};
+            }
+            current_table = tname;
+        }
+
+        current_columns.append(alloc, .{ .name = cname, .data_type = dtype }) catch return error.OutOfMemory;
+    }
+
+    if (current_table != null) {
+        tables.append(alloc, .{
+            .name = current_table.?,
+            .columns = current_columns.toOwnedSlice(alloc) catch return error.OutOfMemory,
+        }) catch return error.OutOfMemory;
+    }
+
+    return SchemaInfo{
+        .tables = tables.toOwnedSlice(alloc) catch return error.OutOfMemory,
+        .arena = arena,
+    };
+}
+
+pub fn fetchEnhancedSchema(pool: *pg.Pool, backing: std.mem.Allocator) PgError!EnhancedSchemaInfo {
+    var conn = pool.acquire() catch return error.ConnectionFailed;
+    defer conn.release();
+
+    const col_sql =
+        "SELECT c.table_name::text, c.column_name::text, c.data_type::text, c.is_nullable::text, COALESCE(c.column_default, '')::text, " ++
+        "CASE WHEN pk.column_name IS NOT NULL THEN 'true' ELSE 'false' END AS is_primary_key " ++
+        "FROM information_schema.columns c " ++
+        "LEFT JOIN (" ++
+        "SELECT kcu.table_name, kcu.column_name " ++
+        "FROM information_schema.table_constraints tc " ++
+        "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " ++
+        "WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = 'public'" ++
+        ") pk ON c.table_name = pk.table_name AND c.column_name = pk.column_name " ++
+        "WHERE c.table_schema = 'public' ORDER BY c.table_name, c.ordinal_position";
+
+    var col_result = conn.queryOpts(col_sql, .{}, .{}) catch return error.QueryFailed;
+    defer col_result.deinit();
+
+    // Read column data into temp arena
+    var tmp = std.heap.ArenaAllocator.init(backing);
+    defer tmp.deinit();
+    const t = tmp.allocator();
+
+    var col_list = std.ArrayList(ColumnRowData){};
+    while (true) {
+        const maybe_row = col_result.next() catch return error.QueryFailed;
+        const row = maybe_row orelse break;
+        col_list.append(t, .{
+            .table_name = t.dupe(u8, row.get([]const u8, 0) catch "") catch return error.OutOfMemory,
+            .col_name = t.dupe(u8, row.get([]const u8, 1) catch "") catch return error.OutOfMemory,
+            .data_type = t.dupe(u8, row.get([]const u8, 2) catch "") catch return error.OutOfMemory,
+            .is_nullable = t.dupe(u8, row.get([]const u8, 3) catch "") catch return error.OutOfMemory,
+            .col_default = t.dupe(u8, row.get([]const u8, 4) catch "") catch return error.OutOfMemory,
+            .is_pk = t.dupe(u8, row.get([]const u8, 5) catch "") catch return error.OutOfMemory,
+        }) catch return error.OutOfMemory;
+    }
+
+    const fk_sql =
+        "SELECT kcu.table_name::text, kcu.column_name::text, ccu.table_name::text AS target_table, ccu.column_name::text AS target_column " ++
+        "FROM information_schema.table_constraints tc " ++
+        "JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema " ++
+        "JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema " ++
+        "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'";
+
+    var fk_list = std.ArrayList(FkRowData){};
+    if (conn.queryOpts(fk_sql, .{}, .{})) |fk_result| {
+        defer fk_result.deinit();
+        while (true) {
+            const maybe_row = fk_result.next() catch break;
+            const row = maybe_row orelse break;
+            fk_list.append(t, .{
+                .table = t.dupe(u8, row.get([]const u8, 0) catch "") catch return error.OutOfMemory,
+                .column = t.dupe(u8, row.get([]const u8, 1) catch "") catch return error.OutOfMemory,
+                .target_table = t.dupe(u8, row.get([]const u8, 2) catch "") catch return error.OutOfMemory,
+                .target_column = t.dupe(u8, row.get([]const u8, 3) catch "") catch return error.OutOfMemory,
+            }) catch return error.OutOfMemory;
+        }
+    } else |_| {}
+
+    const enum_sql =
+        "SELECT c.relname::text, a.attname::text, e.enumlabel::text " ++
+        "FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid " ++
+        "JOIN pg_attribute a ON a.atttypid = t.oid JOIN pg_class cc ON a.attrelid = cc.oid " ++
+        "JOIN pg_namespace n ON cc.relnamespace = n.oid " ++
+        "WHERE n.nspname = 'public' ORDER BY cc.relname, a.attname, e.enumsortorder";
+
+    var enum_list = std.ArrayList(EnumRowData){};
+    if (conn.queryOpts(enum_sql, .{}, .{})) |enum_result| {
+        defer enum_result.deinit();
+        while (true) {
+            const maybe_row = enum_result.next() catch break;
+            const row = maybe_row orelse break;
+            enum_list.append(t, .{
+                .table = t.dupe(u8, row.get([]const u8, 0) catch "") catch return error.OutOfMemory,
+                .column = t.dupe(u8, row.get([]const u8, 1) catch "") catch return error.OutOfMemory,
+                .label = t.dupe(u8, row.get([]const u8, 2) catch "") catch return error.OutOfMemory,
+            }) catch return error.OutOfMemory;
+        }
+    } else |_| {}
+
+    return buildEnhancedSchemaFromRows(backing, col_list.items, fk_list.items, enum_list.items);
+}
 
 /// Extracted from PgConnection so it can be tested without a live database.
 pub fn buildEnhancedSchemaFromRows(
@@ -710,46 +568,6 @@ test "buildEnhancedSchemaFromRows: multiple tables with FK and enum" {
     const users = result.tables[1];
     try std.testing.expectEqualStrings("users", users.name);
     try std.testing.expectEqual(@as(usize, 2), users.columns.len);
-}
-
-test "ConnStatus: fromCInt maps CONNECTION_OK to .ok" {
-    try std.testing.expectEqual(ConnStatus.ok, ConnStatus.fromCInt(c.CONNECTION_OK));
-}
-
-test "ConnStatus: fromCInt maps CONNECTION_BAD to .bad" {
-    try std.testing.expectEqual(ConnStatus.bad, ConnStatus.fromCInt(c.CONNECTION_BAD));
-}
-
-test "ConnStatus: fromCInt unknown value maps to .unknown" {
-    try std.testing.expectEqual(ConnStatus.unknown, ConnStatus.fromCInt(9999));
-}
-
-test "ExecStatus: fromCInt maps PGRES_TUPLES_OK to .tuples_ok" {
-    try std.testing.expectEqual(ExecStatus.tuples_ok, ExecStatus.fromCInt(c.PGRES_TUPLES_OK));
-}
-
-test "ExecStatus: fromCInt maps PGRES_COMMAND_OK to .command_ok" {
-    try std.testing.expectEqual(ExecStatus.command_ok, ExecStatus.fromCInt(c.PGRES_COMMAND_OK));
-}
-
-test "ExecStatus: fromCInt maps PGRES_FATAL_ERROR to .fatal_error" {
-    try std.testing.expectEqual(ExecStatus.fatal_error, ExecStatus.fromCInt(c.PGRES_FATAL_ERROR));
-}
-
-test "ExecStatus: fromCInt unknown value maps to .unknown" {
-    try std.testing.expectEqual(ExecStatus.unknown, ExecStatus.fromCInt(9999));
-}
-
-test "TransactionStatus: fromCInt maps PQTRANS_IDLE to .idle" {
-    try std.testing.expectEqual(TransactionStatus.idle, TransactionStatus.fromCInt(c.PQTRANS_IDLE));
-}
-
-test "TransactionStatus: fromCInt maps PQTRANS_INERROR to .in_error" {
-    try std.testing.expectEqual(TransactionStatus.in_error, TransactionStatus.fromCInt(c.PQTRANS_INERROR));
-}
-
-test "TransactionStatus: fromCInt unknown value maps to .unknown" {
-    try std.testing.expectEqual(TransactionStatus.unknown, TransactionStatus.fromCInt(9999));
 }
 
 test "PgErrorFields: has required optional fields" {

@@ -57,6 +57,7 @@ pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Respons
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
     const body = req.body() orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
@@ -94,28 +95,25 @@ pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Respons
         }
     }
 
-    const sql_z = allocator.dupeZ(u8, sql_text) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+    // guard only — pg.zig uses extended protocol which is single-statement
+    if (sql_guard.hasMultipleStatements(sql_text)) {
+        sendJsonError(res, 400, "{\"error\":\"Multiple statements are not supported. Please execute one statement at a time.\"}");
         return;
-    };
+    }
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    const is_multi = sql_guard.hasMultipleStatements(sql_text);
     const start_time = std.time.milliTimestamp();
-    const pg_result = if (is_multi)
-        pg_conn.runQueryMulti(allocator, sql_z)
-    else
-        pg_conn.runQuery(allocator, sql_z);
-    var result = pg_result catch {
+    var result = postgres.runQuery(pool, allocator, sql_text) catch {
         const end_time = std.time.milliTimestamp();
         const duration: u64 = @intCast(@max(0, end_time - start_time));
-        const err_msg = pg_conn.errorMessage();
+        // Try to get error message from a connection
+        var conn = pool.acquire() catch {
+            addHistoryEntry(state, sql_text, duration, null, true, "Query failed");
+            sendJsonResponse(res, "{\"error\":\"Query failed\"}");
+            return;
+        };
+        const err_msg = postgres.connErrorMessage(conn);
         addHistoryEntry(state, sql_text, duration, null, true, err_msg);
+        conn.release();
         var err_buf: [512]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&err_buf);
         const ew = fbs.writer();
@@ -140,6 +138,7 @@ pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         return;
     }
     const allocator = res.arena;
+    const pool = state.pool.?;
     const body = req.body() orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
@@ -158,48 +157,32 @@ pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         return;
     }
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
+    // Acquire a dedicated connection for the transaction
+    var conn = pool.acquire() catch {
         sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
-    defer pg_conn.deinit();
+    defer pool.release(conn);
 
-    var begin_result = pg_conn.runQuery(allocator, "BEGIN") catch {
+    conn.begin() catch {
         sendJsonResponse(res, "{\"error\":\"Failed to start transaction\"}");
         return;
     };
-    begin_result.deinit();
 
-    const sql_z = allocator.dupeZ(u8, sql_text) catch {
-        if (pg_conn.runQuery(allocator, "ROLLBACK")) |rb| {
-            var r = rb;
-            r.deinit();
-        } else |_| {}
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-        return;
-    };
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        if (pg_conn.runQuery(allocator, "ROLLBACK")) |rb| {
-            var r = rb;
-            r.deinit();
-        } else |_| {}
-        sendJsonResponse(res, fbs.getWritten());
+    var pg_result = postgres.runQueryOnConn(conn, allocator, sql_text) catch {
+        // Best-effort rollback -- pool replaces dirty connections automatically
+        conn.rollback() catch |rb_err| {
+            log.warn("rollback after failed preview: {s}", .{@errorName(rb_err)});
+        };
+        sendJsonResponse(res, "{\"error\":\"Preview query failed\"}");
         return;
     };
     defer pg_result.deinit();
 
     // Preview uses BEGIN/ROLLBACK so the query never commits
-    if (pg_conn.runQuery(allocator, "ROLLBACK")) |rb| {
-        var r = rb;
-        r.deinit();
-    } else |_| {}
+    conn.rollback() catch |rb_err| {
+        log.warn("rollback after preview: {s}", .{@errorName(rb_err)});
+    };
 
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(allocator);
@@ -235,7 +218,6 @@ pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.
 }
 
 pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
-    // Naive token-based heuristic -- doesn't handle all DDL edge cases
     if (sql_guard.containsIgnoreCaseWord(sql, "ALTER") and sql_guard.containsIgnoreCaseWord(sql, "TABLE") and sql_guard.containsIgnoreCaseWord(sql, "ADD") and sql_guard.containsIgnoreCaseWord(sql, "COLUMN")) {
         if (utils.indexOfIgnoreCase(sql, "ADD")) |add_pos| {
             const before_add = sql[0..add_pos];
@@ -416,6 +398,7 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
     const body = req.body() orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
@@ -455,7 +438,6 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
             return;
         };
         if (entry.old_value.len == 0) {
-            // Empty old_value represents SQL NULL in the journal
             try w.print("UPDATE \"{s}\" SET \"{s}\" = NULL WHERE \"{s}\" = '{s}'", .{
                 entry.table_name, entry.column_name, entry.pk_column, escaped_pk,
             });
@@ -483,23 +465,9 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
         sendJsonError(res, 400, "{\"error\":\"Unknown operation\"}");
         return;
     }
-    try sql_buf.append(allocator, 0);
-    const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+        sendJsonResponse(res, "{\"error\":\"Undo query failed\"}");
         return;
     };
     defer pg_result.deinit();

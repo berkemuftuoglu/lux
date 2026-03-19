@@ -1,5 +1,6 @@
 const std = @import("std");
 const httpz = @import("httpz");
+const pg = @import("pg");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const web = @import("web");
@@ -218,7 +219,7 @@ fn parseCsvContent(
 
 fn buildAndExecuteInsert(
     allocator: std.mem.Allocator,
-    pg_conn: *postgres.PgConnection,
+    conn: *pg.Conn,
     table_name: []const u8,
     col_names: []const []const u8,
     values: []const []const u8,
@@ -244,10 +245,8 @@ fn buildAndExecuteInsert(
         }
     }
     w.writeAll(")") catch return false;
-    sql_buf.append(allocator, 0) catch return false;
 
-    const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
-    var result = pg_conn.runQuery(allocator, sql_z) catch return false;
+    var result = postgres.runQueryOnConn(conn, allocator, sql_buf.items) catch return false;
     result.deinit();
     return true;
 }
@@ -260,6 +259,7 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_name") orelse {
         sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
@@ -270,7 +270,6 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     }
 
-    // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
         sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -300,24 +299,15 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     }
 
-    const conninfo_z = state.conninfo_z orelse {
-        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
-        return;
-    };
-
-    var pg_conn = postgres.PgConnection.connect(conninfo_z) catch {
-        sendJsonResponse(res, "{\"error\":\"Failed to connect to database\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
     var sql_buf: [256]u8 = undefined;
-    const sql = std.fmt.bufPrintZ(&sql_buf, "SELECT * FROM \"{s}\"", .{table_name}) catch {
+    var fbs = std.io.fixedBufferStream(&sql_buf);
+    fbs.writer().print("SELECT * FROM \"{s}\"", .{table_name}) catch {
         sendJsonError(res, 500, "{\"error\":\"Table name too long\"}");
         return;
     };
+    const sql = sql_buf[0..fbs.pos];
 
-    var result = pg_conn.runQuery(allocator, sql) catch {
+    var result = postgres.runQuery(pool, allocator, sql) catch {
         sendJsonResponse(res, "{\"error\":\"Query failed\"}");
         return;
     };
@@ -364,6 +354,7 @@ pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
     const body = req.body() orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
@@ -378,8 +369,8 @@ pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     }
 
-    const sql_guard = @import("sql_guard");
-    if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
+    const sql_guard_mod = @import("sql_guard");
+    if (state.flags.read_only and !sql_guard_mod.isSqlReadSafe(sql_text)) {
         sendJsonError(res, 403, "{\"error\":\"Read-only mode is enabled. Disable it to export write operations.\"}");
         return;
     }
@@ -392,25 +383,8 @@ pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     }
 
-    const sql_z = allocator.dupeZ(u8, sql_text) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-        return;
-    };
-
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+    var pg_result = postgres.runQuery(pool, allocator, sql_text) catch {
+        sendJsonResponse(res, "{\"error\":\"Query failed\"}");
         return;
     };
     defer pg_result.deinit();
@@ -442,6 +416,7 @@ pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
         sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
@@ -452,7 +427,6 @@ pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
         return;
     }
 
-    // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
         sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -497,23 +471,9 @@ pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
     );
     try sw.writeAll(escaped_name);
     try sw.writeAll("' AND cls.relkind IN ('r', 'v') GROUP BY cls.relkind, cls.relname, cls.oid");
-    try sql_buf.append(allocator, 0);
-    const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+        sendJsonResponse(res, "{\"error\":\"DDL query failed\"}");
         return;
     };
     defer pg_result.deinit();
@@ -542,6 +502,7 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
         sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
@@ -610,7 +571,6 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
             };
         }
     } else {
-        // parseCsv always treats first row as headers, so without has_header these are data
         const field_count = csv_result.headers.len;
         if (field_count > table_info.columns.len) {
             sendJsonError(res, 400, "{\"error\":\"CSV has more columns than table\"}");
@@ -624,38 +584,31 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
+    // Acquire a dedicated connection for the transaction
+    var conn = pool.acquire() catch {
         sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
-    defer pg_conn.deinit();
+    defer pool.release(conn);
 
-    var begin_result = pg_conn.runQuery(allocator, "BEGIN") catch {
+    conn.begin() catch {
         sendJsonResponse(res, "{\"error\":\"Failed to start transaction\"}");
         return;
     };
-    begin_result.deinit();
 
     var imported: usize = 0;
     var insert_error: bool = false;
-    var error_msg_buf: [512]u8 = undefined;
-    var error_msg_len: usize = 0;
 
     const data_rows = csv_result.rows;
     const num_cols = col_names.items.len;
 
-    // Without has_header, the parsed "headers" row is actually data that must be inserted
     if (!has_header) {
         const first_row = csv_result.headers;
         if (first_row.len >= num_cols) {
-            if (buildAndExecuteInsert(allocator, &pg_conn, table_name, col_names.items, first_row[0..num_cols])) {
+            if (buildAndExecuteInsert(allocator, conn, table_name, col_names.items, first_row[0..num_cols])) {
                 imported += 1;
             } else {
                 insert_error = true;
-                const em = pg_conn.errorMessage();
-                const copy_len = @min(em.len, error_msg_buf.len);
-                @memcpy(error_msg_buf[0..copy_len], em[0..copy_len]);
-                error_msg_len = copy_len;
             }
         }
     }
@@ -664,39 +617,28 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         for (data_rows) |row| {
             const field_count = @min(row.len, num_cols);
             if (field_count == 0) continue;
-            if (buildAndExecuteInsert(allocator, &pg_conn, table_name, col_names.items[0..field_count], row[0..field_count])) {
+            if (buildAndExecuteInsert(allocator, conn, table_name, col_names.items[0..field_count], row[0..field_count])) {
                 imported += 1;
             } else {
                 insert_error = true;
-                const em = pg_conn.errorMessage();
-                const copy_len = @min(em.len, error_msg_buf.len);
-                @memcpy(error_msg_buf[0..copy_len], em[0..copy_len]);
-                error_msg_len = copy_len;
                 break;
             }
         }
     }
 
     if (insert_error) {
-        var rb = pg_conn.runQuery(allocator, "ROLLBACK") catch {
+        conn.rollback() catch {
             sendJsonResponse(res, "{\"error\":\"Insert failed and rollback failed\"}");
             return;
         };
-        rb.deinit();
-        var resp_buf = std.ArrayList(u8){};
-        const rw = resp_buf.writer(allocator);
-        try rw.writeAll("{\"error\":\"Import failed: ");
-        try utils.writeJsonEscaped(rw, error_msg_buf[0..error_msg_len]);
-        try rw.writeAll("\"}");
-        sendJsonResponse(res, resp_buf.items);
+        sendJsonResponse(res, "{\"error\":\"Import failed\"}");
         return;
     }
 
-    var commit_result = pg_conn.runQuery(allocator, "COMMIT") catch {
+    conn.commit() catch {
         sendJsonResponse(res, "{\"error\":\"Commit failed\"}");
         return;
     };
-    commit_result.deinit();
 
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"imported\":{d}}}", .{imported}) catch "{\"error\":\"fmt\"}";
@@ -711,6 +653,7 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
         sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
@@ -721,7 +664,6 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         return;
     }
 
-    // Fail-closed: reject if schema not loaded
     const schema_tables_fk = state.schema_tables orelse {
         sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -749,7 +691,7 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
     const sw = sql_buf.writer(allocator);
     try sw.writeAll(
         "SELECT " ++
-            "(SELECT count(*) FROM \"",
+            "(SELECT count(*)::text FROM \"",
     );
     try sw.writeAll(escaped_name);
     try sw.writeAll(
@@ -763,23 +705,9 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
     );
     try sw.writeAll(escaped_name);
     try sw.writeAll("' AND c.relkind IN ('r', 'v')");
-    try sql_buf.append(allocator, 0);
-    const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+        sendJsonResponse(res, "{\"error\":\"Stats query failed\"}");
         return;
     };
     defer pg_result.deinit();

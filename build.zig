@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -8,6 +7,10 @@ pub fn build(b: *std.Build) void {
     // --- httpz dependency ---
     const httpz_dep = b.dependency("httpz", .{ .target = target, .optimize = optimize });
     const mod_httpz = httpz_dep.module("httpz");
+
+    // --- pg.zig dependency ---
+    const pg_dep = b.dependency("pg", .{ .target = target, .optimize = optimize });
+    const mod_pg = pg_dep.module("pg");
 
     // --- Named modules (cross-directory imports) ---
     const mod_utils = b.createModule(.{
@@ -25,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    mod_postgres.addImport("pg", mod_pg);
 
     // web.zig depends on utils, postgres, crud, schema, export, sql
     // (handlers depend on web, so web is declared after handlers below via forward ref)
@@ -68,6 +72,10 @@ pub fn build(b: *std.Build) void {
     mod_export.addImport("httpz", mod_httpz);
     mod_sql.addImport("httpz", mod_httpz);
 
+    // Wire pg to modules that need direct pool/conn access
+    mod_web.addImport("pg", mod_pg);
+    mod_export.addImport("pg", mod_pg);
+
     // Wire module dependencies
     mod_crud.addImport("postgres", mod_postgres);
     mod_crud.addImport("utils", mod_utils);
@@ -104,7 +112,6 @@ pub fn build(b: *std.Build) void {
         .name = "lux",
         .root_module = mod_main,
     });
-    addPostgres(exe);
     b.installArtifact(exe);
 
     // --- Run step ---
@@ -118,15 +125,15 @@ pub fn build(b: *std.Build) void {
 
     // --- Test step ---
     const test_step = b.step("test", "Run unit tests");
-    addTestMod(b, test_step, mod_main, target, optimize);
-    addTestMod(b, test_step, mod_web, target, optimize);
-    addTestMod(b, test_step, mod_postgres, target, optimize);
-    addTestMod(b, test_step, mod_utils, target, optimize);
-    addTestMod(b, test_step, mod_sql_guard, target, optimize);
-    addTestMod(b, test_step, mod_crud, target, optimize);
-    addTestMod(b, test_step, mod_schema, target, optimize);
-    addTestMod(b, test_step, mod_export, target, optimize);
-    addTestMod(b, test_step, mod_sql, target, optimize);
+    addTestMod(b, test_step, mod_main);
+    addTestMod(b, test_step, mod_web);
+    addTestMod(b, test_step, mod_postgres);
+    addTestMod(b, test_step, mod_utils);
+    addTestMod(b, test_step, mod_sql_guard);
+    addTestMod(b, test_step, mod_crud);
+    addTestMod(b, test_step, mod_schema);
+    addTestMod(b, test_step, mod_export);
+    addTestMod(b, test_step, mod_sql);
 
 
     // --- Check step (ZLS build-on-save, compile without linking) ---
@@ -134,7 +141,6 @@ pub fn build(b: *std.Build) void {
         .name = "lux",
         .root_module = mod_main,
     });
-    addPostgres(check_exe);
     const check_step = b.step("check", "Check compilation without linking");
     check_step.dependOn(&check_exe.step);
 
@@ -169,50 +175,10 @@ fn addTestMod(
     b: *std.Build,
     test_step: *std.Build.Step,
     module: *std.Build.Module,
-    target: std.Build.ResolvedTarget,
-    optimize: std.builtin.OptimizeMode,
 ) void {
-    _ = target;
-    _ = optimize;
     const unit_test = b.addTest(.{
         .root_module = module,
     });
-    addPostgres(unit_test);
     const run_test = b.addRunArtifact(unit_test);
     test_step.dependOn(&run_test.step);
-}
-
-/// Link PostgreSQL client library (libpq).
-/// Uses pkg-config when available, falls back to platform-specific paths.
-fn addPostgres(step: *std.Build.Step.Compile) void {
-    // Prefer system library detection (uses pkg-config internally)
-    step.linkSystemLibrary("pq");
-    step.linkLibC();
-
-    // Platform-specific fallback paths for common installations
-    switch (builtin.os.tag) {
-        .macos => {
-            // Homebrew (Apple Silicon)
-            step.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/include" });
-            step.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/libpq/lib" });
-            // Homebrew (Intel)
-            step.addIncludePath(.{ .cwd_relative = "/usr/local/opt/libpq/include" });
-            step.addLibraryPath(.{ .cwd_relative = "/usr/local/opt/libpq/lib" });
-            // Postgres.app
-            step.addIncludePath(.{ .cwd_relative = "/Applications/Postgres.app/Contents/Versions/latest/include" });
-            step.addLibraryPath(.{ .cwd_relative = "/Applications/Postgres.app/Contents/Versions/latest/lib" });
-        },
-        .windows => {
-            // PostgreSQL installer defaults (v16, v15)
-            step.addIncludePath(.{ .cwd_relative = "C:/Program Files/PostgreSQL/16/include" });
-            step.addLibraryPath(.{ .cwd_relative = "C:/Program Files/PostgreSQL/16/lib" });
-            step.addIncludePath(.{ .cwd_relative = "C:/Program Files/PostgreSQL/15/include" });
-            step.addLibraryPath(.{ .cwd_relative = "C:/Program Files/PostgreSQL/15/lib" });
-        },
-        else => {
-            // Linux: common distro paths
-            step.addIncludePath(.{ .cwd_relative = "/usr/include/postgresql" });
-            step.addIncludePath(.{ .cwd_relative = "/usr/local/include" });
-        },
-    }
 }

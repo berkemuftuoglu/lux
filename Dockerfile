@@ -1,7 +1,7 @@
 # ── Build stage ──────────────────────────────────────────────────────
 FROM alpine:3.21 AS build
 
-RUN apk add --no-cache curl xz postgresql-dev musl-dev
+RUN apk add --no-cache curl xz musl-dev
 
 # Install Zig 0.15.2 (pinned for reproducible builds)
 RUN curl -L https://ziglang.org/download/0.15.2/zig-linux-x86_64-0.15.2.tar.xz \
@@ -16,9 +16,6 @@ COPY src/ src/
 
 # ReleaseSmall: ~430KB binary (vs ~3.4MB ReleaseSafe)
 RUN zig build -Doptimize=ReleaseSmall
-
-# Resolve libpq symlink to actual file for COPY
-RUN cp --dereference /usr/lib/libpq.so.5 /tmp/libpq.so.5
 
 # ── Runtime stage ────────────────────────────────────────────────────
 # scratch = no shell, no package manager, no attack surface
@@ -37,11 +34,8 @@ COPY --from=build /etc/passwd /etc/passwd
 # Binary
 COPY --from=build /app/zig-out/bin/lux /lux
 
-# Runtime shared libraries (musl libc + libpq + TLS)
+# Runtime shared libraries (musl libc only — pg.zig is pure Zig, no libpq needed)
 COPY --from=build /lib/ld-musl-x86_64.so.1 /lib/ld-musl-x86_64.so.1
-COPY --from=build /tmp/libpq.so.5 /usr/lib/libpq.so.5
-COPY --from=build /usr/lib/libssl.so.3 /usr/lib/libssl.so.3
-COPY --from=build /usr/lib/libcrypto.so.3 /usr/lib/libcrypto.so.3
 
 USER nobody
 EXPOSE 8080

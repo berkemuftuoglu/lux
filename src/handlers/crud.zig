@@ -252,7 +252,6 @@ pub fn sendTableDataJson(
     meta: TableDataMeta,
 ) !void {
     var json_buf = std.ArrayList(u8){};
-    // no defer deinit — res.arena owns this memory until the response is sent
     const w = json_buf.writer(allocator);
 
     try w.print("{{\"total\":{d},\"limit\":{d},\"offset\":{d},\"count_exact\":{s},\"pk_mode\":\"{s}\",\"pagination\":\"{s}\",", .{
@@ -329,6 +328,7 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
     const allocator = res.arena;
     const path = req.url.path;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
         sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
@@ -340,7 +340,6 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     }
 
-    // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
         sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
@@ -389,7 +388,6 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     const count_mode = utils.parseStringQueryParam(query_string, "count", &count_exact_buf);
     const use_exact_count_param = if (count_mode) |m| std.mem.eql(u8, m, "exact") else false;
 
-    // Parse column filters: f.column_name=value
     const FilterEntry = struct { column: []const u8, value: []const u8 };
     var filters: [16]FilterEntry = undefined;
     var filter_count: usize = 0;
@@ -416,8 +414,6 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
     const has_filters = filter_count > 0;
-
-    // When filters active, use exact count; otherwise respect user preference
     const use_exact_count = use_exact_count_param or has_filters;
 
     var after_buf: [256]u8 = undefined;
@@ -425,7 +421,6 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     var before_buf: [256]u8 = undefined;
     const before_cursor = utils.parseStringQueryParam(query_string, "before", &before_buf);
 
-    // Tables without PK use ctid as row identifier
     var table_has_pk = true;
     var pk_col_name: ?[]const u8 = null;
     if (state.enhanced_schema) |etables| {
@@ -443,14 +438,10 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     // Views don't support ctid -- check if this relation is a view
     var is_view = false;
     if (!table_has_pk) view_check: {
-        var view_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch break :view_check;
-        defer view_conn.deinit();
-        var vq_buf = std.ArrayList(u8){};
         const esc_tn = utils.escapeStringValue(allocator, table_name) catch break :view_check;
+        var vq_buf = std.ArrayList(u8){};
         vq_buf.writer(allocator).print("SELECT 1 FROM pg_class c JOIN pg_namespace n ON c.relnamespace = n.oid WHERE c.relname = '{s}' AND n.nspname = 'public' AND c.relkind = 'v'", .{esc_tn}) catch break :view_check;
-        vq_buf.append(allocator, 0) catch break :view_check;
-        const vq_z: [*:0]const u8 = @ptrCast(vq_buf.items[0 .. vq_buf.items.len - 1 :0]);
-        var vr = view_conn.runQuery(allocator, vq_z) catch break :view_check;
+        var vr = postgres.runQuery(pool, allocator, vq_buf.items) catch break :view_check;
         is_view = vr.n_rows > 0;
         vr.deinit();
     }
@@ -500,17 +491,15 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
             error.OutOfMemory => return error.OutOfMemory,
             error.InvalidCharacter => return error.InvalidData,
         };
-        try count_buf.writer(allocator).print("SELECT COALESCE(n_live_tup, 0) FROM pg_stat_user_tables WHERE relname = '{s}'", .{esc_count_tn});
+        try count_buf.writer(allocator).print("SELECT COALESCE(n_live_tup, 0)::text FROM pg_stat_user_tables WHERE relname = '{s}'", .{esc_count_tn});
     } else {
-        try count_buf.writer(allocator).print("SELECT COUNT(*) FROM \"{s}\"{s}", .{ table_name, where_clause });
+        try count_buf.writer(allocator).print("SELECT COUNT(*)::text FROM \"{s}\"{s}", .{ table_name, where_clause });
     }
-    try count_buf.append(allocator, 0);
 
     var sql_list = std.ArrayList(u8){};
     const sw = sql_list.writer(allocator);
 
     if (use_keyset and before_cursor != null) {
-        // Backward keyset: fetch in reverse, caller re-reverses
         try sw.print("SELECT {s} FROM \"{s}\"{s}", .{ select_cols, table_name, where_clause });
         try sw.print(" ORDER BY \"{s}\" DESC", .{pk_col_name.?});
         try sw.print(" LIMIT {d}", .{limit});
@@ -521,16 +510,8 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     } else {
         try sw.print("SELECT {s} FROM \"{s}\"{s} LIMIT {d} OFFSET {d}", .{ select_cols, table_name, where_clause, limit, offset });
     }
-    try sql_list.append(allocator, 0);
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    const count_z: [*:0]const u8 = @ptrCast(count_buf.items[0 .. count_buf.items.len - 1 :0]);
-    var count_result = pg_conn.runQuery(allocator, count_z) catch {
+    var count_result = postgres.runQuery(pool, allocator, count_buf.items) catch {
         sendJsonResponse(res, "{\"error\":\"Count query failed\"}");
         return;
     };
@@ -541,8 +522,7 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         total = std.fmt.parseInt(usize, count_result.rows[0][0], 10) catch 0;
     }
 
-    const data_z: [*:0]const u8 = @ptrCast(sql_list.items[0 .. sql_list.items.len - 1 :0]);
-    var pg_result = pg_conn.runQuery(allocator, data_z) catch {
+    var pg_result = postgres.runQuery(pool, allocator, sql_list.items) catch {
         sendJsonResponse(res, "{\"error\":\"Data query failed\"}");
         return;
     };
@@ -568,6 +548,7 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
     const body = req.body() orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
@@ -609,7 +590,6 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         sendJsonError(res, 400, "{\"error\":\"Column not found in table schema\"}");
         return;
     }
-    // ctid is a system column, not in the user schema -- skip validation
     if (!is_ctid_mode) {
         if (!findColumnInTable(table_info, pk_column)) {
             sendJsonError(res, 400, "{\"error\":\"PK column not found in table schema\"}");
@@ -632,7 +612,6 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     };
 
-    // json/jsonb columns need explicit cast
     var is_json_col = false;
     if (state.enhanced_schema) |etables| {
         for (etables) |et| {
@@ -662,24 +641,9 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
             table_name, column_name, escaped_value, value_expr, pk_column, escaped_pk, column_name,
         });
     }
-    try sql_buf.append(allocator, 0);
 
-    const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
-
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+        sendJsonResponse(res, "{\"error\":\"Update query failed\"}");
         return;
     };
     defer pg_result.deinit();
@@ -704,6 +668,7 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
     const body = req.body() orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
@@ -750,23 +715,6 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     };
 
-    var sql_buf = std.ArrayList(u8){};
-    const w = sql_buf.writer(allocator);
-    if (is_ctid_mode) {
-        try w.print("DELETE FROM \"{s}\" WHERE ctid = '{s}'::tid", .{ table_name, escaped_pk });
-    } else {
-        try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = '{s}'", .{ table_name, pk_column, escaped_pk });
-    }
-    try sql_buf.append(allocator, 0);
-
-    const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
-
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
     // Fetch the row BEFORE deleting so we can record it in the journal
     var old_row_json: []const u8 = "";
     {
@@ -781,12 +729,8 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
                 log.warn("sel_buf write failed: {s}", .{@errorName(err)});
             };
         }
-        sel_buf.append(allocator, 0) catch |err| {
-            log.warn("sel_buf null-terminator append failed: {s}", .{@errorName(err)});
-        };
-        if (sel_buf.items.len > 1) {
-            const sel_z: [*:0]const u8 = sel_buf.items[0 .. sel_buf.items.len - 1 :0];
-            if (pg_conn.runQuery(allocator, sel_z)) |sel_res| {
+        if (sel_buf.items.len > 0) {
+            if (postgres.runQuery(pool, allocator, sel_buf.items)) |sel_res| {
                 var sel_result = sel_res;
                 defer sel_result.deinit();
                 if (sel_result.rows.len > 0) {
@@ -798,14 +742,16 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
 
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+    var sql_buf = std.ArrayList(u8){};
+    const w = sql_buf.writer(allocator);
+    if (is_ctid_mode) {
+        try w.print("DELETE FROM \"{s}\" WHERE ctid = '{s}'::tid", .{ table_name, escaped_pk });
+    } else {
+        try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = '{s}'", .{ table_name, pk_column, escaped_pk });
+    }
+
+    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+        sendJsonResponse(res, "{\"error\":\"Delete query failed\"}");
         return;
     };
     defer pg_result.deinit();
@@ -826,6 +772,7 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
     const body = req.body() orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
@@ -894,25 +841,9 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     } else {
         try sw.print("INSERT INTO \"{s}\" DEFAULT VALUES RETURNING *", .{table_name});
     }
-    try sw.writeByte(0);
 
-    const sql_slice = sql_builder.items;
-    const sql_z: [*:0]const u8 = sql_slice[0 .. sql_slice.len - 1 :0];
-
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+    var pg_result = postgres.runQuery(pool, allocator, sql_builder.items) catch {
+        sendJsonResponse(res, "{\"error\":\"Insert query failed\"}");
         return;
     };
     defer pg_result.deinit();
@@ -961,6 +892,7 @@ pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
         return;
     }
     const allocator = res.arena;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
         sendJsonError(res, 400, "{\"error\":\"Invalid path\"}");
@@ -1021,17 +953,8 @@ pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
     } else {
         try sw.print("SELECT \"{s}\" FROM \"{s}\" LIMIT {d}", .{ target_col, target_table, fk_limit });
     }
-    try sql_buf.append(allocator, 0);
 
-    const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
-
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
+    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
         sendJsonResponse(res, "{\"error\":\"FK lookup query failed\"}");
         return;
     };
@@ -1065,6 +988,7 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         return;
     }
     const allocator = res.arena;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
         sendJsonError(res, 400, "{\"error\":\"Invalid path\"}");
@@ -1110,19 +1034,10 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         return;
     };
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
     if (!force) {
-        // Preview mode: count affected rows
         var cnt_sql = std.ArrayList(u8){};
-        try cnt_sql.writer(allocator).print("SELECT COUNT(*) FROM \"{s}\" WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_find });
-        try cnt_sql.append(allocator, 0);
-        const cnt_z: [*:0]const u8 = @ptrCast(cnt_sql.items[0 .. cnt_sql.items.len - 1 :0]);
-        var cnt_result = pg_conn.runQuery(allocator, cnt_z) catch {
+        try cnt_sql.writer(allocator).print("SELECT COUNT(*)::text FROM \"{s}\" WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_find });
+        var cnt_result = postgres.runQuery(pool, allocator, cnt_sql.items) catch {
             sendJsonResponse(res, "{\"error\":\"Count query failed\"}");
             return;
         };
@@ -1135,23 +1050,14 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"affected_rows\":{d},\"requires_confirmation\":true}}", .{affected}) catch "{\"error\":\"fmt\"}";
         sendJsonResponse(res, resp);
     } else {
-        // Execute mode
         const esc_replace = utils.escapeStringValue(allocator, replace_val) catch {
             sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
         var upd_sql = std.ArrayList(u8){};
         try upd_sql.writer(allocator).print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_replace, column, esc_find });
-        try upd_sql.append(allocator, 0);
-        const upd_z: [*:0]const u8 = @ptrCast(upd_sql.items[0 .. upd_sql.items.len - 1 :0]);
-        var upd_result = pg_conn.runQuery(allocator, upd_z) catch {
-            var err_buf: [512]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&err_buf);
-            const ew = fbs.writer();
-            ew.writeAll("{\"error\":\"") catch return;
-            utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-            ew.writeAll("\"}") catch return;
-            sendJsonResponse(res, fbs.getWritten());
+        var upd_result = postgres.runQuery(pool, allocator, upd_sql.items) catch {
+            sendJsonResponse(res, "{\"error\":\"Update query failed\"}");
             return;
         };
         defer upd_result.deinit();
@@ -1172,6 +1078,7 @@ pub fn handleTruncateTable(handler: *web.Handler, req: *httpz.Request, res: *htt
     }
 
     const allocator = res.arena;
+    const pool = state.pool.?;
 
     const table_name = req.param("table_path") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing table name\"}");
@@ -1191,30 +1098,11 @@ pub fn handleTruncateTable(handler: *web.Handler, req: *httpz.Request, res: *htt
         return;
     }
 
-    var sql_buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&sql_buf);
-    fbs.writer().print("TRUNCATE TABLE \"{s}\"", .{table_name}) catch {
-        sendJsonError(res, 500, "{\"error\":\"Table name too long\"}");
-        return;
-    };
-    const sql_len = fbs.pos;
-    sql_buf[sql_len] = 0;
-    const sql_z: [*:0]const u8 = sql_buf[0..sql_len :0];
+    var sql_buf = std.ArrayList(u8){};
+    try sql_buf.writer(allocator).print("TRUNCATE TABLE \"{s}\"", .{table_name});
 
-    var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        var err_buf: [1024]u8 = undefined;
-        var efbs = std.io.fixedBufferStream(&err_buf);
-        const ew = efbs.writer();
-        ew.writeAll("{\"error\":\"TRUNCATE failed: ") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, efbs.getWritten());
+    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+        sendJsonResponse(res, "{\"error\":\"TRUNCATE failed\"}");
         return;
     };
     defer pg_result.deinit();
@@ -1267,13 +1155,9 @@ test "findColumnInTable: returns false for missing column" {
 }
 
 test "validateCtid: accepts valid ctid formats" {
-    // Standard format
     try std.testing.expect(validateCtid("(0,1)"));
-    // Large numbers
     try std.testing.expect(validateCtid("(9999999,9999999)"));
-    // Zeros
     try std.testing.expect(validateCtid("(0,0)"));
-    // Leading zeros
     try std.testing.expect(validateCtid("(007,001)"));
 }
 

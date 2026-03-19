@@ -101,8 +101,10 @@ fn getEnvVar(key: []const u8) ?[]const u8 {
 
 fn freeSchemaState(state: *web.ServerState) void {
     const allocator = state.allocator;
-    if (state.conninfo_z) |old| allocator.free(old);
-    state.conninfo_z = null;
+    if (state.pool) |p| p.deinit();
+    state.pool = null;
+    if (state.conninfo_uri) |old| allocator.free(@constCast(old));
+    state.conninfo_uri = null;
     if (state.schema_text) |old| allocator.free(old);
     state.schema_text = null;
     state.schema_tables = null;
@@ -187,47 +189,37 @@ pub fn handleConnect(handler: *web.Handler, req: *httpz.Request, res: *httpz.Res
         return;
     };
 
-    const conninfo_z = allocator.dupeZ(u8, conninfo_str) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+    var pool = postgres.initPool(allocator, conninfo_str) catch {
+        sendJsonResponse(res, "{\"error\":\"Failed to connect to PostgreSQL.\"}");
         return;
     };
 
-    var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
-        allocator.free(conninfo_z);
-        sendJsonResponse(res, "{\"error\":\"Failed to connect to PostgreSQL. libpq returned null.\"}");
+    // Verify the pool works by running a test query
+    var test_result = postgres.runQuery(pool, arena, "SELECT 1") catch {
+        pool.deinit();
+        sendJsonResponse(res, "{\"error\":\"Connection test failed. Check your connection string.\"}");
         return;
     };
-    defer pg_conn.deinit();
+    test_result.deinit();
 
-    if (!pg_conn.isOk()) {
-        var err_buf: [1024]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"Connection failed: ") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        allocator.free(conninfo_z);
-        sendJsonResponse(res, fbs.getWritten());
-        return;
-    }
-
-    var schema = pg_conn.fetchSchema(allocator) catch {
-        allocator.free(conninfo_z);
+    var schema = postgres.fetchSchema(pool, allocator) catch {
+        pool.deinit();
         sendJsonResponse(res, "{\"error\":\"Failed to fetch database schema\"}");
         return;
     };
 
     const schema_text = schema.format(allocator) catch {
         schema.deinit();
-        allocator.free(conninfo_z);
+        pool.deinit();
         sendJsonResponse(res, "{\"error\":\"Failed to format schema\"}");
         return;
     };
 
-    var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
+    var enhanced = postgres.fetchEnhancedSchema(pool, allocator) catch null;
 
     freeSchemaState(state);
-    state.conninfo_z = conninfo_z;
+    state.pool = pool;
+    state.conninfo_uri = allocator.dupe(u8, conninfo_str) catch null;
     if (state.last_conninfo) |old_ci| allocator.free(@constCast(old_ci));
     state.last_conninfo = allocator.dupe(u8, conninfo_str) catch null;
     state.schema_text = schema_text;
@@ -260,24 +252,25 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
 
     const allocator = state.allocator;
     const arena = res.arena;
+    const pool = state.pool.?;
 
     // Fall back to cached data if re-fetch fails
     refresh: {
-        const conninfo_z = state.conninfo_z orelse break :refresh;
-        var pg_conn = postgres.PgConnection.connect(conninfo_z) catch break :refresh;
-        defer pg_conn.deinit();
-        var schema = pg_conn.fetchSchema(allocator) catch break :refresh;
+        var schema = postgres.fetchSchema(pool, allocator) catch break :refresh;
         const new_text = schema.format(allocator) catch {
             schema.deinit();
             break :refresh;
         };
-        var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
+        var enhanced = postgres.fetchEnhancedSchema(pool, allocator) catch null;
 
-        // Preserve conninfo_z -- we're reusing the existing connection
-        const saved_conninfo = state.conninfo_z;
-        state.conninfo_z = null;
+        // Preserve pool -- we're reusing the existing connection
+        const saved_pool = state.pool;
+        const saved_uri = state.conninfo_uri;
+        state.pool = null;
+        state.conninfo_uri = null;
         freeSchemaState(state);
-        state.conninfo_z = saved_conninfo;
+        state.pool = saved_pool;
+        state.conninfo_uri = saved_uri;
 
         state.schema_text = new_text;
         state.schema_tables = schema.tables;
@@ -304,10 +297,10 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
             try w.writeAll("{\"name\":\"");
             try utils.writeJsonEscaped(w, etable.name);
             try w.print("\",\"has_primary_key\":{s},\"primary_key_columns\":[", .{if (etable.has_primary_key) "true" else "false"});
-            for (etable.primary_key_columns, 0..) |pk, pi| {
+            for (etable.primary_key_columns, 0..) |pk_col, pi| {
                 if (pi > 0) try w.writeByte(',');
                 try w.writeByte('"');
-                try utils.writeJsonEscaped(w, pk);
+                try utils.writeJsonEscaped(w, pk_col);
                 try w.writeByte('"');
             }
             try w.writeAll("],\"columns\":[");
@@ -382,47 +375,29 @@ pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Res
         return;
     };
 
-    const conninfo_z = allocator.dupeZ(u8, last_ci) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+    var pool = postgres.initPool(allocator, last_ci) catch {
+        sendJsonResponse(res, "{\"error\":\"Failed to reconnect.\"}");
         return;
     };
 
-    var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
-        allocator.free(conninfo_z);
-        sendJsonResponse(res, "{\"error\":\"Failed to reconnect. libpq returned null.\"}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    if (!pg_conn.isOk()) {
-        var err_buf: [1024]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"Reconnect failed: ") catch return;
-        utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
-        ew.writeAll("\"}") catch return;
-        allocator.free(conninfo_z);
-        sendJsonResponse(res, fbs.getWritten());
-        return;
-    }
-
-    var schema = pg_conn.fetchSchema(allocator) catch {
-        allocator.free(conninfo_z);
+    var schema = postgres.fetchSchema(pool, allocator) catch {
+        pool.deinit();
         sendJsonResponse(res, "{\"error\":\"Reconnected but failed to fetch schema\"}");
         return;
     };
 
     const schema_text = schema.format(allocator) catch {
         schema.deinit();
-        allocator.free(conninfo_z);
+        pool.deinit();
         sendJsonResponse(res, "{\"error\":\"Reconnected but failed to format schema\"}");
         return;
     };
 
-    var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
+    var enhanced = postgres.fetchEnhancedSchema(pool, allocator) catch null;
 
     freeSchemaState(state);
-    state.conninfo_z = conninfo_z;
+    state.pool = pool;
+    state.conninfo_uri = allocator.dupe(u8, last_ci) catch null;
     state.schema_text = schema_text;
     state.schema_tables = schema.tables;
     state.schema_arena = schema.arena;
@@ -439,7 +414,7 @@ pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Res
     };
     utils.writeJsonEscaped(w, schema_text) catch return;
     var n_tables: usize = 0;
-    if (state.schema_tables) |tables| n_tables = tables.len;
+    if (state.schema_tables) |tbls| n_tables = tbls.len;
     w.print("\",\"tables\":{d}}}", .{n_tables}) catch return;
     sendJsonResponse(res, json_buf.items);
 }
@@ -452,17 +427,10 @@ pub fn handleHealthCheck(handler: *web.Handler, _: *httpz.Request, res: *httpz.R
     }
 
     const allocator = res.arena;
-    const conninfo_z = state.conninfo_z.?;
+    const pool = state.pool.?;
 
     const start_time = std.time.milliTimestamp();
-    var pg_conn = postgres.PgConnection.connect(conninfo_z) catch {
-        sendJsonResponse(res, "{\"connected\":false}");
-        return;
-    };
-    defer pg_conn.deinit();
-
-    const sql: [*:0]const u8 = "SELECT 1";
-    var pg_result = pg_conn.runQuery(allocator, sql) catch {
+    var pg_result = postgres.runQuery(pool, allocator, "SELECT 1") catch {
         sendJsonResponse(res, "{\"connected\":false}");
         return;
     };
@@ -571,7 +539,6 @@ pub fn handlePostConnection(handler: *web.Handler, req: *httpz.Request, res: *ht
     const nw = new_file.writer(allocator);
 
     const close_bracket = std.mem.lastIndexOfScalar(u8, existing, ']') orelse {
-        // Malformed file -- rewrite from scratch
         nw.writeAll("{\"connections\":[") catch {
             sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;

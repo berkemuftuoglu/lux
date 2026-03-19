@@ -2,6 +2,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const httpz = @import("httpz");
+const pg = @import("pg");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const crud = @import("crud");
@@ -115,7 +116,8 @@ pub const ServerState = struct {
     };
 
     allocator: std.mem.Allocator,
-    conninfo_z: ?[:0]u8 = null,
+    pool: ?*pg.Pool = null,
+    conninfo_uri: ?[]const u8 = null,
     schema_tables: ?[]postgres.TableInfo = null,
     schema_text: ?[]u8 = null,
     schema_arena: ?std.heap.ArenaAllocator = null,
@@ -145,7 +147,7 @@ pub const ServerState = struct {
     }
 
     pub fn hasDbConnection(self: *const ServerState) bool {
-        return self.conninfo_z != null;
+        return self.pool != null;
     }
 
     pub fn deinit(self: *ServerState) void {
@@ -164,7 +166,8 @@ pub const ServerState = struct {
             if (entry.error_msg) |e| self.allocator.free(e);
         }
         self.query_history.deinit(self.allocator);
-        if (self.conninfo_z) |old| self.allocator.free(old);
+        if (self.pool) |p| p.deinit();
+        if (self.conninfo_uri) |old| self.allocator.free(@constCast(old));
         if (self.schema_text) |old| self.allocator.free(old);
         if (self.schema_arena) |*a| a.deinit();
         if (self.enhanced_arena) |*a| a.deinit();
