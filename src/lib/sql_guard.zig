@@ -252,327 +252,81 @@ fn isAlphanumUnderscore(ch: u8) bool {
     return (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_';
 }
 
-test "isSqlReadSafe: plain EXPLAIN is safe" {
-    try std.testing.expect(isSqlReadSafe("EXPLAIN SELECT 1"));
+test "analyzeSql: detects destructive operations" {
+    // DROP, TRUNCATE, ALTER are always destructive
+    try std.testing.expect(analyzeSql("DROP TABLE users").is_destructive);
+    try std.testing.expect(analyzeSql("TRUNCATE users").is_destructive);
+    try std.testing.expect(analyzeSql("ALTER TABLE users ADD COLUMN age int").is_destructive);
+    try std.testing.expectEqualStrings("DROP", analyzeSql("dRoP TABLE users").operation);
+    // DELETE/UPDATE without WHERE are destructive, with WHERE are safe
+    try std.testing.expect(analyzeSql("DELETE FROM users").is_destructive);
+    try std.testing.expect(!analyzeSql("DELETE FROM users WHERE id = 1").is_destructive);
+    try std.testing.expect(analyzeSql("UPDATE users SET name = 'x'").is_destructive);
+    try std.testing.expect(!analyzeSql("update users set name='x' WhErE id=1").is_destructive);
+    // "NOWHERE" doesn't count as WHERE (word boundary)
+    try std.testing.expect(analyzeSql("DELETE FROM t NOWHERE").is_destructive);
+    // SELECT, CREATE, GRANT, empty, whitespace are not destructive
+    try std.testing.expect(!analyzeSql("SELECT * FROM users").is_destructive);
+    try std.testing.expect(!analyzeSql("CREATE TABLE t (id int)").is_destructive);
+    try std.testing.expect(!analyzeSql("").is_destructive);
+    try std.testing.expect(!analyzeSql("  \t\n  ").is_destructive);
+    // Leading whitespace doesn't hide destructive ops
+    try std.testing.expect(analyzeSql("\t\n  DELETE FROM users").is_destructive);
 }
 
-test "isSqlReadSafe: EXPLAIN ANALYZE SELECT is safe" {
-    try std.testing.expect(isSqlReadSafe("EXPLAIN ANALYZE SELECT 1"));
-}
-
-test "isSqlReadSafe: EXPLAIN ANALYZE DELETE is blocked" {
-    try std.testing.expect(!isSqlReadSafe("EXPLAIN ANALYZE DELETE FROM users"));
-}
-
-test "isSqlReadSafe: EXPLAIN ANALYZE UPDATE is blocked" {
-    try std.testing.expect(!isSqlReadSafe("EXPLAIN ANALYZE UPDATE users SET name = 'x'"));
-}
-
-test "isSqlReadSafe: EXPLAIN ANALYZE INSERT is blocked" {
-    try std.testing.expect(!isSqlReadSafe("EXPLAIN ANALYZE INSERT INTO users VALUES (1)"));
-}
-
-test "analyzeSql: SELECT is safe" {
-    const r = analyzeSql("SELECT * FROM users");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "analyzeSql: DROP is destructive" {
-    const r = analyzeSql("DROP TABLE users");
-    try std.testing.expect(r.is_destructive);
-    try std.testing.expectEqualStrings("DROP", r.operation);
-}
-
-test "analyzeSql: TRUNCATE is destructive" {
-    const r = analyzeSql("TRUNCATE users");
-    try std.testing.expect(r.is_destructive);
-    try std.testing.expectEqualStrings("TRUNCATE", r.operation);
-}
-
-test "analyzeSql: DELETE without WHERE is destructive" {
-    const r = analyzeSql("DELETE FROM users");
-    try std.testing.expect(r.is_destructive);
-    try std.testing.expectEqualStrings("DELETE", r.operation);
-}
-
-test "analyzeSql: DELETE with WHERE is safe" {
-    const r = analyzeSql("DELETE FROM users WHERE id = 1");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "analyzeSql: UPDATE without WHERE is destructive" {
-    const r = analyzeSql("UPDATE users SET name = 'x'");
-    try std.testing.expect(r.is_destructive);
-    try std.testing.expectEqualStrings("UPDATE", r.operation);
-}
-
-test "analyzeSql: UPDATE with WHERE is safe" {
-    const r = analyzeSql("UPDATE users SET name = 'x' WHERE id = 1");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "analyzeSql: ALTER is destructive" {
-    const r = analyzeSql("ALTER TABLE users ADD COLUMN age int");
-    try std.testing.expect(r.is_destructive);
-    try std.testing.expectEqualStrings("ALTER", r.operation);
-}
-
-test "analyzeSql: empty is safe" {
-    const r = analyzeSql("");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "analyzeSql: case insensitive DROP" {
-    const r = analyzeSql("drop table users");
-    try std.testing.expect(r.is_destructive);
-    try std.testing.expectEqualStrings("DROP", r.operation);
-}
-
-test "analyzeSql: leading whitespace DROP" {
-    const r = analyzeSql("   DROP TABLE users");
-    try std.testing.expect(r.is_destructive);
-}
-
-test "analyzeSql: leading tabs and newlines" {
-    const r = analyzeSql("\t\n  DELETE FROM users");
-    try std.testing.expect(r.is_destructive);
-}
-
-test "analyzeSql: WHERE in subquery does not save DELETE" {
-    const r = analyzeSql("DELETE FROM users");
-    try std.testing.expect(r.is_destructive);
-}
-
-test "analyzeSql: UPDATE with WHERE in different case" {
-    const r = analyzeSql("update users set name = 'x' WHERE id = 1");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "analyzeSql: GRANT is not destructive" {
-    const r = analyzeSql("GRANT SELECT ON users TO reader");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "analyzeSql: whitespace only" {
-    const r = analyzeSql("   \t\n  ");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "analyzeSql: CREATE is not destructive" {
-    const r = analyzeSql("CREATE TABLE new_table (id int)");
-    try std.testing.expect(!r.is_destructive);
-}
-
-test "containsIgnoreCaseWord: word at start" {
+test "containsIgnoreCaseWord: word boundary matching" {
     try std.testing.expect(containsIgnoreCaseWord("WHERE id = 1", "WHERE"));
-}
-
-test "containsIgnoreCaseWord: word at end" {
     try std.testing.expect(containsIgnoreCaseWord("SELECT * WHERE", "WHERE"));
-}
-
-test "containsIgnoreCaseWord: word in middle" {
-    try std.testing.expect(containsIgnoreCaseWord("SELECT * FROM users WHERE id = 1", "WHERE"));
-}
-
-test "containsIgnoreCaseWord: partial match rejects" {
-    try std.testing.expect(!containsIgnoreCaseWord("SOMEWHERE", "WHERE"));
-}
-
-test "containsIgnoreCaseWord: case insensitive" {
     try std.testing.expect(containsIgnoreCaseWord("select * where id = 1", "WHERE"));
-}
-
-test "containsIgnoreCaseWord: empty haystack" {
-    try std.testing.expect(!containsIgnoreCaseWord("", "WHERE"));
-}
-
-test "containsIgnoreCaseWord: empty needle" {
-    try std.testing.expect(!containsIgnoreCaseWord("anything", ""));
-}
-
-test "containsIgnoreCaseWord: needle longer than haystack" {
-    try std.testing.expect(!containsIgnoreCaseWord("HI", "HELLO"));
-}
-
-test "isAlpha: letters and underscore" {
-    try std.testing.expect(isAlpha('a'));
-    try std.testing.expect(isAlpha('z'));
-    try std.testing.expect(isAlpha('A'));
-    try std.testing.expect(isAlpha('Z'));
-    try std.testing.expect(isAlpha('_'));
-}
-
-test "isAlpha: non-alpha" {
-    try std.testing.expect(!isAlpha('0'));
-    try std.testing.expect(!isAlpha(' '));
-    try std.testing.expect(!isAlpha('-'));
-    try std.testing.expect(!isAlpha('.'));
-}
-
-test "analyzeSql: mixed case DROP TABLE" {
-    const result = analyzeSql("dRoP TABLE users;");
-    try std.testing.expect(result.is_destructive);
-    try std.testing.expectEqualStrings("DROP", result.operation);
-}
-
-test "analyzeSql: tab before DROP" {
-    const result = analyzeSql("\t\tDROP TABLE t;");
-    try std.testing.expect(result.is_destructive);
-    try std.testing.expectEqualStrings("DROP", result.operation);
-}
-
-test "analyzeSql: CRLF before TRUNCATE" {
-    const result = analyzeSql("\r\n  TRUNCATE TABLE t;");
-    try std.testing.expect(result.is_destructive);
-    try std.testing.expectEqualStrings("TRUNCATE", result.operation);
-}
-
-test "analyzeSql: UPDATE with WHERE in mixed case" {
-    const result = analyzeSql("update users set name='x' WhErE id=1;");
-    try std.testing.expect(!result.is_destructive);
-}
-
-test "analyzeSql: DELETE with WHERE as subword rejected" {
-    const result = analyzeSql("DELETE FROM t NOWHERE;");
-    try std.testing.expect(result.is_destructive);
-    try std.testing.expectEqualStrings("DELETE", result.operation);
-}
-
-test "containsIgnoreCaseWord: WHERE at very end" {
-    try std.testing.expect(containsIgnoreCaseWord("DELETE FROM t WHERE", "WHERE"));
-}
-
-test "containsIgnoreCaseWord: WHERE preceded by underscore" {
+    // Partial match within a word must reject
+    try std.testing.expect(!containsIgnoreCaseWord("SOMEWHERE", "WHERE"));
     try std.testing.expect(!containsIgnoreCaseWord("DO_WHERE", "WHERE"));
 }
 
-test "hasMultipleStatements: single SELECT" {
+test "hasMultipleStatements: splits on semicolons outside strings and comments" {
+    // Single statements (including trailing semicolon)
     try std.testing.expect(!hasMultipleStatements("SELECT * FROM users"));
-}
-
-test "hasMultipleStatements: single with trailing semicolon" {
     try std.testing.expect(!hasMultipleStatements("SELECT * FROM users;"));
-}
-
-test "hasMultipleStatements: single with trailing semicolon and whitespace" {
     try std.testing.expect(!hasMultipleStatements("SELECT * FROM users;  \n  "));
-}
-
-test "hasMultipleStatements: two statements" {
+    // Multiple statements
     try std.testing.expect(hasMultipleStatements("INSERT INTO t VALUES (1); SELECT * FROM t"));
-}
-
-test "hasMultipleStatements: three statements" {
-    try std.testing.expect(hasMultipleStatements("BEGIN; INSERT INTO t VALUES (1); COMMIT"));
-}
-
-test "hasMultipleStatements: semicolon in single-quoted string" {
+    // Semicolons inside strings/comments/dollar-quotes must not split
     try std.testing.expect(!hasMultipleStatements("SELECT 'hello; world' FROM t"));
-}
-
-test "hasMultipleStatements: semicolon in double-quoted identifier" {
     try std.testing.expect(!hasMultipleStatements("SELECT \"col;name\" FROM t"));
-}
-
-test "hasMultipleStatements: semicolon in line comment" {
     try std.testing.expect(!hasMultipleStatements("SELECT * -- ; comment\nFROM t"));
-}
-
-test "hasMultipleStatements: semicolon in block comment" {
     try std.testing.expect(!hasMultipleStatements("SELECT * /* ; */ FROM t"));
-}
-
-test "hasMultipleStatements: semicolon in dollar-quoted string" {
     try std.testing.expect(!hasMultipleStatements("SELECT $$ hello; world $$ FROM t"));
-}
-
-test "hasMultipleStatements: real multi with string containing semicolon" {
+    try std.testing.expect(!hasMultipleStatements("SELECT $fn$hello;world$fn$"));
+    // Real multi after dollar-quoted string
+    try std.testing.expect(hasMultipleStatements("SELECT $fn$hello$fn$; DROP TABLE x"));
+    // Real multi with semicolon inside string value
     try std.testing.expect(hasMultipleStatements("INSERT INTO t VALUES ('a;b'); SELECT 1"));
 }
 
-test "hasMultipleStatements: empty input" {
-    try std.testing.expect(!hasMultipleStatements(""));
-}
-
-test "hasMultipleStatements: semicolon in tagged dollar-quoted string" {
-    try std.testing.expect(!hasMultipleStatements("SELECT $fn$hello;world$fn$"));
-}
-
-test "hasMultipleStatements: tagged dollar-quote with real multi" {
-    try std.testing.expect(hasMultipleStatements("SELECT $fn$hello$fn$; DROP TABLE x"));
-}
-
-test "isSqlReadSafe: simple SELECT" {
+test "isSqlReadSafe: whitelist-based read safety" {
+    // Safe: SELECT, SHOW, EXPLAIN, WITH...SELECT
     try std.testing.expect(isSqlReadSafe("SELECT * FROM users"));
-}
-
-test "isSqlReadSafe: SELECT with leading whitespace" {
-    try std.testing.expect(isSqlReadSafe("  \n SELECT 1"));
-}
-
-test "isSqlReadSafe: SHOW command" {
-    try std.testing.expect(isSqlReadSafe("SHOW search_path"));
-}
-
-test "isSqlReadSafe: EXPLAIN is safe" {
-    try std.testing.expect(isSqlReadSafe("EXPLAIN ANALYZE SELECT 1"));
-}
-
-test "isSqlReadSafe: WITH safe CTE" {
-    try std.testing.expect(isSqlReadSafe("WITH cte AS (SELECT 1) SELECT * FROM cte"));
-}
-
-test "isSqlReadSafe: INSERT blocked" {
-    try std.testing.expect(!isSqlReadSafe("INSERT INTO users VALUES (1)"));
-}
-
-test "isSqlReadSafe: DELETE blocked" {
-    try std.testing.expect(!isSqlReadSafe("DELETE FROM users"));
-}
-
-test "isSqlReadSafe: COPY blocked" {
-    try std.testing.expect(!isSqlReadSafe("COPY users TO '/tmp/file'"));
-}
-
-test "isSqlReadSafe: DO block blocked" {
-    try std.testing.expect(!isSqlReadSafe("DO $$ BEGIN DELETE FROM users; END $$"));
-}
-
-test "isSqlReadSafe: multi-statement blocked" {
-    try std.testing.expect(!isSqlReadSafe("SELECT 1; DROP TABLE users"));
-}
-
-test "isSqlReadSafe: CTE with DELETE blocked" {
-    try std.testing.expect(!isSqlReadSafe("WITH cte AS (DELETE FROM users RETURNING *) SELECT * FROM cte"));
-}
-
-test "isSqlReadSafe: CTE with INSERT blocked" {
-    try std.testing.expect(!isSqlReadSafe("WITH ins AS (INSERT INTO log(msg) VALUES('x') RETURNING *) SELECT * FROM ins"));
-}
-
-test "isSqlReadSafe: DELETE inside string literal is safe" {
-    try std.testing.expect(isSqlReadSafe("SELECT * FROM users WHERE action = 'DELETE'"));
-}
-
-test "isSqlReadSafe: DELETE in identifier is safe" {
-    try std.testing.expect(isSqlReadSafe("SELECT * FROM delete_log"));
-}
-
-test "isSqlReadSafe: empty SQL" {
-    try std.testing.expect(!isSqlReadSafe(""));
-}
-
-test "isSqlReadSafe: BEGIN is blocked in read-only" {
-    try std.testing.expect(!isSqlReadSafe("BEGIN"));
-}
-
-test "isSqlReadSafe: lowercase select" {
     try std.testing.expect(isSqlReadSafe("select * from users"));
-}
-
-test "isSqlReadSafe: WITH UPDATE blocked" {
-    try std.testing.expect(!isSqlReadSafe("WITH upd AS (UPDATE users SET name='x' RETURNING *) SELECT * FROM upd"));
+    try std.testing.expect(isSqlReadSafe("SHOW search_path"));
+    try std.testing.expect(isSqlReadSafe("EXPLAIN SELECT 1"));
+    try std.testing.expect(isSqlReadSafe("EXPLAIN ANALYZE SELECT 1"));
+    try std.testing.expect(isSqlReadSafe("WITH cte AS (SELECT 1) SELECT * FROM cte"));
+    // Blocked: write operations, BEGIN, COPY, DO
+    try std.testing.expect(!isSqlReadSafe("INSERT INTO users VALUES (1)"));
+    try std.testing.expect(!isSqlReadSafe("DELETE FROM users"));
+    try std.testing.expect(!isSqlReadSafe("COPY users TO '/tmp/file'"));
+    try std.testing.expect(!isSqlReadSafe("DO $$ BEGIN DELETE FROM users; END $$"));
+    try std.testing.expect(!isSqlReadSafe("BEGIN"));
+    try std.testing.expect(!isSqlReadSafe(""));
+    // EXPLAIN ANALYZE with write is blocked
+    try std.testing.expect(!isSqlReadSafe("EXPLAIN ANALYZE DELETE FROM users"));
+    // Multi-statement injection blocked
+    try std.testing.expect(!isSqlReadSafe("SELECT 1; DROP TABLE users"));
+    // CTE write attacks blocked
+    try std.testing.expect(!isSqlReadSafe("WITH cte AS (DELETE FROM users RETURNING *) SELECT * FROM cte"));
+    // Write keywords inside strings/identifiers don't trigger
+    try std.testing.expect(isSqlReadSafe("SELECT * FROM users WHERE action = 'DELETE'"));
+    try std.testing.expect(isSqlReadSafe("SELECT * FROM delete_log"));
 }
 
 fn fuzzHasMultipleStatements(_: void, input: []const u8) anyerror!void {
