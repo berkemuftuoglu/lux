@@ -9,7 +9,6 @@
 <link rel="stylesheet" href="/css/base.css">
 <link rel="stylesheet" href="/css/layout.css">
 <link rel="stylesheet" href="/css/sidebar.css">
-<link rel="stylesheet" href="/css/tabs.css">
 <link rel="stylesheet" href="/css/toolbar.css">
 <link rel="stylesheet" href="/css/grid.css">
 <link rel="stylesheet" href="/css/pagination.css">
@@ -118,26 +117,6 @@
 
   <!-- Content -->
   <div class="content">
-    <nav class="tab-bar" role="tablist" aria-label="Main panels">
-      <button class="tab active" data-tab="tables" role="tab" aria-selected="true" aria-controls="panel-tables">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
-        Tables
-      </button>
-      <button class="tab" data-tab="sql" role="tab" aria-selected="false" aria-controls="panel-sql">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-        SQL
-      </button>
-      <button class="tab" data-tab="er" role="tab" aria-selected="false" aria-controls="panel-er">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="8" height="6" rx="1"/><rect x="14" y="3" width="8" height="6" rx="1"/><rect x="8" y="15" width="8" height="6" rx="1"/><line x1="6" y1="9" x2="12" y2="15"/><line x1="18" y1="9" x2="12" y2="15"/></svg>
-        ER
-      </button>
-      <button class="tab" data-tab="journal" role="tab" aria-selected="false" aria-controls="panel-journal">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        Journal
-        <span class="badge" id="journal-badge">0</span>
-      </button>
-    </nav>
-
     <!-- Tables Panel -->
     <div class="tab-panel active" id="panel-tables" role="tabpanel">
       <div class="toolbar" id="table-toolbar" style="display:none">

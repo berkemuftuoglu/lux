@@ -232,8 +232,28 @@
 	position: relative;
 }
 
-.tab-bar {
+.tab-panel {
+	flex: 1;
 	display: none;
+	flex-direction: column;
+	overflow: hidden;
+}
+
+@keyframes tabFadeIn {
+	from {
+		opacity: 0;
+		transform: translateY(4px);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+.tab-panel.active {
+	display: flex;
+	animation: tabFadeIn 0.15s ease-out;
 }
 
 .header .logo,

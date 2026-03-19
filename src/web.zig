@@ -29,7 +29,6 @@ const static_files = .{
     .{ "/css/base.css", "text/css", "src/static/css/base.css", @embedFile("static/css/base.css") },
     .{ "/css/layout.css", "text/css", "src/static/css/layout.css", @embedFile("static/css/layout.css") },
     .{ "/css/sidebar.css", "text/css", "src/static/css/sidebar.css", @embedFile("static/css/sidebar.css") },
-    .{ "/css/tabs.css", "text/css", "src/static/css/tabs.css", @embedFile("static/css/tabs.css") },
     .{ "/css/toolbar.css", "text/css", "src/static/css/toolbar.css", @embedFile("static/css/toolbar.css") },
     .{ "/css/grid.css", "text/css", "src/static/css/grid.css", @embedFile("static/css/grid.css") },
     .{ "/css/pagination.css", "text/css", "src/static/css/pagination.css", @embedFile("static/css/pagination.css") },
@@ -485,8 +484,8 @@ test "isValidPath: space 0x20 is valid" {
     try std.testing.expect(isValidPath("/api/search?q=hello world"));
 }
 
-test "static_files tuple: has 29 JS/CSS entries" {
-    try std.testing.expectEqual(@as(usize, 29), static_files.len);
+test "static_files tuple: has 28 JS/CSS entries" {
+    try std.testing.expectEqual(@as(usize, 28), static_files.len);
 }
 
 comptime {

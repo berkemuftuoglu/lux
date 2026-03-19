@@ -408,8 +408,10 @@ function updateReadOnlyUI() {
 function bumpJournal() {
 	State.journalCount++;
 	const badge = $('journal-badge');
-	badge.textContent = State.journalCount;
-	badge.classList.add('show');
+	if (badge) {
+		badge.textContent = State.journalCount;
+		badge.classList.add('show');
+	}
 	const railBadge = $('rail-journal-badge');
 	if (railBadge) {
 		railBadge.textContent = State.journalCount;
@@ -418,7 +420,8 @@ function bumpJournal() {
 }
 function clearJournalBadge() {
 	State.journalCount = 0;
-	$('journal-badge').classList.remove('show');
+	const jBadge = $('journal-badge');
+	if (jBadge) jBadge.classList.remove('show');
 	const railBadge = $('rail-journal-badge');
 	if (railBadge) railBadge.classList.remove('show');
 }

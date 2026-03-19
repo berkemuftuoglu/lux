@@ -124,8 +124,12 @@ document.addEventListener('keydown', (e) => {
 		e.preventDefault();
 		$$('.tab').forEach((t) => t.classList.remove('active'));
 		$$('.tab-panel').forEach((p) => p.classList.remove('active'));
-		document.querySelector('[data-tab="sql"]').classList.add('active');
+		const sqlTab = document.querySelector('[data-tab="sql"]');
+		if (sqlTab) sqlTab.classList.add('active');
 		$('panel-sql').classList.add('active');
+		$$('.rail-btn').forEach((r) => r.classList.remove('active'));
+		const sqlRail = document.querySelector('.rail-btn[data-rail="sql"]');
+		if (sqlRail) sqlRail.classList.add('active');
 		sqlEditor.focus();
 	}
 	if (
@@ -210,8 +214,12 @@ document.addEventListener('keydown', (e) => {
 		addSqlTab();
 		$$('.tab').forEach((t) => t.classList.remove('active'));
 		$$('.tab-panel').forEach((p) => p.classList.remove('active'));
-		document.querySelector('[data-tab="sql"]').classList.add('active');
+		const sqlTab2 = document.querySelector('[data-tab="sql"]');
+		if (sqlTab2) sqlTab2.classList.add('active');
 		$('panel-sql').classList.add('active');
+		$$('.rail-btn').forEach((r) => r.classList.remove('active'));
+		const sqlRail2 = document.querySelector('.rail-btn[data-rail="sql"]');
+		if (sqlRail2) sqlRail2.classList.add('active');
 	}
 	if ((e.ctrlKey || e.metaKey) && e.key === 's') {
 		e.preventDefault();
