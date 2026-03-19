@@ -1,11 +1,9 @@
 const std = @import("std");
+const httpz = @import("httpz");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const web = @import("web");
 const crud = @import("crud");
-
-const ServerState = web.ServerState;
-const HandlerError = web.HandlerError;
 
 const ExportError = error{
     OutOfMemory,
@@ -18,6 +16,17 @@ const CsvParseError = error{
     ColumnCountMismatch,
     OutOfMemory,
 };
+
+fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
+
+fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
+    res.status = status;
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
 
 fn escapeCsvField(writer: anytype, field: []const u8) !void {
     var needs_quoting = false;
@@ -195,7 +204,6 @@ fn parseCsvContent(
 
     if (all_rows.items.len < 2) {
         const empty_rows = allocator.alloc([]const []const u8, 0) catch return error.OutOfMemory;
-        // Remove the header from all_rows so errdefer doesn't free it
         _ = all_rows.orderedRemove(0);
         return .{ .headers = headers, .rows = empty_rows };
     }
@@ -204,7 +212,6 @@ fn parseCsvContent(
     for (all_rows.items[1..], 0..) |row, i| {
         data_rows[i] = row;
     }
-    // Clear all_rows so errdefer doesn't double-free
     all_rows.clearRetainingCapacity();
     return .{ .headers = headers, .rows = data_rows };
 }
@@ -245,33 +252,27 @@ fn buildAndExecuteInsert(
     return true;
 }
 
-pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
+    const allocator = res.arena;
 
-    const prefix = "/api/export/";
-    if (!std.mem.startsWith(u8, path, prefix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
+    const table_name = req.param("table_name") orelse {
+        sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
         return;
-    }
-
-    const after_prefix = path[prefix.len..];
-    const path_part = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[0..qi] else after_prefix;
-    const query_string = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[qi + 1 ..] else "";
-
-    const table_name = path_part;
+    };
     if (table_name.len == 0 or table_name.len > 128) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid table name\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
         return;
     }
 
     // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
+        sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
     };
     {
@@ -283,143 +284,121 @@ pub fn handleExport(stream: std.net.Stream, _: []const u8, path: []const u8, sta
             }
         }
         if (!found) {
-            try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Table not found in schema\"}");
+            sendJsonError(res, 404, "{\"error\":\"Table not found in schema\"}");
             return;
         }
     }
 
+    const query_string = if (std.mem.indexOfScalar(u8, req.url.path, '?')) |qi| req.url.path[qi + 1 ..] else "";
     var fmt_buf: [8]u8 = undefined;
     const format_param = utils.parseStringQueryParam(query_string, "format", &fmt_buf) orelse "csv";
 
     const is_csv = std.mem.eql(u8, format_param, "csv");
     const is_json = std.mem.eql(u8, format_param, "json");
     if (!is_csv and !is_json) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid format. Use csv or json.\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid format. Use csv or json.\"}");
         return;
     }
 
     const conninfo_z = state.conninfo_z orelse {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     };
 
     var pg_conn = postgres.PgConnection.connect(conninfo_z) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to connect to database\"}");
+        sendJsonResponse(res, "{\"error\":\"Failed to connect to database\"}");
         return;
     };
     defer pg_conn.deinit();
 
     var sql_buf: [256]u8 = undefined;
     const sql = std.fmt.bufPrintZ(&sql_buf, "SELECT * FROM \"{s}\"", .{table_name}) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Table name too long\"}");
+        sendJsonError(res, 500, "{\"error\":\"Table name too long\"}");
         return;
     };
 
     var result = pg_conn.runQuery(allocator, sql) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Query failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Query failed\"}");
         return;
     };
     defer result.deinit();
 
     if (is_csv) {
         const csv_data = formatResultAsCsv(allocator, result.col_names, result.rows) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format CSV\"}");
+            sendJsonError(res, 500, "{\"error\":\"Failed to format CSV\"}");
             return;
         };
 
         var filename_buf: [256]u8 = undefined;
         const filename = std.fmt.bufPrint(&filename_buf, "{s}.csv", .{table_name}) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Filename too long\"}");
+            sendJsonError(res, 500, "{\"error\":\"Filename too long\"}");
             return;
         };
 
-        try utils.sendResponseWithDownload(stream, "200 OK", "text/csv; charset=utf-8", filename, csv_data);
+        res.content_type = httpz.ContentType.CSV;
+        res.body = csv_data;
+        res.header("content-disposition", try std.fmt.allocPrint(allocator, "attachment; filename=\"{s}\"", .{filename}));
     } else {
         const json_data = formatResultAsJson(allocator, result.col_names, result.rows) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format JSON\"}");
+            sendJsonError(res, 500, "{\"error\":\"Failed to format JSON\"}");
             return;
         };
 
         var filename_buf: [256]u8 = undefined;
         const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{table_name}) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Filename too long\"}");
+            sendJsonError(res, 500, "{\"error\":\"Filename too long\"}");
             return;
         };
 
-        try utils.sendResponseWithDownload(stream, "200 OK", "application/json", filename, json_data);
+        res.content_type = httpz.ContentType.JSON;
+        res.body = json_data;
+        res.header("content-disposition", try std.fmt.allocPrint(allocator, "attachment; filename=\"{s}\"", .{filename}));
     }
 }
 
-pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
-
-    const content_length = utils.findContentLength(request) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing Content-Length\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
-    if (content_length > 8192) {
-        try utils.sendResponse(stream, "413 Payload Too Large", "application/json", "{\"error\":\"SQL too large\"}");
-        return;
-    }
-    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Malformed request\"}");
-        return;
-    };
-    const body_start = header_end + 4;
-    var body = request[body_start..];
-    var extra_buf: [8192]u8 = undefined;
-    if (body.len < content_length) {
-        const already_have = body.len;
-        @memcpy(extra_buf[0..already_have], body);
-        var read_so_far = already_have;
-        while (read_so_far < content_length) {
-            const n = stream.read(extra_buf[read_so_far..content_length]) catch {
-                try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Read failed\"}");
-                return;
-            };
-            if (n == 0) break;
-            read_so_far += n;
-        }
-        body = extra_buf[0..read_so_far];
-    } else {
-        body = body[0..content_length];
-    }
 
-    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
+    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
     if (sql_text.len == 0) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Empty SQL\"}");
+        sendJsonError(res, 400, "{\"error\":\"Empty SQL\"}");
         return;
     }
 
     const sql_guard = @import("sql_guard");
     if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
-        try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to export write operations.\"}");
+        sendJsonError(res, 403, "{\"error\":\"Read-only mode is enabled. Disable it to export write operations.\"}");
         return;
     }
 
-    const format = utils.extractJsonField(arena, body, "format") orelse "csv";
+    const format = utils.extractJsonField(allocator, body, "format") orelse "csv";
     const is_csv = std.mem.eql(u8, format, "csv");
     const is_json = std.mem.eql(u8, format, "json");
     if (!is_csv and !is_json) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid format. Use csv or json.\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid format. Use csv or json.\"}");
         return;
     }
 
     const sql_z = allocator.dupeZ(u8, sql_text) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -431,56 +410,51 @@ pub fn handleSqlExport(stream: std.net.Stream, request: []const u8, _: []const u
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
 
     if (is_csv) {
         const csv_data = formatResultAsCsv(allocator, pg_result.col_names, pg_result.rows) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format CSV\"}");
+            sendJsonError(res, 500, "{\"error\":\"Failed to format CSV\"}");
             return;
         };
-        try utils.sendResponseWithDownload(stream, "200 OK", "text/csv; charset=utf-8", "export.csv", csv_data);
+        res.content_type = httpz.ContentType.CSV;
+        res.body = csv_data;
+        res.header("content-disposition", "attachment; filename=\"export.csv\"");
     } else {
         const json_data = formatResultAsJson(allocator, pg_result.col_names, pg_result.rows) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to format JSON\"}");
+            sendJsonError(res, 500, "{\"error\":\"Failed to format JSON\"}");
             return;
         };
-        try utils.sendResponseWithDownload(stream, "200 OK", "application/json", "export.json", json_data);
+        res.content_type = httpz.ContentType.JSON;
+        res.body = json_data;
+        res.header("content-disposition", "attachment; filename=\"export.json\"");
     }
 }
 
-pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
+    const allocator = res.arena;
 
-    const prefix = "/api/tables/";
-    if (!std.mem.startsWith(u8, path, prefix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
+    const table_name = req.param("table_path") orelse {
+        sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
         return;
-    }
-
-    const after_prefix = path[prefix.len..];
-    const ddl_suffix = "/ddl";
-    if (!std.mem.endsWith(u8, after_prefix, ddl_suffix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Expected /api/tables/<name>/ddl\"}");
-        return;
-    }
-
-    const table_name = after_prefix[0 .. after_prefix.len - ddl_suffix.len];
+    };
     if (table_name.len == 0 or table_name.len > 128) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid table name\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
         return;
     }
 
     // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
+        sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
     };
     {
@@ -492,13 +466,13 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
             }
         }
         if (!found) {
-            try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Table not found in schema\"}");
+            sendJsonError(res, 404, "{\"error\":\"Table not found in schema\"}");
             return;
         }
     }
 
     const escaped_name = utils.escapeStringValue(allocator, table_name) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
@@ -527,7 +501,7 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -539,13 +513,13 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
 
     if (pg_result.n_rows == 0 or pg_result.rows.len == 0 or pg_result.rows[0].len == 0) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Could not generate DDL for table\"}");
+        sendJsonResponse(res, "{\"error\":\"Could not generate DDL for table\"}");
         return;
     }
 
@@ -556,70 +530,53 @@ pub fn handleTableDdl(stream: std.net.Stream, _: []const u8, path: []const u8, s
     try w.writeAll("{\"ddl\":\"");
     try utils.writeJsonEscaped(w, ddl_text);
     try w.writeAll("\"}");
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleCsvImport(
-    stream: std.net.Stream,
-    request: []const u8,
-    path: []const u8,
-    state: *ServerState,
-    arena: std.mem.Allocator,
-) HandlerError!void {
-    if (try crud.enforceReadOnly(stream, state)) return;
+pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (crud.enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
+    const allocator = res.arena;
 
-    const prefix = "/api/tables/";
-    if (!std.mem.startsWith(u8, path, prefix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
+    const table_name = req.param("table_path") orelse {
+        sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
         return;
-    }
-
-    const after_prefix = path[prefix.len..];
-    const import_suffix = "/import";
-    if (!std.mem.endsWith(u8, after_prefix, import_suffix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Expected /api/tables/<name>/import\"}");
-        return;
-    }
-
-    const table_name = after_prefix[0 .. after_prefix.len - import_suffix.len];
+    };
     if (table_name.len == 0 or table_name.len > 128) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid table name\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
         return;
     }
 
     const tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
+        sendJsonError(res, 400, "{\"error\":\"No schema available\"}");
         return;
     };
     const table_info = crud.findTableInSchema(tables, table_name) orelse {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Table not found in schema\"}");
+        sendJsonError(res, 404, "{\"error\":\"Table not found in schema\"}");
         return;
     };
 
-    const max_request_size = 8192;
-    var extra_buf: [max_request_size]u8 = undefined;
-    const body = crud.readRequestBody(stream, request, &extra_buf, max_request_size) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing or invalid request body\"}");
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const csv_content = utils.extractJsonField(arena, body, "csv") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing csv field\"}");
+    const csv_content = utils.extractJsonField(allocator, body, "csv") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing csv field\"}");
         return;
     };
 
     if (csv_content.len == 0) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Empty CSV content\"}");
+        sendJsonError(res, 400, "{\"error\":\"Empty CSV content\"}");
         return;
     }
 
-    const has_header_str = utils.extractJsonField(arena, body, "has_header");
+    const has_header_str = utils.extractJsonField(allocator, body, "has_header");
     const has_header = if (has_header_str) |h| !std.mem.eql(u8, h, "false") else true;
 
     const csv_result = parseCsvContent(allocator, csv_content) catch |err| {
@@ -629,7 +586,7 @@ pub fn handleCsvImport(
             error.ColumnCountMismatch => "{\"error\":\"CSV column count mismatch\"}",
             error.OutOfMemory => "{\"error\":\"Out of memory parsing CSV\"}",
         };
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", msg);
+        sendJsonError(res, 400, msg);
         return;
     };
 
@@ -644,11 +601,11 @@ pub fn handleCsvImport(
                 ew.writeAll("{\"error\":\"CSV column '") catch return;
                 utils.writeJsonEscaped(ew, header) catch return;
                 ew.writeAll("' not found in table schema\"}") catch return;
-                try utils.sendResponse(stream, "400 Bad Request", "application/json", fbs.getWritten());
+                sendJsonError(res, 400, fbs.getWritten());
                 return;
             }
             col_names.append(allocator, header) catch {
-                try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+                sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                 return;
             };
         }
@@ -656,25 +613,25 @@ pub fn handleCsvImport(
         // parseCsv always treats first row as headers, so without has_header these are data
         const field_count = csv_result.headers.len;
         if (field_count > table_info.columns.len) {
-            try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"CSV has more columns than table\"}");
+            sendJsonError(res, 400, "{\"error\":\"CSV has more columns than table\"}");
             return;
         }
         for (table_info.columns[0..field_count]) |col| {
             col_names.append(allocator, col.name) catch {
-                try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+                sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                 return;
             };
         }
     }
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
 
     var begin_result = pg_conn.runQuery(allocator, "BEGIN") catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to start transaction\"}");
+        sendJsonResponse(res, "{\"error\":\"Failed to start transaction\"}");
         return;
     };
     begin_result.deinit();
@@ -722,7 +679,7 @@ pub fn handleCsvImport(
 
     if (insert_error) {
         var rb = pg_conn.runQuery(allocator, "ROLLBACK") catch {
-            try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Insert failed and rollback failed\"}");
+            sendJsonResponse(res, "{\"error\":\"Insert failed and rollback failed\"}");
             return;
         };
         rb.deinit();
@@ -731,57 +688,42 @@ pub fn handleCsvImport(
         try rw.writeAll("{\"error\":\"Import failed: ");
         try utils.writeJsonEscaped(rw, error_msg_buf[0..error_msg_len]);
         try rw.writeAll("\"}");
-        try utils.sendResponse(stream, "200 OK", "application/json", resp_buf.items);
+        sendJsonResponse(res, resp_buf.items);
         return;
     }
 
     var commit_result = pg_conn.runQuery(allocator, "COMMIT") catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Commit failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Commit failed\"}");
         return;
     };
     commit_result.deinit();
 
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"imported\":{d}}}", .{imported}) catch "{\"error\":\"fmt\"}";
-    try utils.sendResponse(stream, "200 OK", "application/json", resp);
+    sendJsonResponse(res, resp);
 }
 
-pub fn handleTableStats(
-    stream: std.net.Stream,
-    _: []const u8,
-    path: []const u8,
-    state: *ServerState,
-    arena: std.mem.Allocator,
-) HandlerError!void {
+pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
+    const allocator = res.arena;
 
-    const prefix = "/api/tables/";
-    if (!std.mem.startsWith(u8, path, prefix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
+    const table_name = req.param("table_path") orelse {
+        sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
         return;
-    }
-
-    const after_prefix = path[prefix.len..];
-    const stats_suffix = "/stats";
-    if (!std.mem.endsWith(u8, after_prefix, stats_suffix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Expected /api/tables/<name>/stats\"}");
-        return;
-    }
-
-    const table_name = after_prefix[0 .. after_prefix.len - stats_suffix.len];
+    };
     if (table_name.len == 0 or table_name.len > 128) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid table name\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
         return;
     }
 
     // Fail-closed: reject if schema not loaded
     const schema_tables_fk = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
+        sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
     };
     {
@@ -793,13 +735,13 @@ pub fn handleTableStats(
             }
         }
         if (!found) {
-            try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Table not found in schema\"}");
+            sendJsonError(res, 404, "{\"error\":\"Table not found in schema\"}");
             return;
         }
     }
 
     const escaped_name = utils.escapeStringValue(allocator, table_name) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
@@ -825,7 +767,7 @@ pub fn handleTableStats(
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -837,13 +779,13 @@ pub fn handleTableStats(
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
 
     if (pg_result.n_rows == 0) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Could not retrieve table stats\"}");
+        sendJsonResponse(res, "{\"error\":\"Could not retrieve table stats\"}");
         return;
     }
 
@@ -865,7 +807,7 @@ pub fn handleTableStats(
     try utils.writeJsonEscaped(w, total_size);
     try w.writeAll("\"}");
 
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
 test "escapeCsvField: plain text passes through" {
@@ -943,389 +885,6 @@ test "escapeCsvField: field with CRLF" {
     defer buf.deinit(std.testing.allocator);
     try escapeCsvField(buf.writer(std.testing.allocator), "a\r\nb");
     try std.testing.expect(buf.items[0] == '"');
-}
-
-test "formatResultAsCsv: basic table" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{ "id", "name" };
-    const row1 = [_][]const u8{ "1", "Alice" };
-    const rows = [_][]const []const u8{&row1};
-    const csv = try formatResultAsCsv(allocator, &cols, &rows);
-    defer allocator.free(csv);
-    try std.testing.expect(std.mem.indexOf(u8, csv, "id,name\r\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, csv, "1,Alice\r\n") != null);
-}
-
-test "formatResultAsCsv: escapes special fields" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{"note"};
-    const row1 = [_][]const u8{"a,b"};
-    const rows = [_][]const []const u8{&row1};
-    const csv = try formatResultAsCsv(allocator, &cols, &rows);
-    defer allocator.free(csv);
-    try std.testing.expect(std.mem.indexOf(u8, csv, "\"a,b\"") != null);
-}
-
-test "formatResultAsCsv: empty rows" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{ "id", "name" };
-    const rows = [_][]const []const u8{};
-    const csv = try formatResultAsCsv(allocator, &cols, &rows);
-    defer allocator.free(csv);
-    try std.testing.expect(std.mem.indexOf(u8, csv, "id,name\r\n") != null);
-}
-
-test "formatResultAsCsv: single column no rows" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{"id"};
-    const rows = [_][]const []const u8{};
-    const csv = try formatResultAsCsv(allocator, &cols, &rows);
-    defer allocator.free(csv);
-    try std.testing.expectEqualStrings("id\r\n", csv);
-}
-
-test "formatResultAsCsv: multiple columns with special chars" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{ "name", "desc" };
-    const row1 = [_][]const u8{ "Alice", "says \"hi\"" };
-    const rows = [_][]const []const u8{&row1};
-    const csv = try formatResultAsCsv(allocator, &cols, &rows);
-    defer allocator.free(csv);
-    try std.testing.expect(std.mem.indexOf(u8, csv, "\"says \"\"hi\"\"\"") != null);
-}
-
-test "formatResultAsJson: basic table" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{ "id", "name" };
-    const row1 = [_][]const u8{ "1", "Alice" };
-    const rows = [_][]const []const u8{&row1};
-    const json = try formatResultAsJson(allocator, &cols, &rows);
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"id\":\"1\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\":\"Alice\"") != null);
-}
-
-test "formatResultAsJson: empty rows" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{ "id", "name" };
-    const rows = [_][]const []const u8{};
-    const json = try formatResultAsJson(allocator, &cols, &rows);
-    defer allocator.free(json);
-    try std.testing.expectEqualStrings("[]", json);
-}
-
-test "formatResultAsJson: escapes special chars in values" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{"note"};
-    const row1 = [_][]const u8{"say \"hi\""};
-    const rows = [_][]const []const u8{&row1};
-    const json = try formatResultAsJson(allocator, &cols, &rows);
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\\\"hi\\\"") != null);
-}
-
-test "formatResultAsJson: NULL value" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{"val"};
-    const row1 = [_][]const u8{"NULL"};
-    const rows = [_][]const []const u8{&row1};
-    const json = try formatResultAsJson(allocator, &cols, &rows);
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "null") != null);
-}
-
-test "formatResultAsJson: empty column names" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{""};
-    const row1 = [_][]const u8{"val"};
-    const rows = [_][]const []const u8{&row1};
-    const json = try formatResultAsJson(allocator, &cols, &rows);
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"\":\"val\"") != null);
-}
-
-test "formatResultAsJson: value with special JSON chars" {
-    const allocator = std.testing.allocator;
-    const cols = [_][]const u8{"data"};
-    const row1 = [_][]const u8{"line1\nline2\ttab"};
-    const rows = [_][]const []const u8{&row1};
-    const json = try formatResultAsJson(allocator, &cols, &rows);
-    defer allocator.free(json);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\\n") != null);
-}
-
-test "parseCsvContent: simple two-column CSV" {
-    const allocator = std.testing.allocator;
-    const csv = "name,age\nAlice,30\nBob,25\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 2), result.headers.len);
-    try std.testing.expectEqualStrings("name", result.headers[0]);
-    try std.testing.expectEqualStrings("age", result.headers[1]);
-    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
-}
-
-test "parseCsvContent: quoted fields with commas" {
-    const allocator = std.testing.allocator;
-    const csv = "a,b\n\"hello,world\",test\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqualStrings("hello,world", result.rows[0][0]);
-}
-
-test "parseCsvContent: escaped double quotes in field" {
-    const allocator = std.testing.allocator;
-    const csv = "a\n\"say \"\"hi\"\"\"\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqualStrings("say \"hi\"", result.rows[0][0]);
-}
-
-test "parseCsvContent: CRLF line endings" {
-    const allocator = std.testing.allocator;
-    const csv = "a,b\r\n1,2\r\n3,4\r\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
-}
-
-test "parseCsvContent: empty input returns error" {
-    const allocator = std.testing.allocator;
-    const result = parseCsvContent(allocator, "");
-    try std.testing.expectError(error.EmptyCsv, result);
-}
-
-test "parseCsvContent: headers only no data rows" {
-    const allocator = std.testing.allocator;
-    const csv = "a,b,c\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 3), result.headers.len);
-    try std.testing.expectEqual(@as(usize, 0), result.rows.len);
-}
-
-test "parseCsvContent: single column single row" {
-    const allocator = std.testing.allocator;
-    const csv = "id\n42\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1), result.headers.len);
-    try std.testing.expectEqualStrings("id", result.headers[0]);
-    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqualStrings("42", result.rows[0][0]);
-}
-
-test "parseCsvContent: no trailing newline" {
-    const allocator = std.testing.allocator;
-    const csv = "a,b\n1,2";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqualStrings("1", result.rows[0][0]);
-    try std.testing.expectEqualStrings("2", result.rows[0][1]);
-}
-
-test "parseCsvContent: quoted field with newline inside" {
-    const allocator = std.testing.allocator;
-    const csv = "a\n\"line1\nline2\"\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqualStrings("line1\nline2", result.rows[0][0]);
-}
-
-test "parseCsvContent: multiple data rows" {
-    const allocator = std.testing.allocator;
-    const csv = "id,name\n1,Alice\n2,Bob\n3,Charlie\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 3), result.rows.len);
-    try std.testing.expectEqualStrings("Charlie", result.rows[2][1]);
-}
-
-test "parseCsvContent: empty field between commas" {
-    const allocator = std.testing.allocator;
-    const csv = "a,b,c\n1,,3\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqualStrings("", result.rows[0][1]);
-}
-
-test "parseCsvContent: whitespace-only lines at end are skipped" {
-    const allocator = std.testing.allocator;
-    const csv = "a\n1\n   \n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expect(result.rows.len <= 2);
-}
-
-test "parseCsvContent: only whitespace returns error" {
-    const allocator = std.testing.allocator;
-    const result = parseCsvContent(allocator, "   \n\r\n  ");
-    try std.testing.expectError(error.EmptyCsv, result);
-}
-
-test "parseCsvContent: single column multiple rows" {
-    const allocator = std.testing.allocator;
-    const csv = "name\nAlice\nBob\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1), result.headers.len);
-    try std.testing.expectEqualStrings("name", result.headers[0]);
-    try std.testing.expectEqual(@as(usize, 2), result.rows.len);
-    try std.testing.expectEqualStrings("Alice", result.rows[0][0]);
-    try std.testing.expectEqualStrings("Bob", result.rows[1][0]);
-}
-
-test "parseCsvContent: field with only escaped quotes" {
-    const allocator = std.testing.allocator;
-    const csv = "val\n\"\"\"\"\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqualStrings("\"", result.rows[0][0]);
-}
-
-test "parseCsvContent: consecutive commas produce empty fields" {
-    const allocator = std.testing.allocator;
-    const csv = "a,b,c\n,,\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
-    try std.testing.expectEqual(@as(usize, 3), result.rows[0].len);
-    try std.testing.expectEqualStrings("", result.rows[0][0]);
-    try std.testing.expectEqualStrings("", result.rows[0][1]);
-    try std.testing.expectEqualStrings("", result.rows[0][2]);
-}
-
-test "parseCsvContent: very long field value" {
-    const allocator = std.testing.allocator;
-    const long_val = "x" ** 1000;
-    const csv = "data\n" ++ long_val ++ "\n";
-    const result = try parseCsvContent(allocator, csv);
-    defer {
-        for (result.headers) |h| allocator.free(h);
-        allocator.free(result.headers);
-        for (result.rows) |row| {
-            for (row) |f| allocator.free(f);
-            allocator.free(row);
-        }
-        allocator.free(result.rows);
-    }
-    try std.testing.expectEqual(@as(usize, 1000), result.rows[0][0].len);
 }
 
 comptime {

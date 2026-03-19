@@ -1,5 +1,7 @@
+// HTTP server powered by karlseguin/http.zig
 const std = @import("std");
 const builtin = @import("builtin");
+const httpz = @import("httpz");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const crud = @import("crud");
@@ -8,12 +10,6 @@ const export_mod = @import("export");
 const sql_mod = @import("sql");
 
 const log = std.log.scoped(.web);
-
-var shutdown_requested = std.atomic.Value(bool).init(false);
-
-fn handleSignal(_: c_int) callconv(.c) void {
-    shutdown_requested.store(true, .release);
-}
 
 const index_html = @embedFile("static/index.html");
 
@@ -53,9 +49,6 @@ pub fn isValidPath(path: []const u8) bool {
     return true;
 }
 
-const Method = enum { GET, POST, DELETE };
-const MatchType = enum { exact, prefix };
-
 pub const HandlerError = error{
     OutOfMemory,
     ReadOnlyMode,
@@ -68,83 +61,6 @@ pub const HandlerError = error{
     BrokenPipe,
     ConnectionResetByPeer,
 } || postgres.PgError;
-
-const HandlerFn = *const fn (std.net.Stream, []const u8, []const u8, *ServerState, std.mem.Allocator) HandlerError!void;
-
-fn handleRequestError(stream: std.net.Stream, err: HandlerError) void {
-    const status_and_body = switch (err) {
-        error.OutOfMemory => .{ "500 Internal Server Error", "{\"error\":\"Out of memory\"}" },
-        error.ConnectionFailed => .{ "200 OK", "{\"error\":\"Database connection failed\"}" },
-        error.QueryFailed => .{ "200 OK", "{\"error\":\"Query execution failed\"}" },
-        error.NoResults => .{ "200 OK", "{\"error\":\"No results\"}" },
-        error.InvalidData => .{ "400 Bad Request", "{\"error\":\"Invalid data\"}" },
-        error.ReadOnlyMode => .{ "403 Forbidden", "{\"error\":\"Read-only mode is enabled\"}" },
-        error.NoConnection => .{ "200 OK", "{\"error\":\"No database connected\"}" },
-        error.MissingContentLength => .{ "400 Bad Request", "{\"error\":\"Missing Content-Length\"}" },
-        error.PayloadTooLarge => .{ "413 Payload Too Large", "{\"error\":\"Request too large\"}" },
-        error.MalformedRequest => .{ "400 Bad Request", "{\"error\":\"Malformed request\"}" },
-        error.MissingField => .{ "400 Bad Request", "{\"error\":\"Missing required field\"}" },
-        // Client disconnected — nothing to send
-        error.BrokenPipe, error.ConnectionResetByPeer => return,
-    };
-    utils.sendResponse(stream, status_and_body[0], "application/json", status_and_body[1]) catch return;
-}
-
-const Route = struct {
-    method: Method,
-    path: []const u8,
-    match: MatchType,
-    handler: HandlerFn,
-};
-
-// Order matters: more-specific suffixes must come before the catch-all GET.
-fn dispatchTableRoute(stream: std.net.Stream, method: []const u8, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (std.mem.eql(u8, method, "POST") and std.mem.endsWith(u8, path, "/bulk-update")) {
-        return crud.handleBulkUpdate(stream, request, path, state, arena);
-    }
-    if (std.mem.eql(u8, method, "POST") and std.mem.endsWith(u8, path, "/import")) {
-        return export_mod.handleCsvImport(stream, request, path, state, arena);
-    }
-    if (std.mem.eql(u8, method, "POST") and std.mem.endsWith(u8, path, "/truncate")) {
-        return crud.handleTruncateTable(stream, request, path, state, arena);
-    }
-    if (std.mem.eql(u8, method, "GET") and std.mem.indexOf(u8, path, "/fk-lookup") != null) {
-        return crud.handleFkLookup(stream, request, path, state, arena);
-    }
-    if (std.mem.eql(u8, method, "GET") and std.mem.endsWith(u8, path, "/ddl")) {
-        return export_mod.handleTableDdl(stream, request, path, state, arena);
-    }
-    if (std.mem.eql(u8, method, "GET") and std.mem.endsWith(u8, path, "/stats")) {
-        return export_mod.handleTableStats(stream, request, path, state, arena);
-    }
-    if (std.mem.eql(u8, method, "GET")) {
-        return crud.handleTableData(stream, request, path, state, arena);
-    }
-    try utils.sendResponse(stream, "404 Not Found", "text/plain", "Not Found");
-}
-
-const routes = [_]Route{
-    .{ .method = .GET, .path = "/api/schema", .match = .exact, .handler = schema_mod.handleSchema },
-    .{ .method = .GET, .path = "/api/settings/read-only", .match = .exact, .handler = schema_mod.handleReadOnlyGet },
-    .{ .method = .GET, .path = "/api/connections", .match = .exact, .handler = schema_mod.handleGetConnections },
-    .{ .method = .GET, .path = "/api/history", .match = .exact, .handler = sql_mod.handleHistory },
-    .{ .method = .GET, .path = "/api/journal", .match = .exact, .handler = sql_mod.handleJournal },
-    .{ .method = .GET, .path = "/api/health", .match = .exact, .handler = schema_mod.handleHealthCheck },
-    .{ .method = .POST, .path = "/api/connect", .match = .exact, .handler = schema_mod.handleConnect },
-    .{ .method = .POST, .path = "/api/sql", .match = .exact, .handler = sql_mod.handleSql },
-    .{ .method = .POST, .path = "/api/settings/read-only", .match = .exact, .handler = schema_mod.handleReadOnlyToggle },
-    .{ .method = .POST, .path = "/api/connections", .match = .exact, .handler = schema_mod.handlePostConnection },
-    .{ .method = .POST, .path = "/api/journal/undo", .match = .exact, .handler = sql_mod.handleJournalUndo },
-    .{ .method = .POST, .path = "/api/sql/schema-preview", .match = .exact, .handler = sql_mod.handleSchemaPreview },
-    .{ .method = .POST, .path = "/api/sql/preview", .match = .exact, .handler = sql_mod.handleSqlPreview },
-    .{ .method = .POST, .path = "/api/sql/export", .match = .exact, .handler = export_mod.handleSqlExport },
-    .{ .method = .POST, .path = "/api/update", .match = .exact, .handler = crud.handleUpdate },
-    .{ .method = .POST, .path = "/api/delete-row", .match = .exact, .handler = crud.handleDeleteRow },
-    .{ .method = .POST, .path = "/api/insert-row", .match = .exact, .handler = crud.handleInsertRow },
-    .{ .method = .POST, .path = "/api/reconnect", .match = .exact, .handler = schema_mod.handleReconnect },
-    .{ .method = .GET, .path = "/api/export/", .match = .prefix, .handler = export_mod.handleExport },
-    .{ .method = .DELETE, .path = "/api/connections/", .match = .prefix, .handler = schema_mod.handleDeleteConnection },
-};
 
 pub const ChangeEntry = struct {
     id: u64,
@@ -248,32 +164,142 @@ pub const ServerState = struct {
     }
 };
 
-pub fn serve(
+// --- httpz Handler ---
+
+pub const Handler = struct {
     state: *ServerState,
-    port: u16,
-    bind_addr: []const u8,
-) !void {
+
+    /// CSRF: block cross-origin POST/DELETE
+    pub fn dispatch(self: *Handler, action: httpz.Action(*Handler), req: *httpz.Request, res: *httpz.Response) !void {
+        const method = req.method;
+        if (method == .POST or method == .DELETE) {
+            if (!checkOriginHttpz(req, self.state.port)) {
+                res.status = 403;
+                res.content_type = httpz.ContentType.TEXT;
+                res.body = "Forbidden: cross-origin request";
+                return;
+            }
+        }
+        try action(self, req, res);
+    }
+
+    pub fn notFound(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+        res.status = 404;
+        res.content_type = httpz.ContentType.TEXT;
+        res.body = "Not Found";
+    }
+
+    pub fn uncaughtError(_: *Handler, req: *httpz.Request, res: *httpz.Response, err: anyerror) void {
+        log.warn("unhandled error at {s}: {s}", .{ req.url.path, @errorName(err) });
+        const status_and_body = mapHandlerError(err);
+        res.status = status_and_body[0];
+        res.content_type = httpz.ContentType.JSON;
+        res.body = status_and_body[1];
+    }
+};
+
+fn mapHandlerError(err: anyerror) struct { u16, []const u8 } {
+    return switch (err) {
+        error.OutOfMemory => .{ 500, "{\"error\":\"Out of memory\"}" },
+        error.ConnectionFailed => .{ 200, "{\"error\":\"Database connection failed\"}" },
+        error.QueryFailed => .{ 200, "{\"error\":\"Query execution failed\"}" },
+        error.NoResults => .{ 200, "{\"error\":\"No results\"}" },
+        error.InvalidData => .{ 400, "{\"error\":\"Invalid data\"}" },
+        error.ReadOnlyMode => .{ 403, "{\"error\":\"Read-only mode is enabled\"}" },
+        error.NoConnection => .{ 200, "{\"error\":\"No database connected\"}" },
+        error.MissingContentLength => .{ 400, "{\"error\":\"Missing Content-Length\"}" },
+        error.PayloadTooLarge => .{ 413, "{\"error\":\"Request too large\"}" },
+        error.MalformedRequest => .{ 400, "{\"error\":\"Malformed request\"}" },
+        error.MissingField => .{ 400, "{\"error\":\"Missing required field\"}" },
+        else => .{ 500, "{\"error\":\"Internal server error\"}" },
+    };
+}
+
+/// Absent Origin is allowed because same-origin requests may omit it.
+fn checkOriginHttpz(req: *httpz.Request, port: u16) bool {
+    const origin = req.header("origin") orelse return true;
+    var buf_127: [64]u8 = undefined;
+    var buf_local: [64]u8 = undefined;
+    const expected_127 = std.fmt.bufPrint(&buf_127, "http://127.0.0.1:{d}", .{port}) catch return false;
+    const expected_local = std.fmt.bufPrint(&buf_local, "http://localhost:{d}", .{port}) catch return false;
+    if (std.mem.eql(u8, origin, expected_127)) return true;
+    if (std.mem.eql(u8, origin, expected_local)) return true;
+    return false;
+}
+
+// --- Static file handlers ---
+
+fn serveIndex(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const r = readStaticFile(res.arena, "src/static/index.html", index_html);
+    res.content_type = httpz.ContentType.HTML;
+    res.body = r.data;
+    res.header("content-security-policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'");
+    res.header("x-content-type-options", "nosniff");
+    res.header("referrer-policy", "no-referrer");
+    res.header("cache-control", "no-store");
+}
+
+fn serveFavicon(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    res.status = 204;
+    res.content_type = httpz.ContentType.ICO;
+}
+
+fn serveStaticFile(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const path = req.url.path;
+    inline for (static_files) |entry| {
+        if (std.mem.eql(u8, path, entry[0])) {
+            const r = readStaticFile(res.arena, entry[2], entry[3]);
+            res.body = r.data;
+            // Map content type string to httpz enum
+            if (std.mem.eql(u8, entry[1], "text/css")) {
+                res.content_type = httpz.ContentType.CSS;
+            } else {
+                res.content_type = httpz.ContentType.JS;
+            }
+            res.header("cache-control", "no-store");
+            res.header("x-content-type-options", "nosniff");
+            res.header("referrer-policy", "no-referrer");
+            return;
+        }
+    }
+    res.status = 404;
+    res.content_type = httpz.ContentType.TEXT;
+    res.body = "Not Found";
+}
+
+// --- Server lifecycle ---
+
+const max_request_size = 8192;
+
+var server_instance: ?*httpz.Server(*Handler) = null;
+
+fn handleSignal(_: c_int) callconv(.c) void {
+    if (server_instance) |s| {
+        server_instance = null;
+        s.stop();
+    }
+}
+
+pub fn serve(state: *ServerState, port: u16, bind_addr: []const u8) !void {
     state.port = port;
 
-    const address = std.net.Address.parseIp(bind_addr, port) catch {
-        log.err("invalid bind address '{s}'", .{bind_addr});
-        std.process.exit(1);
+    var handler = Handler{ .state = state };
+
+    const address: httpz.Config.AddressConfig = blk: {
+        if (std.mem.eql(u8, bind_addr, "0.0.0.0")) {
+            break :blk httpz.Config.AddressConfig.all(port);
+        } else if (std.mem.eql(u8, bind_addr, "127.0.0.1")) {
+            break :blk httpz.Config.AddressConfig.localhost(port);
+        } else {
+            break :blk .{ .ip = .{ .host = bind_addr, .port = port } };
+        }
     };
 
-    var server = address.listen(.{
-        .reuse_address = true,
-    }) catch {
-        log.err("failed to bind to port {d}", .{port});
-        std.process.exit(1);
-    };
+    var server = try httpz.Server(*Handler).init(state.allocator, .{
+        .address = address,
+        .request = .{ .max_body_size = 65536 },
+    }, &handler);
     defer server.deinit();
-
-    log.info("Lux web UI running at http://{s}:{d}", .{ bind_addr, port });
-    log.info("open this URL in your browser, press Ctrl-C to stop", .{});
-    if (comptime builtin.mode == .Debug) {
-        log.warn("DEV MODE: static assets served from disk (src/static/), not embedded", .{});
-        log.warn("edit CSS/JS/HTML and refresh browser — no rebuild needed", .{});
-    }
 
     var sa = std.posix.Sigaction{
         .handler = .{ .handler = handleSignal },
@@ -282,134 +308,61 @@ pub fn serve(
     };
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     std.posix.sigaction(std.posix.SIG.TERM, &sa, null);
+    server_instance = &server;
 
-    while (!shutdown_requested.load(.acquire)) {
-        const conn = server.accept() catch |err| {
-            if (shutdown_requested.load(.acquire)) break;
-            log.warn("accept failed: {s}", .{@errorName(err)});
-            continue;
-        };
-        defer conn.stream.close();
+    var router = try server.router(.{});
 
-        // Prevent idle clients from holding the single-threaded server indefinitely
-        const timeout = std.posix.timeval{ .sec = 5, .usec = 0 };
-        std.posix.setsockopt(conn.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
-            log.warn("failed to set socket timeout: {s}", .{@errorName(err)});
-        };
-
-        handleConnection(conn.stream, state) catch |err| {
-            log.debug("request error: {s}", .{@errorName(err)});
-        };
-    }
-
-    log.info("shutting down", .{});
-}
-
-const max_request_size = 8192;
-
-fn handleConnection(
-    stream: std.net.Stream,
-    state: *ServerState,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(state.allocator);
-    defer arena.deinit();
-    const request_alloc = arena.allocator();
-
-    var buf: [max_request_size]u8 = undefined;
-    var total_read: usize = 0;
-
-    // Headers may arrive split across TCP segments; loop until \r\n\r\n.
-    while (total_read < buf.len) {
-        const n = stream.read(buf[total_read..]) catch return;
-        if (n == 0) return; // Connection closed
-        total_read += n;
-        if (std.mem.indexOf(u8, buf[0..total_read], "\r\n\r\n") != null) break;
-    }
-
-    if (total_read == buf.len and std.mem.indexOf(u8, buf[0..total_read], "\r\n\r\n") == null) {
-        utils.sendResponse(stream, "400 Bad Request", "text/plain", "Request too large") catch return;
-        return;
-    }
-
-    const request = buf[0..total_read];
-
-    const first_line_end = std.mem.indexOf(u8, request, "\r\n") orelse return;
-    const first_line = request[0..first_line_end];
-
-    var parts = std.mem.splitScalar(u8, first_line, ' ');
-    const method = parts.next() orelse return;
-    const path_raw = parts.next() orelse return;
-
-    const path = if (std.mem.indexOf(u8, path_raw, "?")) |q| path_raw[0..q] else path_raw;
-
-    const is_post = std.mem.eql(u8, method, "POST");
-    const is_delete = std.mem.eql(u8, method, "DELETE");
-    if (is_post or is_delete) {
-        if (!utils.checkOrigin(request, state.port)) {
-            try utils.sendResponse(stream, "403 Forbidden", "text/plain", "Forbidden: cross-origin request");
-            return;
-        }
-    }
-
-    if (!isValidPath(path)) {
-        try utils.sendResponse(stream, "400 Bad Request", "text/plain", "Bad Request: invalid path");
-        return;
-    }
-
-    // Index needs CSP header (sendHtmlResponseWithCsp), unlike other static files
-    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/")) {
-        const r = readStaticFile(request_alloc, "src/static/index.html", index_html);
-        try utils.sendHtmlResponseWithCsp(stream, r.data);
-        return;
-    }
-
-    if (std.mem.eql(u8, method, "GET") and std.mem.eql(u8, path, "/favicon.ico")) {
-        try utils.sendResponse(stream, "204 No Content", "image/x-icon", "");
-        return;
-    }
-
+    // Static routes
+    router.get("/", serveIndex, .{});
+    router.get("/favicon.ico", serveFavicon, .{});
     inline for (static_files) |entry| {
-        if (std.mem.eql(u8, path, entry[0])) {
-            const r = readStaticFile(request_alloc, entry[2], entry[3]);
-            try utils.sendResponse(stream, "200 OK", entry[1], r.data);
-            return;
-        }
+        router.get(entry[0], serveStaticFile, .{});
     }
 
-    if (std.mem.startsWith(u8, path, "/api/tables/")) {
-        dispatchTableRoute(stream, method, request, path, state, request_alloc) catch |err| {
-            handleRequestError(stream, err);
-        };
-        return;
+    // API routes (exact match)
+    router.get("/api/schema", schema_mod.handleSchema, .{});
+    router.get("/api/settings/read-only", schema_mod.handleReadOnlyGet, .{});
+    router.get("/api/connections", schema_mod.handleGetConnections, .{});
+    router.get("/api/history", sql_mod.handleHistory, .{});
+    router.get("/api/journal", sql_mod.handleJournal, .{});
+    router.get("/api/health", schema_mod.handleHealthCheck, .{});
+    router.post("/api/connect", schema_mod.handleConnect, .{});
+    router.post("/api/sql", sql_mod.handleSql, .{});
+    router.post("/api/settings/read-only", schema_mod.handleReadOnlyToggle, .{});
+    router.post("/api/connections", schema_mod.handlePostConnection, .{});
+    router.post("/api/journal/undo", sql_mod.handleJournalUndo, .{});
+    router.post("/api/sql/schema-preview", sql_mod.handleSchemaPreview, .{});
+    router.post("/api/sql/preview", sql_mod.handleSqlPreview, .{});
+    router.post("/api/sql/export", export_mod.handleSqlExport, .{});
+    router.post("/api/update", crud.handleUpdate, .{});
+    router.post("/api/delete-row", crud.handleDeleteRow, .{});
+    router.post("/api/insert-row", crud.handleInsertRow, .{});
+    router.post("/api/reconnect", schema_mod.handleReconnect, .{});
+
+    // Table routes (suffix-based)
+    router.get("/api/tables/:table_path/fk-lookup", crud.handleFkLookup, .{});
+    router.get("/api/tables/:table_path/ddl", export_mod.handleTableDdl, .{});
+    router.get("/api/tables/:table_path/stats", export_mod.handleTableStats, .{});
+    router.post("/api/tables/:table_path/bulk-update", crud.handleBulkUpdate, .{});
+    router.post("/api/tables/:table_path/import", export_mod.handleCsvImport, .{});
+    router.post("/api/tables/:table_path/truncate", crud.handleTruncateTable, .{});
+    router.get("/api/tables/:table_path/data", crud.handleTableData, .{});
+
+    router.get("/api/export/:table_name", export_mod.handleExport, .{});
+    router.delete("/api/connections/:id", schema_mod.handleDeleteConnection, .{});
+
+    log.info("Lux web UI running at http://{s}:{d}", .{ bind_addr, port });
+    log.info("open this URL in your browser, press Ctrl-C to stop", .{});
+    if (comptime builtin.mode == .Debug) {
+        log.warn("DEV MODE: static assets served from disk (src/static/), not embedded", .{});
+        log.warn("edit CSS/JS/HTML and refresh browser - no rebuild needed", .{});
     }
 
-    const method_enum: ?Method = if (std.mem.eql(u8, method, "GET"))
-        .GET
-    else if (std.mem.eql(u8, method, "POST"))
-        .POST
-    else if (std.mem.eql(u8, method, "DELETE"))
-        .DELETE
-    else
-        null;
-
-    if (method_enum) |m| {
-        inline for (routes) |route| {
-            if (route.method == m) {
-                const matched = switch (route.match) {
-                    .exact => std.mem.eql(u8, path, route.path),
-                    .prefix => std.mem.startsWith(u8, path, route.path),
-                };
-                if (matched) {
-                    route.handler(stream, request, path, state, request_alloc) catch |err| {
-                        handleRequestError(stream, err);
-                    };
-                    return;
-                }
-            }
-        }
+    defer {
+        server.stop();
+        log.info("shutting down", .{});
     }
-
-    try utils.sendResponse(stream, "404 Not Found", "text/plain", "Not Found");
+    try server.listen();
 }
 
 test "ServerState: init defaults" {

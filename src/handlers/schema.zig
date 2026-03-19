@@ -1,13 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const httpz = @import("httpz");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const web = @import("web");
 
 const log = std.log.scoped(.schema);
-
-const ServerState = web.ServerState;
-const HandlerError = web.HandlerError;
 
 const connections_filename = "connections.json";
 
@@ -17,6 +15,17 @@ const ConnectionFileError = error{
     WriteFailed,
     ParseFailed,
 };
+
+fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
+
+fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
+    res.status = status;
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
 
 fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8, conninfo: []const u8, color: []const u8) ConnectionFileError![]u8 {
     var buf = std.ArrayList(u8){};
@@ -163,34 +172,29 @@ fn findMaxConnectionId(file_content: []const u8) u64 {
     return max_id;
 }
 
-pub fn handleConnect(
-    stream: std.net.Stream,
-    request: []const u8,
-    _: []const u8,
-    state: *ServerState,
-    arena: std.mem.Allocator,
-) HandlerError!void {
+pub fn handleConnect(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     const allocator = state.allocator;
+    const arena = res.arena;
 
-    var extra_buf: [4096]u8 = undefined;
-    const body = utils.readRequestBody(stream, request, &extra_buf, 4096) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
     const conninfo_str = utils.extractJsonField(arena, body, "conninfo") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing conninfo field\"}");
+        sendJsonError(res, 400, "{\"error\":\"Missing conninfo field\"}");
         return;
     };
 
     const conninfo_z = allocator.dupeZ(u8, conninfo_str) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
     var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to connect to PostgreSQL. libpq returned null.\"}");
+        sendJsonResponse(res, "{\"error\":\"Failed to connect to PostgreSQL. libpq returned null.\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -203,20 +207,20 @@ pub fn handleConnect(
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     }
 
     var schema = pg_conn.fetchSchema(allocator) catch {
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to fetch database schema\"}");
+        sendJsonResponse(res, "{\"error\":\"Failed to fetch database schema\"}");
         return;
     };
 
     const schema_text = schema.format(allocator) catch {
         schema.deinit();
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to format schema\"}");
+        sendJsonResponse(res, "{\"error\":\"Failed to format schema\"}");
         return;
     };
 
@@ -237,23 +241,25 @@ pub fn handleConnect(
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(arena);
     w.writeAll("{\"status\":\"connected\",\"schema\":\"") catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"status\":\"connected\"}");
+        sendJsonResponse(res, "{\"status\":\"connected\"}");
         return;
     };
     utils.writeJsonEscaped(w, schema_text) catch return;
     var n_tables: usize = 0;
     if (state.schema_tables) |tables| n_tables = tables.len;
     w.print("\",\"tables\":{d}}}", .{n_tables}) catch return;
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
     const allocator = state.allocator;
+    const arena = res.arena;
 
     // Fall back to cached data if re-fetch fails
     refresh: {
@@ -267,7 +273,7 @@ pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state:
         };
         var enhanced = pg_conn.fetchEnhancedSchema(allocator) catch null;
 
-        // Preserve conninfo_z — we're reusing the existing connection
+        // Preserve conninfo_z -- we're reusing the existing connection
         const saved_conninfo = state.conninfo_z;
         state.conninfo_z = null;
         freeSchemaState(state);
@@ -283,7 +289,7 @@ pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state:
     }
 
     const tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"tables\":[]}");
+        sendJsonResponse(res, "{\"tables\":[]}");
         return;
     };
 
@@ -363,25 +369,27 @@ pub fn handleSchema(stream: std.net.Stream, _: []const u8, _: []const u8, state:
     }
     try w.writeAll("]}");
 
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     const allocator = state.allocator;
+    const arena = res.arena;
 
     const last_ci = state.last_conninfo orelse {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No previous connection to reconnect to\"}");
+        sendJsonResponse(res, "{\"error\":\"No previous connection to reconnect to\"}");
         return;
     };
 
     const conninfo_z = allocator.dupeZ(u8, last_ci) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
     var pg_conn = postgres.PgConnection.connectVerbose(conninfo_z) catch {
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to reconnect. libpq returned null.\"}");
+        sendJsonResponse(res, "{\"error\":\"Failed to reconnect. libpq returned null.\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -394,20 +402,20 @@ pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, sta
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     }
 
     var schema = pg_conn.fetchSchema(allocator) catch {
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Reconnected but failed to fetch schema\"}");
+        sendJsonResponse(res, "{\"error\":\"Reconnected but failed to fetch schema\"}");
         return;
     };
 
     const schema_text = schema.format(allocator) catch {
         schema.deinit();
         allocator.free(conninfo_z);
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Reconnected but failed to format schema\"}");
+        sendJsonResponse(res, "{\"error\":\"Reconnected but failed to format schema\"}");
         return;
     };
 
@@ -426,35 +434,36 @@ pub fn handleReconnect(stream: std.net.Stream, _: []const u8, _: []const u8, sta
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(arena);
     w.writeAll("{\"ok\":true,\"schema\":\"") catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
+        sendJsonResponse(res, "{\"ok\":true}");
         return;
     };
     utils.writeJsonEscaped(w, schema_text) catch return;
     var n_tables: usize = 0;
     if (state.schema_tables) |tables| n_tables = tables.len;
     w.print("\",\"tables\":{d}}}", .{n_tables}) catch return;
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleHealthCheck(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
+        sendJsonResponse(res, "{\"connected\":false}");
         return;
     }
 
-    const allocator = arena;
+    const allocator = res.arena;
     const conninfo_z = state.conninfo_z.?;
 
     const start_time = std.time.milliTimestamp();
     var pg_conn = postgres.PgConnection.connect(conninfo_z) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
+        sendJsonResponse(res, "{\"connected\":false}");
         return;
     };
     defer pg_conn.deinit();
 
     const sql: [*:0]const u8 = "SELECT 1";
     var pg_result = pg_conn.runQuery(allocator, sql) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":false}");
+        sendJsonResponse(res, "{\"connected\":false}");
         return;
     };
     defer pg_result.deinit();
@@ -464,84 +473,88 @@ pub fn handleHealthCheck(stream: std.net.Stream, _: []const u8, _: []const u8, s
 
     var resp_buf: [128]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"connected\":true,\"latency_ms\":{d}}}", .{latency}) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"connected\":true}");
+        sendJsonResponse(res, "{\"connected\":true}");
         return;
     };
-    try utils.sendResponse(stream, "200 OK", "application/json", resp);
+    sendJsonResponse(res, resp);
 }
 
-pub fn handleReadOnlyToggle(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    var extra_buf: [1024]u8 = undefined;
-    const body = utils.readRequestBody(stream, request, &extra_buf, 1024) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+pub fn handleReadOnlyToggle(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    const arena = res.arena;
+
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
     const enabled_str = utils.extractJsonField(arena, body, "enabled") orelse {
         state.flags.read_only = !state.flags.read_only;
         var resp_buf: [64]u8 = undefined;
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", resp);
+        sendJsonResponse(res, resp);
         return;
     };
     state.flags.read_only = std.mem.eql(u8, enabled_str, "true");
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
-    try utils.sendResponse(stream, "200 OK", "application/json", resp);
+    sendJsonResponse(res, resp);
 }
 
-pub fn handleReadOnlyGet(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, _: std.mem.Allocator) HandlerError!void {
+pub fn handleReadOnlyGet(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
-    try utils.sendResponse(stream, "200 OK", "application/json", resp);
+    sendJsonResponse(res, resp);
 }
 
-pub fn handleGetConnections(stream: std.net.Stream, _: []const u8, _: []const u8, _: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleGetConnections(_: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const arena = res.arena;
     const data = readConnectionsFile(arena) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"connections\":[]}");
+        sendJsonResponse(res, "{\"connections\":[]}");
         return;
     };
-    try utils.sendResponse(stream, "200 OK", "application/json", data);
+    sendJsonResponse(res, data);
 }
 
-pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    const allocator = arena;
+pub fn handlePostConnection(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    const allocator = res.arena;
 
-    var extra_buf: [4096]u8 = undefined;
-    const body = utils.readRequestBody(stream, request, &extra_buf, 4096) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const name = utils.extractJsonField(arena, body, "name") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing name field\"}");
+    const name = utils.extractJsonField(allocator, body, "name") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing name field\"}");
         return;
     };
-    const conninfo = utils.extractJsonField(arena, body, "conninfo") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing conninfo field\"}");
+    const conninfo = utils.extractJsonField(allocator, body, "conninfo") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing conninfo field\"}");
         return;
     };
-    const color = utils.extractJsonField(arena, body, "color") orelse "gray";
+    const color = utils.extractJsonField(allocator, body, "color") orelse "gray";
 
     const existing = readConnectionsFile(allocator) catch {
         const entry = formatConnectionJson(allocator, 1, name, conninfo, color) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
 
         var new_file = std.ArrayList(u8){};
         const nw = new_file.writer(allocator);
         nw.writeAll("{\"connections\":[") catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
         nw.writeAll(entry) catch return;
         nw.writeAll("]}") catch return;
         writeConnectionsFile(allocator, new_file.items) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to write connections file\"}");
+            sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
             return;
         };
         state.next_connection_id = 2;
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"id\":1}");
+        sendJsonResponse(res, "{\"id\":1}");
         return;
     };
 
@@ -550,7 +563,7 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
     state.next_connection_id = new_id + 1;
 
     const entry = formatConnectionJson(allocator, new_id, name, conninfo, color) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
@@ -560,21 +573,21 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
     const close_bracket = std.mem.lastIndexOfScalar(u8, existing, ']') orelse {
         // Malformed file -- rewrite from scratch
         nw.writeAll("{\"connections\":[") catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
         nw.writeAll(entry) catch return;
         nw.writeAll("]}") catch return;
         writeConnectionsFile(allocator, new_file.items) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to write connections file\"}");
+            sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
             return;
         };
         var id_buf: [64]u8 = undefined;
         const id_resp = std.fmt.bufPrint(&id_buf, "{{\"id\":{d}}}", .{new_id}) catch {
-            try utils.sendResponse(stream, "200 OK", "application/json", "{\"id\":0}");
+            sendJsonResponse(res, "{\"id\":0}");
             return;
         };
-        try utils.sendResponse(stream, "200 OK", "application/json", id_resp);
+        sendJsonResponse(res, id_resp);
         return;
     };
 
@@ -582,7 +595,7 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
     const needs_comma = before_bracket.len > 0 and before_bracket[before_bracket.len - 1] != '[';
 
     nw.writeAll(existing[0..close_bracket]) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
     if (needs_comma) nw.writeByte(',') catch return;
@@ -590,50 +603,49 @@ pub fn handlePostConnection(stream: std.net.Stream, request: []const u8, _: []co
     nw.writeAll("]}") catch return;
 
     writeConnectionsFile(allocator, new_file.items) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to write connections file\"}");
+        sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
         return;
     };
 
     var id_buf: [64]u8 = undefined;
     const id_resp = std.fmt.bufPrint(&id_buf, "{{\"id\":{d}}}", .{new_id}) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"id\":0}");
+        sendJsonResponse(res, "{\"id\":0}");
         return;
     };
-    try utils.sendResponse(stream, "200 OK", "application/json", id_resp);
+    sendJsonResponse(res, id_resp);
 }
 
-pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []const u8, _: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    const allocator = arena;
+pub fn handleDeleteConnection(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    _ = handler;
+    const allocator = res.arena;
 
-    const prefix = "/api/connections/";
-    if (!std.mem.startsWith(u8, path, prefix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
+    const id_str = req.param("id") orelse {
+        sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
         return;
-    }
-    const id_str = path[prefix.len..];
+    };
     const target_id = std.fmt.parseInt(u64, id_str, 10) catch {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid connection ID\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid connection ID\"}");
         return;
     };
 
     const existing = readConnectionsFile(allocator) catch {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"No connections file\"}");
+        sendJsonError(res, 404, "{\"error\":\"No connections file\"}");
         return;
     };
 
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, existing, .{}) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
+        sendJsonError(res, 500, "{\"error\":\"Malformed connections file\"}");
         return;
     };
 
     const conns_val = parsed.value.object.get("connections") orelse {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
+        sendJsonError(res, 500, "{\"error\":\"Malformed connections file\"}");
         return;
     };
     const conns_arr = switch (conns_val) {
         .array => |a| a,
         else => {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Malformed connections file\"}");
+            sendJsonError(res, 500, "{\"error\":\"Malformed connections file\"}");
             return;
         },
     };
@@ -641,7 +653,7 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
     var new_file = std.ArrayList(u8){};
     const nw = new_file.writer(allocator);
     nw.writeAll("{\"connections\":[") catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
@@ -670,16 +682,16 @@ pub fn handleDeleteConnection(stream: std.net.Stream, _: []const u8, path: []con
     nw.writeAll("]}") catch return;
 
     if (!found) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Connection not found\"}");
+        sendJsonError(res, 404, "{\"error\":\"Connection not found\"}");
         return;
     }
 
     writeConnectionsFile(allocator, new_file.items) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Failed to write connections file\"}");
+        sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
         return;
     };
 
-    try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
+    sendJsonResponse(res, "{\"ok\":true}");
 }
 
 test "formatConnectionJson: basic entry" {

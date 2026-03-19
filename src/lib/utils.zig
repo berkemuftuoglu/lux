@@ -10,104 +10,6 @@ pub const StringEscapeError = error{
     OutOfMemory,
 };
 
-pub fn sendResponse(stream: std.net.Stream, status: []const u8, content_type: []const u8, body: []const u8) !void {
-    var header_buf: [640]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n", .{
-        status,
-        content_type,
-        body.len,
-    }) catch return;
-
-    stream.writeAll(header) catch return;
-    stream.writeAll(body) catch return;
-}
-
-pub fn sendHtmlResponseWithCsp(stream: std.net.Stream, body: []const u8) !void {
-    const csp = "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'";
-    var header_buf: [896]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {d}\r\nConnection: close\r\nCache-Control: no-store\r\nContent-Security-Policy: {s}\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n", .{
-        body.len,
-        csp,
-    }) catch return;
-
-    stream.writeAll(header) catch return;
-    stream.writeAll(body) catch return;
-}
-
-pub fn sendResponseWithDownload(
-    stream: std.net.Stream,
-    status: []const u8,
-    content_type: []const u8,
-    filename: []const u8,
-    body: []const u8,
-) !void {
-    var header_buf: [1152]u8 = undefined;
-    const header = std.fmt.bufPrint(&header_buf, "HTTP/1.1 {s}\r\nContent-Type: {s}\r\nContent-Length: {d}\r\nContent-Disposition: attachment; filename=\"{s}\"\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n", .{
-        status,
-        content_type,
-        body.len,
-        filename,
-    }) catch return;
-
-    stream.writeAll(header) catch return;
-    stream.writeAll(body) catch return;
-}
-
-pub fn findContentLength(request: []const u8) ?usize {
-    var i: usize = 0;
-    while (i + 16 < request.len) : (i += 1) {
-        if (matchesIgnoreCase(request[i..], "content-length:")) {
-            var pos = i + 15;
-            while (pos < request.len and request[pos] == ' ') pos += 1;
-            var end = pos;
-            while (end < request.len and request[end] >= '0' and request[end] <= '9') end += 1;
-            if (end > pos) {
-                return std.fmt.parseInt(usize, request[pos..end], 10) catch null;
-            }
-        }
-    }
-    return null;
-}
-
-pub fn findHeader(request: []const u8, header_name: []const u8) ?[]const u8 {
-    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return null;
-    const headers = request[0..header_end];
-    var line_iter = std.mem.splitSequence(u8, headers, "\r\n");
-    _ = line_iter.next(); // skip request line
-    while (line_iter.next()) |line| {
-        const colon = std.mem.indexOf(u8, line, ":") orelse continue;
-        const name = line[0..colon];
-        if (name.len != header_name.len) continue;
-        if (eqlLower(name, header_name)) {
-            const value = std.mem.trim(u8, line[colon + 1 ..], " \t");
-            return value;
-        }
-    }
-    return null;
-}
-
-pub fn eqlLower(a: []const u8, b: []const u8) bool {
-    if (a.len != b.len) return false;
-    for (a, b) |ca, cb| {
-        const la = if (ca >= 'A' and ca <= 'Z') ca + 32 else ca;
-        const lb = if (cb >= 'A' and cb <= 'Z') cb + 32 else cb;
-        if (la != lb) return false;
-    }
-    return true;
-}
-
-/// Absent Origin is allowed because same-origin requests may omit it.
-pub fn checkOrigin(request: []const u8, port: u16) bool {
-    const origin = findHeader(request, "Origin") orelse return true;
-    var buf_127: [64]u8 = undefined;
-    var buf_local: [64]u8 = undefined;
-    const expected_127 = std.fmt.bufPrint(&buf_127, "http://127.0.0.1:{d}", .{port}) catch return false;
-    const expected_local = std.fmt.bufPrint(&buf_local, "http://localhost:{d}", .{port}) catch return false;
-    if (std.mem.eql(u8, origin, expected_127)) return true;
-    if (std.mem.eql(u8, origin, expected_local)) return true;
-    return false;
-}
-
 pub fn escapeIdentifier(allocator: std.mem.Allocator, name: []const u8) IdentifierError![]u8 {
     // Null bytes would cause C string truncation in libpq
     for (name) |ch| {
@@ -324,35 +226,6 @@ pub fn extractJsonQuery(allocator: std.mem.Allocator, body: []const u8) ?[]const
     return extractJsonField(allocator, body, "query");
 }
 
-pub fn readRequestBody(
-    stream: std.net.Stream,
-    request: []const u8,
-    extra_buf: []u8,
-    max_content_length: usize,
-) ?[]const u8 {
-    const content_length = findContentLength(request) orelse return null;
-    if (content_length > max_content_length) return null;
-
-    const header_end = std.mem.indexOf(u8, request, "\r\n\r\n") orelse return null;
-    const body_start = header_end + 4;
-    var body = request[body_start..];
-
-    if (body.len < content_length) {
-        if (content_length > extra_buf.len) return null;
-        const already_have = body.len;
-        @memcpy(extra_buf[0..already_have], body);
-        var read_so_far = already_have;
-        while (read_so_far < content_length) {
-            const n = stream.read(extra_buf[read_so_far..content_length]) catch return null;
-            if (n == 0) break;
-            read_so_far += n;
-        }
-        return extra_buf[0..read_so_far];
-    } else {
-        return body[0..content_length];
-    }
-}
-
 test "extractJsonQuery: simple query" {
     const body = "{\"query\": \"Sum all values\"}";
     const result = extractJsonQuery(std.heap.page_allocator, body);
@@ -374,21 +247,6 @@ test "extractJsonQuery: missing field" {
 
 test "extractJsonQuery: empty body" {
     try std.testing.expect(extractJsonQuery(std.heap.page_allocator, "") == null);
-}
-
-test "findContentLength: standard header" {
-    const req = "POST /api HTTP/1.1\r\nContent-Length: 42\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, 42), findContentLength(req));
-}
-
-test "findContentLength: case insensitive" {
-    const req = "POST /api HTTP/1.1\r\ncontent-length: 100\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, 100), findContentLength(req));
-}
-
-test "findContentLength: missing header" {
-    const req = "GET / HTTP/1.1\r\n\r\n";
-    try std.testing.expect(findContentLength(req) == null);
 }
 
 test "matchesIgnoreCase: matches case-insensitively with prefix semantics" {
@@ -502,36 +360,6 @@ test "extractJsonField: returns null for missing field" {
 
 test "extractJsonField: empty body" {
     try std.testing.expect(extractJsonField(std.heap.page_allocator, "", "query") == null);
-}
-
-test "eqlLower: case insensitive match" {
-    try std.testing.expect(eqlLower("Hello", "hello"));
-    try std.testing.expect(eqlLower("HELLO", "hello"));
-    try std.testing.expect(eqlLower("hello", "hello"));
-}
-
-test "eqlLower: mismatch" {
-    try std.testing.expect(!eqlLower("hello", "world"));
-    try std.testing.expect(!eqlLower("hi", "hello"));
-}
-
-test "eqlLower: empty strings match" {
-    try std.testing.expect(eqlLower("", ""));
-}
-
-test "eqlLower: different lengths" {
-    try std.testing.expect(!eqlLower("", "hello"));
-    try std.testing.expect(!eqlLower("hello", ""));
-}
-
-test "findContentLength: with extra headers" {
-    const req = "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 25\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, 25), findContentLength(req));
-}
-
-test "findContentLength: zero length" {
-    const req = "POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n";
-    try std.testing.expectEqual(@as(?usize, 0), findContentLength(req));
 }
 
 test "parseQueryParam: parses limit" {
@@ -678,21 +506,6 @@ test "escapeIdentifier: only double quotes" {
     const result = try escapeIdentifier(allocator, "\"\"");
     defer allocator.free(result);
     try std.testing.expectEqualStrings("\"\"\"\"", result);
-}
-
-test "eqlLower: mixed case both sides" {
-    try std.testing.expect(eqlLower("HeLLo", "hello"));
-    try std.testing.expect(eqlLower("hello", "HELLO"));
-}
-
-test "eqlLower: numbers and special chars" {
-    try std.testing.expect(eqlLower("abc123", "abc123"));
-    try std.testing.expect(eqlLower("ABC123", "abc123"));
-}
-
-test "eqlLower: single char" {
-    try std.testing.expect(eqlLower("A", "a"));
-    try std.testing.expect(!eqlLower("A", "b"));
 }
 
 test "parseQueryParam: param with special chars in value" {
@@ -979,139 +792,6 @@ test "indexOfIgnoreCase: empty needle returns zero" {
     const result = indexOfIgnoreCase("anything", "");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(@as(usize, 0), result.?);
-}
-
-test "eqlLower: unicode bytes pass through" {
-    try std.testing.expect(eqlLower("\xc3\xa9", "\xc3\xa9"));
-}
-
-test "eqlLower: one char difference" {
-    try std.testing.expect(!eqlLower("abc", "abd"));
-}
-
-test "findContentLength: various formats" {
-    try std.testing.expectEqual(
-        @as(?usize, 42),
-        findContentLength("POST / HTTP/1.1\r\nContent-Length: 42\r\n\r\n"),
-    );
-}
-
-test "findContentLength: content-length at end of headers" {
-    try std.testing.expectEqual(
-        @as(?usize, 10),
-        findContentLength("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\n"),
-    );
-}
-
-test "findContentLength: zero content length value" {
-    try std.testing.expectEqual(
-        @as(?usize, 0),
-        findContentLength("POST / HTTP/1.1\r\nContent-Length: 0\r\n\r\n"),
-    );
-}
-
-test "findContentLength: large value" {
-    try std.testing.expectEqual(
-        @as(?usize, 999999),
-        findContentLength("POST / HTTP/1.1\r\nContent-Length: 999999\r\n\r\n"),
-    );
-}
-
-test "findContentLength: not present" {
-    try std.testing.expect(findContentLength("POST / HTTP/1.1\r\nHost: x\r\n\r\n") == null);
-}
-
-test "findContentLength: only header name no value" {
-    const result = findContentLength("Content-Length: \r\n\r\n");
-    try std.testing.expect(result == null);
-}
-
-test "findContentLength: content-length in lowercase" {
-    const result = findContentLength("content-length: 42\r\n\r\n");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 42), result.?);
-}
-
-test "findContentLength: content-length with no space after colon" {
-    const result = findContentLength("Content-Length:99\r\n\r\n");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 99), result.?);
-}
-
-test "findContentLength: content-length with multiple spaces" {
-    const result = findContentLength("Content-Length:   77\r\n\r\n");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 77), result.?);
-}
-
-test "findContentLength: very large content-length" {
-    const result = findContentLength("Content-Length: 1048576\r\n\r\n");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 1048576), result.?);
-}
-
-test "findContentLength: content-length among many headers" {
-    const request = "Host: localhost\r\nAccept: */*\r\nContent-Length: 256\r\nConnection: close\r\n\r\n";
-    const result = findContentLength(request);
-    try std.testing.expect(result != null);
-    try std.testing.expectEqual(@as(usize, 256), result.?);
-}
-
-test "checkOrigin: no origin header allows request" {
-    const request = "POST /api/connect HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    try std.testing.expect(checkOrigin(request, 8080));
-}
-
-test "checkOrigin: valid 127.0.0.1 origin allows request" {
-    const request = "POST /api/connect HTTP/1.1\r\nOrigin: http://127.0.0.1:8080\r\nHost: localhost\r\n\r\n";
-    try std.testing.expect(checkOrigin(request, 8080));
-}
-
-test "checkOrigin: valid localhost origin allows request" {
-    const request = "POST /api/connect HTTP/1.1\r\nOrigin: http://localhost:8080\r\nHost: localhost\r\n\r\n";
-    try std.testing.expect(checkOrigin(request, 8080));
-}
-
-test "checkOrigin: evil origin rejects request" {
-    const request = "POST /api/connect HTTP/1.1\r\nOrigin: http://evil.com\r\nHost: localhost\r\n\r\n";
-    try std.testing.expect(!checkOrigin(request, 8080));
-}
-
-test "checkOrigin: wrong port rejects request" {
-    const request = "POST /api/connect HTTP/1.1\r\nOrigin: http://127.0.0.1:9999\r\nHost: localhost\r\n\r\n";
-    try std.testing.expect(!checkOrigin(request, 8080));
-}
-
-test "checkOrigin: custom port works" {
-    const request = "POST /api/sql HTTP/1.1\r\nOrigin: http://127.0.0.1:3000\r\n\r\n";
-    try std.testing.expect(checkOrigin(request, 3000));
-}
-
-test "findHeader: finds Origin header" {
-    const request = "POST /api HTTP/1.1\r\nOrigin: http://localhost:8080\r\nHost: localhost\r\n\r\n";
-    const origin = findHeader(request, "Origin");
-    try std.testing.expect(origin != null);
-    try std.testing.expectEqualStrings("http://localhost:8080", origin.?);
-}
-
-test "findHeader: returns null for missing header" {
-    const request = "POST /api HTTP/1.1\r\nHost: localhost\r\n\r\n";
-    const origin = findHeader(request, "Origin");
-    try std.testing.expect(origin == null);
-}
-
-test "findHeader: case insensitive" {
-    const request = "POST /api HTTP/1.1\r\norigin: http://localhost:8080\r\n\r\n";
-    const origin = findHeader(request, "Origin");
-    try std.testing.expect(origin != null);
-    try std.testing.expectEqualStrings("http://localhost:8080", origin.?);
-}
-
-test "findHeader: trims whitespace from value" {
-    const request = "POST /api HTTP/1.1\r\nOrigin:  http://localhost:8080  \r\n\r\n";
-    const origin = findHeader(request, "Origin");
-    try std.testing.expect(origin != null);
-    try std.testing.expectEqualStrings("http://localhost:8080", origin.?);
 }
 
 test "escapeIdentifier: null bytes rejected at any position" {

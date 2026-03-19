@@ -5,6 +5,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // --- httpz dependency ---
+    const httpz_dep = b.dependency("httpz", .{ .target = target, .optimize = optimize });
+    const mod_httpz = httpz_dep.module("httpz");
+
     // --- Named modules (cross-directory imports) ---
     const mod_utils = b.createModule(.{
         .root_source_file = b.path("src/lib/utils.zig"),
@@ -56,6 +60,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Wire httpz to all modules that need it
+    mod_web.addImport("httpz", mod_httpz);
+    mod_crud.addImport("httpz", mod_httpz);
+    mod_schema.addImport("httpz", mod_httpz);
+    mod_export.addImport("httpz", mod_httpz);
+    mod_sql.addImport("httpz", mod_httpz);
 
     // Wire module dependencies
     mod_crud.addImport("postgres", mod_postgres);

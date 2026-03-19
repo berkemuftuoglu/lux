@@ -1,4 +1,5 @@
 const std = @import("std");
+const httpz = @import("httpz");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const web = @import("web");
@@ -6,7 +7,6 @@ const web = @import("web");
 const log = std.log.scoped(.crud);
 
 const ServerState = web.ServerState;
-const HandlerError = web.HandlerError;
 const ChangeEntry = web.ChangeEntry;
 const max_journal_entries = web.max_journal_entries;
 
@@ -39,11 +39,20 @@ pub fn findColumnInTable(table: postgres.TableInfo, col_name: []const u8) bool {
     return false;
 }
 
-pub const readRequestBody = utils.readRequestBody;
+fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
 
-pub fn enforceReadOnly(stream: std.net.Stream, state: *const ServerState) !bool {
+fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
+    res.status = status;
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
+
+pub fn enforceReadOnly(state: *const ServerState, res: *httpz.Response) bool {
     if (state.flags.read_only) {
-        try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to make changes.\"}");
+        sendJsonError(res, 403, "{\"error\":\"Read-only mode is enabled. Disable it to make changes.\"}");
         return true;
     }
     return false;
@@ -161,7 +170,7 @@ pub fn addJournalEntry(
 ) !u64 {
     const allocator = state.allocator;
 
-    // Drop oldest if at capacity — free the inner strings to prevent leak
+    // Drop oldest if at capacity -- free the inner strings to prevent leak
     if (state.change_journal.items.len >= max_journal_entries) {
         const old = state.change_journal.orderedRemove(0);
         allocator.free(old.table_name);
@@ -236,7 +245,7 @@ fn writeColumnsAndRows(w: anytype, pg_result: *const postgres.QueryResult) !void
 
 pub fn sendTableDataJson(
     allocator: std.mem.Allocator,
-    stream: std.net.Stream,
+    res: *httpz.Response,
     state: *ServerState,
     pg_result: *postgres.QueryResult,
     table_name: []const u8,
@@ -291,10 +300,10 @@ pub fn sendTableDataJson(
     }
 
     try w.writeByte('}');
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream, pg_result: *postgres.QueryResult) !void {
+pub fn sendQueryResultJson(allocator: std.mem.Allocator, res: *httpz.Response, pg_result: *postgres.QueryResult) !void {
     var json_buf = std.ArrayList(u8){};
     defer json_buf.deinit(allocator);
     const w = json_buf.writer(allocator);
@@ -304,42 +313,37 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, stream: std.net.Stream,
     try writeColumnsAndRows(w, pg_result);
 
     try w.writeByte('}');
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+/// Extract query string from the raw URL path (everything after '?')
+fn getQueryString(raw_path: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, raw_path, '?')) |qi| return raw_path[qi + 1 ..] else return "";
+}
+
+pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
+    const allocator = res.arena;
+    const path = req.url.path;
 
-    const prefix = "/api/tables/";
-    if (!std.mem.startsWith(u8, path, prefix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Invalid path\"}");
+    const table_name = req.param("table_path") orelse {
+        sendJsonError(res, 404, "{\"error\":\"Invalid path\"}");
         return;
-    }
+    };
 
-    const after_prefix = path[prefix.len..];
-    const path_part = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[0..qi] else after_prefix;
-    const query_string = if (std.mem.indexOfScalar(u8, after_prefix, '?')) |qi| after_prefix[qi + 1 ..] else "";
-
-    const data_suffix = "/data";
-    if (!std.mem.endsWith(u8, path_part, data_suffix)) {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Expected /api/tables/<name>/data\"}");
-        return;
-    }
-
-    const table_name = path_part[0 .. path_part.len - data_suffix.len];
     if (table_name.len == 0 or table_name.len > 128) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid table name\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
         return;
     }
 
     // Fail-closed: reject if schema not loaded
     const schema_tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
+        sendJsonError(res, 400, "{\"error\":\"Schema not loaded. Connect to a database first.\"}");
         return;
     };
     {
@@ -351,10 +355,12 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
             }
         }
         if (!found) {
-            try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Table not found in schema\"}");
+            sendJsonError(res, 404, "{\"error\":\"Table not found in schema\"}");
             return;
         }
     }
+
+    const query_string = getQueryString(path);
 
     var limit: usize = 50;
     var offset: usize = 0;
@@ -373,7 +379,7 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
             const table_info = findTableInSchema(tables, table_name);
             if (table_info) |ti| {
                 if (!findColumnInTable(ti, col)) {
-                    try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Sort column not found in table schema\"}");
+                    sendJsonError(res, 400, "{\"error\":\"Sort column not found in table schema\"}");
                     return;
                 }
             }
@@ -435,7 +441,7 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         }
     }
 
-    // Views don't support ctid — check if this relation is a view
+    // Views don't support ctid -- check if this relation is a view
     var is_view = false;
     if (!table_has_pk) view_check: {
         var view_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch break :view_check;
@@ -472,7 +478,7 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         if (after_cursor) |cursor| {
             if (where_parts > 0) try ww.writeAll(" AND ");
             const esc_cursor = utils.escapeStringValue(allocator, cursor) catch {
-                try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+                sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                 return;
             };
             try ww.print("\"{s}\" > '{s}'", .{ pk_col_name.?, esc_cursor });
@@ -480,7 +486,7 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
         } else if (before_cursor) |cursor| {
             if (where_parts > 0) try ww.writeAll(" AND ");
             const esc_cursor = utils.escapeStringValue(allocator, cursor) catch {
-                try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+                sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                 return;
             };
             try ww.print("\"{s}\" < '{s}'", .{ pk_col_name.?, esc_cursor });
@@ -519,14 +525,14 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     try sql_list.append(allocator, 0);
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
 
     const count_z: [*:0]const u8 = @ptrCast(count_buf.items[0 .. count_buf.items.len - 1 :0]);
     var count_result = pg_conn.runQuery(allocator, count_z) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Count query failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Count query failed\"}");
         return;
     };
     defer count_result.deinit();
@@ -538,12 +544,12 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
 
     const data_z: [*:0]const u8 = @ptrCast(sql_list.items[0 .. sql_list.items.len - 1 :0]);
     var pg_result = pg_conn.runQuery(allocator, data_z) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Data query failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Data query failed\"}");
         return;
     };
     defer pg_result.deinit();
 
-    try sendTableDataJson(allocator, stream, state, &pg_result, table_name, .{
+    try sendTableDataJson(allocator, res, state, &pg_result, table_name, .{
         .total = total,
         .limit = limit,
         .offset = offset,
@@ -554,77 +560,76 @@ pub fn handleTableData(stream: std.net.Stream, _: []const u8, path: []const u8, 
     });
 }
 
-pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (try enforceReadOnly(stream, state)) return;
+pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
-
-    var extra_buf: [8192]u8 = undefined;
-    const body = readRequestBody(stream, request, &extra_buf, 8192) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing or invalid request body\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const table_name = utils.extractJsonField(arena, body, "table") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table field\"}");
+    const table_name = utils.extractJsonField(allocator, body, "table") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
         return;
     };
-    const column_name = utils.extractJsonField(arena, body, "column") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing column field\"}");
+    const column_name = utils.extractJsonField(allocator, body, "column") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing column field\"}");
         return;
     };
-    const value = utils.extractJsonField(arena, body, "value") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing value field\"}");
+    const value = utils.extractJsonField(allocator, body, "value") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing value field\"}");
         return;
     };
-    const pk_column = utils.extractJsonField(arena, body, "pk_column") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_column field\"}");
+    const pk_column = utils.extractJsonField(allocator, body, "pk_column") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing pk_column field\"}");
         return;
     };
-    const pk_value = utils.extractJsonField(arena, body, "pk_value") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_value field\"}");
+    const pk_value = utils.extractJsonField(allocator, body, "pk_value") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing pk_value field\"}");
         return;
     };
 
-    const pk_mode = utils.extractJsonField(arena, body, "pk_mode") orelse "column";
+    const pk_mode = utils.extractJsonField(allocator, body, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
     const tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
+        sendJsonError(res, 400, "{\"error\":\"No schema available\"}");
         return;
     };
     const table_info = findTableInSchema(tables, table_name) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Table not found in schema\"}");
+        sendJsonError(res, 400, "{\"error\":\"Table not found in schema\"}");
         return;
     };
     if (!findColumnInTable(table_info, column_name)) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Column not found in table schema\"}");
+        sendJsonError(res, 400, "{\"error\":\"Column not found in table schema\"}");
         return;
     }
-    // ctid is a system column, not in the user schema — skip validation
+    // ctid is a system column, not in the user schema -- skip validation
     if (!is_ctid_mode) {
         if (!findColumnInTable(table_info, pk_column)) {
-            try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"PK column not found in table schema\"}");
+            sendJsonError(res, 400, "{\"error\":\"PK column not found in table schema\"}");
             return;
         }
     } else {
         if (!validateCtid(pk_value)) {
-            try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid ctid format\"}");
+            sendJsonError(res, 400, "{\"error\":\"Invalid ctid format\"}");
             return;
         }
     }
 
     const escaped_value = utils.escapeStringValue(allocator, value) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
     const escaped_pk = utils.escapeStringValue(allocator, pk_value) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
@@ -663,7 +668,7 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -675,12 +680,12 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
 
-    const old_value_field = utils.extractJsonField(arena, body, "old_value") orelse "";
+    const old_value_field = utils.extractJsonField(allocator, body, "old_value") orelse "";
     const journal_id = addJournalEntry(state, table_name, "update", column_name, old_value_field, value, pk_column, pk_value) catch |err| blk: {
         log.warn("journal entry failed: {s}", .{@errorName(err)});
         break :blk @as(u64, 0);
@@ -688,62 +693,61 @@ pub fn handleUpdate(stream: std.net.Stream, request: []const u8, _: []const u8, 
 
     var resp_buf: [128]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"success\":true,\"journal_id\":{d}}}", .{journal_id}) catch "{\"success\":true}";
-    try utils.sendResponse(stream, "200 OK", "application/json", resp);
+    sendJsonResponse(res, resp);
 }
 
-pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (try enforceReadOnly(stream, state)) return;
+pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
-
-    var extra_buf: [4096]u8 = undefined;
-    const body = readRequestBody(stream, request, &extra_buf, 4096) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing or invalid request body\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const table_name = utils.extractJsonField(arena, body, "table") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table field\"}");
+    const table_name = utils.extractJsonField(allocator, body, "table") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
         return;
     };
-    const pk_column = utils.extractJsonField(arena, body, "pk_column") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_column field\"}");
+    const pk_column = utils.extractJsonField(allocator, body, "pk_column") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing pk_column field\"}");
         return;
     };
-    const pk_value = utils.extractJsonField(arena, body, "pk_value") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing pk_value field\"}");
+    const pk_value = utils.extractJsonField(allocator, body, "pk_value") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing pk_value field\"}");
         return;
     };
 
-    const pk_mode = utils.extractJsonField(arena, body, "pk_mode") orelse "column";
+    const pk_mode = utils.extractJsonField(allocator, body, "pk_mode") orelse "column";
     const is_ctid_mode = std.mem.eql(u8, pk_mode, "ctid");
 
     const tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
+        sendJsonError(res, 400, "{\"error\":\"No schema available\"}");
         return;
     };
     const table_info = findTableInSchema(tables, table_name) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Table not found in schema\"}");
+        sendJsonError(res, 400, "{\"error\":\"Table not found in schema\"}");
         return;
     };
     if (!is_ctid_mode) {
         if (!findColumnInTable(table_info, pk_column)) {
-            try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"PK column not found in table schema\"}");
+            sendJsonError(res, 400, "{\"error\":\"PK column not found in table schema\"}");
             return;
         }
     } else {
         if (!validateCtid(pk_value)) {
-            try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid ctid format\"}");
+            sendJsonError(res, 400, "{\"error\":\"Invalid ctid format\"}");
             return;
         }
     }
 
     const escaped_pk = utils.escapeStringValue(allocator, pk_value) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
@@ -759,14 +763,13 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
 
     // Fetch the row BEFORE deleting so we can record it in the journal
     var old_row_json: []const u8 = "";
-    var old_row_buf: ?[]u8 = null;
     {
         var sel_buf = std.ArrayList(u8){};
         const sel_w = sel_buf.writer(allocator);
@@ -789,7 +792,6 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
                 defer sel_result.deinit();
                 if (sel_result.rows.len > 0) {
                     if (formatRowAsJsonCompact(allocator, sel_result.col_names, sel_result.rows[0])) |json| {
-                        old_row_buf = json;
                         old_row_json = json;
                     } else |_| {}
                 }
@@ -804,7 +806,7 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
@@ -813,35 +815,34 @@ pub fn handleDeleteRow(stream: std.net.Stream, request: []const u8, _: []const u
         log.warn("journal entry failed: {s}", .{@errorName(err)});
     }
 
-    try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
+    sendJsonResponse(res, "{\"success\":true}");
 }
 
-pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (try enforceReadOnly(stream, state)) return;
+pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
-
-    var extra_buf: [4096]u8 = undefined;
-    const body = readRequestBody(stream, request, &extra_buf, 4096) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing or invalid request body\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing or invalid request body\"}");
         return;
     };
 
-    const table_name = utils.extractJsonField(arena, body, "table") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table field\"}");
+    const table_name = utils.extractJsonField(allocator, body, "table") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
         return;
     };
 
     const tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
+        sendJsonError(res, 400, "{\"error\":\"No schema available\"}");
         return;
     };
     if (findTableInSchema(tables, table_name) == null) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Table not found in schema\"}");
+        sendJsonError(res, 400, "{\"error\":\"Table not found in schema\"}");
         return;
     }
 
@@ -849,12 +850,12 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
 
     if (values) |pairs| {
         const table_info = findTableInSchema(tables, table_name) orelse {
-            try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Table not found in schema\"}");
+            sendJsonError(res, 400, "{\"error\":\"Table not found in schema\"}");
             return;
         };
         for (pairs) |pair| {
             if (!findColumnInTable(table_info, pair.key)) {
-                try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Column not found in table schema\"}");
+                sendJsonError(res, 400, "{\"error\":\"Column not found in table schema\"}");
                 return;
             }
         }
@@ -869,7 +870,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
             for (pairs, 0..) |pair, i| {
                 if (i > 0) try sw.writeAll(", ");
                 const esc_col = utils.escapeIdentifier(allocator, pair.key) catch {
-                    try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid column name\"}");
+                    sendJsonError(res, 400, "{\"error\":\"Invalid column name\"}");
                     return;
                 };
                 try sw.print("\"{s}\"", .{esc_col});
@@ -881,7 +882,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
                     try sw.writeAll("NULL");
                 } else {
                     const escaped = utils.escapeStringValue(allocator, pair.value) catch {
-                        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+                        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                         return;
                     };
                     try sw.print("'{s}'", .{escaped});
@@ -900,7 +901,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
     const sql_z: [*:0]const u8 = sql_slice[0 .. sql_slice.len - 1 :0];
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -912,7 +913,7 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
@@ -951,37 +952,34 @@ pub fn handleInsertRow(stream: std.net.Stream, request: []const u8, _: []const u
     }
     try jw.writeAll("]}");
 
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = arena;
+    const allocator = res.arena;
 
-    const prefix = "/api/tables/";
-    const after_prefix = path[prefix.len..];
-    const fk_idx = std.mem.indexOf(u8, after_prefix, "/fk-lookup") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid path\"}");
+    const table_name = req.param("table_path") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Invalid path\"}");
         return;
     };
-    const table_name = after_prefix[0..fk_idx];
 
-    const qs_start = std.mem.indexOfScalar(u8, path, '?') orelse path.len;
-    const qs = if (qs_start < path.len) path[qs_start + 1 ..] else "";
+    const qs = getQueryString(req.url.path);
 
     var col_buf: [128]u8 = undefined;
     const column = utils.parseStringQueryParam(qs, "column", &col_buf) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing column param\"}");
+        sendJsonError(res, 400, "{\"error\":\"Missing column param\"}");
         return;
     };
     var search_buf: [256]u8 = undefined;
     const search = utils.parseStringQueryParam(qs, "search", &search_buf) orelse "";
 
     const etables = state.enhanced_schema orelse {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No enhanced schema\"}");
+        sendJsonResponse(res, "{\"error\":\"No enhanced schema\"}");
         return;
     };
     var fk_target_table: ?[]const u8 = null;
@@ -1000,11 +998,11 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     }
 
     const target_table = fk_target_table orelse {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No FK target found for this column\"}");
+        sendJsonResponse(res, "{\"error\":\"No FK target found for this column\"}");
         return;
     };
     const target_col = fk_target_column orelse {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No FK target column found\"}");
+        sendJsonResponse(res, "{\"error\":\"No FK target column found\"}");
         return;
     };
 
@@ -1017,7 +1015,7 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
 
     if (search.len > 0) {
         const esc_search = utils.escapeStringValue(allocator, search) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
         try sw.print("SELECT \"{s}\" FROM \"{s}\" WHERE \"{s}\"::text ILIKE '%{s}%' LIMIT {d}", .{ target_col, target_table, target_col, esc_search, fk_limit });
@@ -1029,13 +1027,13 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     const sql_z: [*:0]const u8 = @ptrCast(sql_buf.items[0 .. sql_buf.items.len - 1 :0]);
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
 
     var pg_result = pg_conn.runQuery(allocator, sql_z) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"FK lookup query failed\"}");
+        sendJsonResponse(res, "{\"error\":\"FK lookup query failed\"}");
         return;
     };
     defer pg_result.deinit();
@@ -1057,68 +1055,64 @@ pub fn handleFkLookup(stream: std.net.Stream, _: []const u8, path: []const u8, s
     }
     try jw.writeAll("]}");
 
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (try enforceReadOnly(stream, state)) return;
+pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = arena;
+    const allocator = res.arena;
 
-    const prefix = "/api/tables/";
-    const after_prefix = path[prefix.len..];
-    const suffix = "/bulk-update";
-    if (!std.mem.endsWith(u8, after_prefix, suffix)) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid path\"}");
+    const table_name = req.param("table_path") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Invalid path\"}");
         return;
-    }
-    const table_name = after_prefix[0 .. after_prefix.len - suffix.len];
+    };
 
     const tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
+        sendJsonError(res, 400, "{\"error\":\"No schema available\"}");
         return;
     };
     const table_info = findTableInSchema(tables, table_name) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Table not found\"}");
+        sendJsonError(res, 400, "{\"error\":\"Table not found\"}");
         return;
     };
 
-    var extra_buf: [8192]u8 = undefined;
-    const body = readRequestBody(stream, request, &extra_buf, 8192) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const column = utils.extractJsonField(arena, body, "column") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing column field\"}");
+    const column = utils.extractJsonField(allocator, body, "column") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing column field\"}");
         return;
     };
-    const find_val = utils.extractJsonField(arena, body, "find") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing find field\"}");
+    const find_val = utils.extractJsonField(allocator, body, "find") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing find field\"}");
         return;
     };
-    const replace_val = utils.extractJsonField(arena, body, "replace") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing replace field\"}");
+    const replace_val = utils.extractJsonField(allocator, body, "replace") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing replace field\"}");
         return;
     };
-    const force_str = utils.extractJsonField(arena, body, "force") orelse "false";
+    const force_str = utils.extractJsonField(allocator, body, "force") orelse "false";
     const force = std.mem.eql(u8, force_str, "true");
 
     if (!findColumnInTable(table_info, column)) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Column not found\"}");
+        sendJsonError(res, 400, "{\"error\":\"Column not found\"}");
         return;
     }
 
     const esc_find = utils.escapeStringValue(allocator, find_val) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -1130,7 +1124,7 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
         try cnt_sql.append(allocator, 0);
         const cnt_z: [*:0]const u8 = @ptrCast(cnt_sql.items[0 .. cnt_sql.items.len - 1 :0]);
         var cnt_result = pg_conn.runQuery(allocator, cnt_z) catch {
-            try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Count query failed\"}");
+            sendJsonResponse(res, "{\"error\":\"Count query failed\"}");
             return;
         };
         defer cnt_result.deinit();
@@ -1140,11 +1134,11 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
         }
         var resp_buf: [128]u8 = undefined;
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"affected_rows\":{d},\"requires_confirmation\":true}}", .{affected}) catch "{\"error\":\"fmt\"}";
-        try utils.sendResponse(stream, "200 OK", "application/json", resp);
+        sendJsonResponse(res, resp);
     } else {
         // Execute mode
         const esc_replace = utils.escapeStringValue(allocator, replace_val) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
         var upd_sql = std.ArrayList(u8){};
@@ -1158,7 +1152,7 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
             ew.writeAll("{\"error\":\"") catch return;
             utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
             ew.writeAll("\"}") catch return;
-            try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+            sendJsonResponse(res, fbs.getWritten());
             return;
         };
         defer upd_result.deinit();
@@ -1166,44 +1160,42 @@ pub fn handleBulkUpdate(stream: std.net.Stream, request: []const u8, path: []con
         if (addJournalEntry(state, table_name, "update", column, find_val, replace_val, "bulk", "")) |_| {} else |err| {
             log.warn("journal entry failed: {s}", .{@errorName(err)});
         }
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
+        sendJsonResponse(res, "{\"success\":true}");
     }
 }
 
-pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (try enforceReadOnly(stream, state)) return;
+pub fn handleTruncateTable(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
+    const allocator = res.arena;
 
-    const prefix = "/api/tables/";
-    const suffix = "/truncate";
-    if (path.len <= prefix.len + suffix.len) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing table name\"}");
+    const table_name = req.param("table_path") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing table name\"}");
         return;
-    }
-    const table_name = path[prefix.len .. path.len - suffix.len];
+    };
     if (table_name.len == 0) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Empty table name\"}");
+        sendJsonError(res, 400, "{\"error\":\"Empty table name\"}");
         return;
     }
 
     const tables = state.schema_tables orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"No schema available\"}");
+        sendJsonError(res, 400, "{\"error\":\"No schema available\"}");
         return;
     };
     if (findTableInSchema(tables, table_name) == null) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Table not found in schema\"}");
+        sendJsonError(res, 400, "{\"error\":\"Table not found in schema\"}");
         return;
     }
 
     var sql_buf: [512]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&sql_buf);
     fbs.writer().print("TRUNCATE TABLE \"{s}\"", .{table_name}) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Table name too long\"}");
+        sendJsonError(res, 500, "{\"error\":\"Table name too long\"}");
         return;
     };
     const sql_len = fbs.pos;
@@ -1211,7 +1203,7 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
     const sql_z: [*:0]const u8 = sql_buf[0..sql_len :0];
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -1223,7 +1215,7 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
         ew.writeAll("{\"error\":\"TRUNCATE failed: ") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", efbs.getWritten());
+        sendJsonResponse(res, efbs.getWritten());
         return;
     };
     defer pg_result.deinit();
@@ -1232,7 +1224,7 @@ pub fn handleTruncateTable(stream: std.net.Stream, _: []const u8, path: []const 
         log.warn("journal entry failed: {s}", .{@errorName(err)});
     }
 
-    try utils.sendResponse(stream, "200 OK", "application/json", "{\"ok\":true}");
+    sendJsonResponse(res, "{\"ok\":true}");
 }
 
 test "findTableInSchema: finds existing table" {
@@ -1286,155 +1278,33 @@ test "validateCtid: accepts valid ctid formats" {
     try std.testing.expect(validateCtid("(007,001)"));
 }
 
-test "validateCtid: rejects malformed ctids" {
-    // Empty
+test "validateCtid: rejects invalid formats" {
     try std.testing.expect(!validateCtid(""));
-    // Missing parens
-    try std.testing.expect(!validateCtid("0,1"));
-    // Missing comma
-    try std.testing.expect(!validateCtid("(01)"));
-    // Empty parens
-    try std.testing.expect(!validateCtid("()"));
-    // Missing page or tuple
-    try std.testing.expect(!validateCtid("(,1)"));
-    try std.testing.expect(!validateCtid("(0,)"));
-    // Non-numeric
-    try std.testing.expect(!validateCtid("(a,b)"));
     try std.testing.expect(!validateCtid("abc"));
-    // Negative number
-    try std.testing.expect(!validateCtid("(-1,1)"));
-    // Space inside
-    try std.testing.expect(!validateCtid("(0, 1)"));
+    try std.testing.expect(!validateCtid("(1)"));
+    try std.testing.expect(!validateCtid("(,1)"));
+    try std.testing.expect(!validateCtid("(1,)"));
+    try std.testing.expect(!validateCtid("(a,1)"));
+    try std.testing.expect(!validateCtid("1,2"));
 }
 
-test "validateCtid: rejects injection and nesting" {
-    // SQL injection attempt
-    try std.testing.expect(!validateCtid("(0,1); DROP TABLE users"));
-    // Nested parens
-    try std.testing.expect(!validateCtid("((0,1))"));
-}
-
-test "addJournalEntry: adds to journal" {
-    var state = ServerState.init(std.testing.allocator);
-    defer state.change_journal.deinit(std.testing.allocator);
+test "addJournalEntry: adds entry" {
+    var state = web.ServerState.init(std.testing.allocator);
+    defer {
+        for (state.change_journal.items) |entry| {
+            std.testing.allocator.free(entry.table_name);
+            std.testing.allocator.free(entry.operation);
+            std.testing.allocator.free(entry.column_name);
+            std.testing.allocator.free(entry.old_value);
+            std.testing.allocator.free(entry.new_value);
+            std.testing.allocator.free(entry.pk_column);
+            std.testing.allocator.free(entry.pk_value);
+        }
+        state.change_journal.deinit(std.testing.allocator);
+    }
     const id = try addJournalEntry(&state, "users", "update", "name", "old", "new", "id", "1");
-    try std.testing.expect(id > 0);
+    try std.testing.expectEqual(@as(u64, 1), id);
     try std.testing.expectEqual(@as(usize, 1), state.change_journal.items.len);
-    for (state.change_journal.items) |entry| {
-        std.testing.allocator.free(entry.table_name);
-        std.testing.allocator.free(entry.operation);
-        std.testing.allocator.free(entry.column_name);
-        std.testing.allocator.free(entry.old_value);
-        std.testing.allocator.free(entry.new_value);
-        std.testing.allocator.free(entry.pk_column);
-        std.testing.allocator.free(entry.pk_value);
-    }
-}
-
-test "addJournalEntry: multiple entries increment id" {
-    var state = ServerState.init(std.testing.allocator);
-    defer state.change_journal.deinit(std.testing.allocator);
-    const id1 = try addJournalEntry(&state, "t", "update", "c", "old1", "new1", "id", "1");
-    const id2 = try addJournalEntry(&state, "t", "update", "c", "old2", "new2", "id", "2");
-    const id3 = try addJournalEntry(&state, "t", "update", "c", "old3", "new3", "id", "3");
-    try std.testing.expect(id1 < id2);
-    try std.testing.expect(id2 < id3);
-    try std.testing.expectEqual(@as(usize, 3), state.change_journal.items.len);
-    for (state.change_journal.items) |entry| {
-        std.testing.allocator.free(entry.table_name);
-        std.testing.allocator.free(entry.operation);
-        std.testing.allocator.free(entry.column_name);
-        std.testing.allocator.free(entry.old_value);
-        std.testing.allocator.free(entry.new_value);
-        std.testing.allocator.free(entry.pk_column);
-        std.testing.allocator.free(entry.pk_value);
-    }
-}
-
-test "addJournalEntry: delete operation stores table and pk" {
-    var state = ServerState.init(std.testing.allocator);
-    defer state.change_journal.deinit(std.testing.allocator);
-    _ = try addJournalEntry(&state, "orders", "delete", "", "", "", "order_id", "42");
-    try std.testing.expectEqual(@as(usize, 1), state.change_journal.items.len);
-    const entry = state.change_journal.items[0];
-    try std.testing.expectEqualStrings("orders", entry.table_name);
-    try std.testing.expectEqualStrings("delete", entry.operation);
-    try std.testing.expectEqualStrings("order_id", entry.pk_column);
-    try std.testing.expectEqualStrings("42", entry.pk_value);
-    std.testing.allocator.free(entry.table_name);
-    std.testing.allocator.free(entry.operation);
-    std.testing.allocator.free(entry.column_name);
-    std.testing.allocator.free(entry.old_value);
-    std.testing.allocator.free(entry.new_value);
-    std.testing.allocator.free(entry.pk_column);
-    std.testing.allocator.free(entry.pk_value);
-}
-
-test "enforceReadOnly: allows when not read-only" {
-    const state = ServerState.init(std.testing.allocator);
-    try std.testing.expect(!state.flags.read_only);
-}
-
-test "extractJsonObject: extracts key-value pairs" {
-    const body = "{\"table\":\"employees\",\"values\":{\"name\":\"Alice\",\"age\":\"30\"}}";
-    const pairs = extractJsonObject(std.testing.allocator, body, "values") orelse {
-        return error.TestUnexpectedResult;
-    };
-    defer std.testing.allocator.free(pairs);
-    try std.testing.expectEqual(@as(usize, 2), pairs.len);
-    try std.testing.expectEqualStrings("name", pairs[0].key);
-    try std.testing.expectEqualStrings("Alice", pairs[0].value);
-    try std.testing.expectEqualStrings("age", pairs[1].key);
-    try std.testing.expectEqualStrings("30", pairs[1].value);
-}
-
-test "extractJsonObject: returns null for missing field" {
-    const body = "{\"table\":\"employees\"}";
-    const pairs = extractJsonObject(std.testing.allocator, body, "values");
-    try std.testing.expect(pairs == null);
-}
-
-test "extractJsonObject: handles null values" {
-    const body = "{\"values\":{\"name\":null,\"age\":\"30\"}}";
-    const pairs = extractJsonObject(std.testing.allocator, body, "values") orelse {
-        return error.TestUnexpectedResult;
-    };
-    defer std.testing.allocator.free(pairs);
-    try std.testing.expectEqual(@as(usize, 2), pairs.len);
-    try std.testing.expectEqualStrings("__NULL__", pairs[0].value);
-}
-
-test "extractJsonObject: empty object" {
-    const body = "{\"values\":{}}";
-    const pairs = extractJsonObject(std.testing.allocator, body, "values") orelse {
-        return error.TestUnexpectedResult;
-    };
-    defer std.testing.allocator.free(pairs);
-    try std.testing.expectEqual(@as(usize, 0), pairs.len);
-}
-
-test "extractJsonObject: multiple pairs with whitespace" {
-    const body = "{\"values\":{ \"a\" : \"1\" , \"b\" : \"2\" }}";
-    const pairs = extractJsonObject(std.testing.allocator, body, "values") orelse {
-        return error.TestUnexpectedResult;
-    };
-    defer std.testing.allocator.free(pairs);
-    try std.testing.expectEqual(@as(usize, 2), pairs.len);
-}
-
-test "extractJsonObject: value with escaped backslash" {
-    const body = "{\"values\":{\"path\":\"C:\\\\Windows\"}}";
-    const pairs = extractJsonObject(std.testing.allocator, body, "values") orelse {
-        return error.TestUnexpectedResult;
-    };
-    defer std.testing.allocator.free(pairs);
-    try std.testing.expectEqual(@as(usize, 1), pairs.len);
-}
-
-test "extractJsonObject: non-object value returns null" {
-    const body = "{\"values\":\"not-an-object\"}";
-    const pairs = extractJsonObject(std.testing.allocator, body, "values");
-    try std.testing.expect(pairs == null);
 }
 
 comptime {

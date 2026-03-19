@@ -1,4 +1,5 @@
 const std = @import("std");
+const httpz = @import("httpz");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const sql_guard = @import("sql_guard");
@@ -8,9 +9,19 @@ const crud = @import("crud");
 const log = std.log.scoped(.sql);
 
 const ServerState = web.ServerState;
-const HandlerError = web.HandlerError;
 const QueryHistoryEntry = web.QueryHistoryEntry;
 const max_history_entries = web.max_history_entries;
+
+fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
+
+fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
+    res.status = status;
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
 
 pub fn addHistoryEntry(
     state: *ServerState,
@@ -38,40 +49,35 @@ pub fn addHistoryEntry(
     }
 }
 
-pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
-
-    const max_sql_body = 65536; // 64KB — enough for multi-statement scripts
-    const extra_buf = allocator.alloc(u8, max_sql_body) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
-        return;
-    };
-    const body = crud.readRequestBody(stream, request, extra_buf, max_sql_body) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
+    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
 
     if (sql_text.len == 0) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Empty SQL\"}");
+        sendJsonError(res, 400, "{\"error\":\"Empty SQL\"}");
         return;
     }
 
     if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
-        try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to execute write operations.\"}");
+        sendJsonError(res, 403, "{\"error\":\"Read-only mode is enabled. Disable it to execute write operations.\"}");
         return;
     }
 
-    const force = utils.extractJsonField(arena, body, "force");
+    const force = utils.extractJsonField(allocator, body, "force");
     const is_forced = if (force) |f| std.mem.eql(u8, f, "true") else false;
     if (!is_forced) {
         const guard = sql_guard.analyzeSql(sql_text);
@@ -83,18 +89,18 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, sta
             try ww.writeAll("\",\"warning\":\"");
             try utils.writeJsonEscaped(ww, guard.warning);
             try ww.writeAll("\"}");
-            try utils.sendResponse(stream, "200 OK", "application/json", warn_buf.items);
+            sendJsonResponse(res, warn_buf.items);
             return;
         }
     }
 
     const sql_z = allocator.dupeZ(u8, sql_text) catch {
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -116,7 +122,7 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, sta
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, err_msg) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer result.deinit();
@@ -124,42 +130,42 @@ pub fn handleSql(stream: std.net.Stream, request: []const u8, _: []const u8, sta
     const duration: u64 = @intCast(@max(0, end_time - start_time));
     addHistoryEntry(state, sql_text, duration, result.n_rows, false, null);
 
-    try crud.sendQueryResultJson(allocator, stream, &result);
+    try crud.sendQueryResultJson(allocator, res, &result);
 }
 
-pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = arena;
-    var extra_buf: [8192]u8 = undefined;
-    const body = crud.readRequestBody(stream, request, &extra_buf, 8192) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
-    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
+    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
     if (sql_text.len == 0) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Empty SQL\"}");
+        sendJsonError(res, 400, "{\"error\":\"Empty SQL\"}");
         return;
     }
 
     if (state.flags.read_only and !sql_guard.isSqlReadSafe(sql_text)) {
-        try utils.sendResponse(stream, "403 Forbidden", "application/json", "{\"error\":\"Read-only mode is enabled. Disable it to preview write operations.\"}");
+        sendJsonError(res, 403, "{\"error\":\"Read-only mode is enabled. Disable it to preview write operations.\"}");
         return;
     }
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
 
     var begin_result = pg_conn.runQuery(allocator, "BEGIN") catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Failed to start transaction\"}");
+        sendJsonResponse(res, "{\"error\":\"Failed to start transaction\"}");
         return;
     };
     begin_result.deinit();
@@ -169,7 +175,7 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const 
             var r = rb;
             r.deinit();
         } else |_| {}
-        try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
@@ -184,7 +190,7 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const 
             var r = rb;
             r.deinit();
         } else |_| {}
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
@@ -225,11 +231,11 @@ pub fn handleSqlPreview(stream: std.net.Stream, request: []const u8, _: []const 
         try w.writeByte(']');
     }
     try w.writeAll("]}");
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
 pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
-    // Naive token-based heuristic — doesn't handle all DDL edge cases
+    // Naive token-based heuristic -- doesn't handle all DDL edge cases
     if (sql_guard.containsIgnoreCaseWord(sql, "ALTER") and sql_guard.containsIgnoreCaseWord(sql, "TABLE") and sql_guard.containsIgnoreCaseWord(sql, "ADD") and sql_guard.containsIgnoreCaseWord(sql, "COLUMN")) {
         if (utils.indexOfIgnoreCase(sql, "ADD")) |add_pos| {
             const before_add = sql[0..add_pos];
@@ -283,20 +289,20 @@ pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
     try writer.writeAll("-- No automatic rollback available for this operation.");
 }
 
-pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (try crud.enforceReadOnly(stream, state)) return;
+pub fn handleSchemaPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (crud.enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
-    const allocator = arena;
-    var extra_buf: [8192]u8 = undefined;
-    const body = crud.readRequestBody(stream, request, &extra_buf, 8192) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
-    const sql_text = utils.extractJsonField(arena, body, "sql") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing sql field\"}");
+    const sql_text = utils.extractJsonField(allocator, body, "sql") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing sql field\"}");
         return;
     };
 
@@ -318,11 +324,12 @@ pub fn handleSchemaPreview(stream: std.net.Stream, request: []const u8, _: []con
     try utils.writeJsonEscaped(w, rollback);
     try w.writeAll("\"}");
 
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleHistory(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    const alloc = arena;
+pub fn handleHistory(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    const alloc = res.arena;
 
     var json = std.ArrayList(u8){};
     try json.appendSlice(alloc, "{\"entries\":[");
@@ -365,10 +372,13 @@ pub fn handleHistory(stream: std.net.Stream, _: []const u8, _: []const u8, state
     }
 
     try json.appendSlice(alloc, "]}");
-    try utils.sendResponse(stream, "200 OK", "application/json", json.items);
+    sendJsonResponse(res, json.items);
 }
 
-pub fn handleJournal(stream: std.net.Stream, _: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
+pub fn handleJournal(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    const arena = res.arena;
+
     var json_buf = std.ArrayList(u8){};
     const w = json_buf.writer(arena);
 
@@ -394,29 +404,29 @@ pub fn handleJournal(stream: std.net.Stream, _: []const u8, _: []const u8, state
         try w.print("\",\"undone\":{s}}}", .{if (entry.undone) "true" else "false"});
     }
     try w.writeAll("]}");
-    try utils.sendResponse(stream, "200 OK", "application/json", json_buf.items);
+    sendJsonResponse(res, json_buf.items);
 }
 
-pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const u8, state: *ServerState, arena: std.mem.Allocator) HandlerError!void {
-    if (try crud.enforceReadOnly(stream, state)) return;
+pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const state = handler.state;
+    if (crud.enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"No database connected\"}");
+        sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
     }
 
-    const allocator = arena;
-    var extra_buf: [1024]u8 = undefined;
-    const body = crud.readRequestBody(stream, request, &extra_buf, 1024) orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing request body\"}");
+    const allocator = res.arena;
+    const body = req.body() orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
 
-    const id_str = utils.extractJsonField(arena, body, "id") orelse {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Missing id field\"}");
+    const id_str = utils.extractJsonField(allocator, body, "id") orelse {
+        sendJsonError(res, 400, "{\"error\":\"Missing id field\"}");
         return;
     };
     const id = std.fmt.parseInt(u64, id_str, 10) catch {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Invalid id\"}");
+        sendJsonError(res, 400, "{\"error\":\"Invalid id\"}");
         return;
     };
 
@@ -428,11 +438,11 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const
         }
     }
     const entry = found_entry orelse {
-        try utils.sendResponse(stream, "404 Not Found", "application/json", "{\"error\":\"Journal entry not found\"}");
+        sendJsonError(res, 404, "{\"error\":\"Journal entry not found\"}");
         return;
     };
     if (entry.undone) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Already undone\"}");
+        sendJsonError(res, 400, "{\"error\":\"Already undone\"}");
         return;
     }
 
@@ -441,7 +451,7 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const
 
     if (std.mem.eql(u8, entry.operation, "update")) {
         const escaped_pk = utils.escapeStringValue(allocator, entry.pk_value) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
         if (entry.old_value.len == 0) {
@@ -451,7 +461,7 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const
             });
         } else {
             const escaped_old = utils.escapeStringValue(allocator, entry.old_value) catch {
-                try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+                sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                 return;
             };
             try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\" = '{s}'", .{
@@ -459,25 +469,25 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const
             });
         }
     } else if (std.mem.eql(u8, entry.operation, "delete")) {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Undo delete not yet supported\"}");
+        sendJsonError(res, 400, "{\"error\":\"Undo delete not yet supported\"}");
         return;
     } else if (std.mem.eql(u8, entry.operation, "insert")) {
         const escaped_pk = utils.escapeStringValue(allocator, entry.pk_value) catch {
-            try utils.sendResponse(stream, "500 Internal Server Error", "application/json", "{\"error\":\"Out of memory\"}");
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
         try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = '{s}'", .{
             entry.table_name, entry.pk_column, escaped_pk,
         });
     } else {
-        try utils.sendResponse(stream, "400 Bad Request", "application/json", "{\"error\":\"Unknown operation\"}");
+        sendJsonError(res, 400, "{\"error\":\"Unknown operation\"}");
         return;
     }
     try sql_buf.append(allocator, 0);
     const sql_z: [*:0]const u8 = sql_buf.items[0 .. sql_buf.items.len - 1 :0];
 
     var pg_conn = postgres.PgConnection.connect(state.conninfo_z.?) catch {
-        try utils.sendResponse(stream, "200 OK", "application/json", "{\"error\":\"Database connection failed\"}");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
     defer pg_conn.deinit();
@@ -489,13 +499,13 @@ pub fn handleJournalUndo(stream: std.net.Stream, request: []const u8, _: []const
         ew.writeAll("{\"error\":\"") catch return;
         utils.writeJsonEscaped(ew, pg_conn.errorMessage()) catch return;
         ew.writeAll("\"}") catch return;
-        try utils.sendResponse(stream, "200 OK", "application/json", fbs.getWritten());
+        sendJsonResponse(res, fbs.getWritten());
         return;
     };
     defer pg_result.deinit();
 
     entry.undone = true;
-    try utils.sendResponse(stream, "200 OK", "application/json", "{\"success\":true}");
+    sendJsonResponse(res, "{\"success\":true}");
 }
 
 test "addHistoryEntry: adds to history" {

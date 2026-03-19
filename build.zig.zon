@@ -3,7 +3,12 @@
     .fingerprint = 0xb21a9feb299d728d,
     .version = "0.1.0",
     .minimum_zig_version = "0.15.2",
-    .dependencies = .{},
+    .dependencies = .{
+        .httpz = .{
+            .url = "git+https://github.com/karlseguin/http.zig?ref=master#844f8016e6616f00b05d4cc3c713307b0fe586c7",
+            .hash = "httpz-0.0.0-PNVzrBtMBwAPcQx3mNEgat3Xbsynw-eIC9SmOX5M9XtP",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
