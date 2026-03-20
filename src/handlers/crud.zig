@@ -3,6 +3,7 @@ const httpz = @import("httpz");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const web = @import("web");
+const validate = @import("validate");
 
 const log = std.log.scoped(.crud);
 
@@ -100,7 +101,7 @@ fn extractValuesFromJsonObject(allocator: std.mem.Allocator, obj: std.json.Objec
         try pairs.append(allocator, .{ .key = entry.key_ptr.*, .value = value });
     }
 
-    return try pairs.toOwnedSlice(allocator);
+    return pairs.toOwnedSlice(allocator);
 }
 
 pub fn addJournalEntry(
@@ -487,24 +488,32 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     };
 
-    const table_name = utils.getJsonString(obj, "table") orelse {
-        sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
+    var vb = try validate.Builder(void).init(allocator);
+    defer vb.deinit(allocator);
+    const str_v = vb.string(.{ .required = true, .min = 1, .max = 128, .trim = true });
+
+    var vctx = try validate.Context(void).init(allocator, .{ .max_errors = 5 }, {});
+    defer vctx.deinit(allocator);
+
+    vctx.field = validate.simpleField("table");
+    const table_name = (try str_v.validate(utils.getJsonString(obj, "table"), &vctx)) orelse "";
+    vctx.field = validate.simpleField("column");
+    const column_name = (try str_v.validate(utils.getJsonString(obj, "column"), &vctx)) orelse "";
+    vctx.field = validate.simpleField("pk_column");
+    const pk_column = (try str_v.validate(utils.getJsonString(obj, "pk_column"), &vctx)) orelse "";
+    vctx.field = validate.simpleField("pk_value");
+    const pk_value = (try str_v.validate(utils.getJsonString(obj, "pk_value"), &vctx)) orelse "";
+
+    if (!vctx.isValid()) {
+        const errs = vctx.errors();
+        const field_name = if (errs.len > 0) (errs[0].field orelse "field") else "field";
+        const err_msg = try std.fmt.allocPrint(allocator, "{{\"error\":\"Missing or invalid field: {s}\"}}", .{field_name});
+        sendJsonError(res, 400, err_msg);
         return;
-    };
-    const column_name = utils.getJsonString(obj, "column") orelse {
-        sendJsonError(res, 400, "{\"error\":\"Missing column field\"}");
-        return;
-    };
+    }
+
     const value = utils.getJsonString(obj, "value") orelse {
         sendJsonError(res, 400, "{\"error\":\"Missing value field\"}");
-        return;
-    };
-    const pk_column = utils.getJsonString(obj, "pk_column") orelse {
-        sendJsonError(res, 400, "{\"error\":\"Missing pk_column field\"}");
-        return;
-    };
-    const pk_value = utils.getJsonString(obj, "pk_value") orelse {
-        sendJsonError(res, 400, "{\"error\":\"Missing pk_value field\"}");
         return;
     };
 
@@ -718,10 +727,23 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     };
 
-    const table_name = utils.getJsonString(obj, "table") orelse {
-        sendJsonError(res, 400, "{\"error\":\"Missing table field\"}");
+    var vb_ins = try validate.Builder(void).init(allocator);
+    defer vb_ins.deinit(allocator);
+    const str_v_ins = vb_ins.string(.{ .required = true, .min = 1, .max = 128, .trim = true });
+
+    var vctx_ins = try validate.Context(void).init(allocator, .{ .max_errors = 5 }, {});
+    defer vctx_ins.deinit(allocator);
+
+    vctx_ins.field = validate.simpleField("table");
+    const table_name = (try str_v_ins.validate(utils.getJsonString(obj, "table"), &vctx_ins)) orelse "";
+
+    if (!vctx_ins.isValid()) {
+        const errs = vctx_ins.errors();
+        const field_name = if (errs.len > 0) (errs[0].field orelse "field") else "field";
+        const err_msg = try std.fmt.allocPrint(allocator, "{{\"error\":\"Missing or invalid field: {s}\"}}", .{field_name});
+        sendJsonError(res, 400, err_msg);
         return;
-    };
+    }
 
     const tables = state.schema_tables orelse {
         sendJsonError(res, 400, "{\"error\":\"No schema available\"}");
