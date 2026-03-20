@@ -101,7 +101,8 @@ fn extractValuesFromJsonObject(allocator: std.mem.Allocator, obj: std.json.Objec
         try pairs.append(allocator, .{ .key = entry.key_ptr.*, .value = value });
     }
 
-    return pairs.toOwnedSlice(allocator);
+    const slice = try pairs.toOwnedSlice(allocator);
+    return slice;
 }
 
 pub fn addJournalEntry(
