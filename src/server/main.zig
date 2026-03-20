@@ -1,6 +1,7 @@
 const std = @import("std");
 const clap = @import("clap");
 const web = @import("web");
+const logz = @import("logz");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -42,6 +43,15 @@ pub fn main() !void {
         }
     }
     const allocator = da.allocator();
+
+    try logz.setup(allocator, .{
+        .level = .Info,
+        .pool_size = 32,
+        .buffer_size = 4096,
+        .encoding = .logfmt,
+        .output = .stderr,
+    });
+    defer logz.deinit();
 
     var state = try web.ServerState.init(allocator);
     defer state.deinit();

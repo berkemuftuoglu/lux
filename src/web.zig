@@ -206,10 +206,20 @@ pub const Handler = struct {
                 res.status = 403;
                 res.content_type = httpz.ContentType.TEXT;
                 res.body = "Forbidden: cross-origin request";
+                log.warn("csrf blocked: {s}", .{req.url.path});
                 return;
             }
         }
+        const t0 = std.time.microTimestamp();
         try action(self, req, res);
+        const duration_us = std.time.microTimestamp() - t0;
+        // Operational access log — logz for structured telemetry, not diagnostic output
+        logz.info()
+            .string("method", @tagName(method))
+            .string("path", req.url.path)
+            .int("status", res.status)
+            .int("duration_us", duration_us)
+            .log();
     }
 
     pub fn notFound(_: *Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -422,6 +432,11 @@ pub fn serve(state: *ServerState, port: u16, bind_addr: []const u8) !void {
     try server.listen();
 }
 
+test "setup logz for web tests" {
+    // Use page_allocator: logz persists for the test binary lifetime, avoiding false leak detection
+    try logz.setup(std.heap.page_allocator, .{ .level = .None, .output = .stderr });
+}
+
 test "ServerState: init defaults" {
     var state = try ServerState.init(std.testing.allocator);
     defer state.deinit();
@@ -521,6 +536,7 @@ test "static_files tuple: has 17 JS/CSS entries" {
     // 2 CSS (variables.css + styles.css consolidated) + 15 JS files
     try std.testing.expectEqual(@as(usize, 17), static_files.len);
 }
+
 
 comptime {
     std.testing.refAllDeclsRecursive(@This());
