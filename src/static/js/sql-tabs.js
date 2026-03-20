@@ -14,9 +14,34 @@ function renderSqlTabs() {
 		const btn = document.createElement('button');
 		btn.className = `sql-tab-item${tab.id === activeSqlTab ? ' active' : ''}`;
 		btn.dataset.sqlTab = tab.id;
-		btn.innerHTML = escHtml(tab.name);
+
+		const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+		svg.setAttribute('viewBox', '0 0 24 24');
+		svg.setAttribute('fill', 'none');
+		svg.setAttribute('stroke', 'currentColor');
+		svg.setAttribute('stroke-width', '2');
+		svg.classList.add('tab-icon');
+		const polyline = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+		polyline.setAttribute('points', '4 17 10 11 4 5');
+		const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+		line.setAttribute('x1', '12');
+		line.setAttribute('y1', '19');
+		line.setAttribute('x2', '20');
+		line.setAttribute('y2', '19');
+		svg.appendChild(polyline);
+		svg.appendChild(line);
+		btn.appendChild(svg);
+
+		const nameSpan = document.createElement('span');
+		nameSpan.textContent = tab.name;
+		btn.appendChild(nameSpan);
+
 		if (sqlTabs.length > 1) {
-			btn.innerHTML += `<span class="close-tab" data-close="${tab.id}">&times;</span>`;
+			const closeSpan = document.createElement('span');
+			closeSpan.className = 'close-tab';
+			closeSpan.dataset.close = tab.id;
+			closeSpan.textContent = '\u00d7';
+			btn.appendChild(closeSpan);
 		}
 		btn.addEventListener('click', (e) => {
 			if (e.target.classList.contains('close-tab')) {
@@ -41,6 +66,7 @@ function switchSqlTab(tabId) {
 	if (tab) {
 		sqlEditor.value = tab.sql;
 		syncHighlight();
+		if (typeof updateLineNumbers === 'function') updateLineNumbers();
 		$('sql-results').innerHTML = tab.results;
 	}
 	renderSqlTabs();
@@ -67,6 +93,9 @@ function addSqlTab() {
 	renderSqlTabs();
 	sqlEditor.focus();
 }
+
+// Render initial tab on load
+document.addEventListener('DOMContentLoaded', () => renderSqlTabs());
 
 async function closeSqlTab(tabId) {
 	if (sqlTabs.length <= 1) return;

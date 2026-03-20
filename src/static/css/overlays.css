@@ -2,13 +2,20 @@
 	display: none;
 	position: fixed;
 	z-index: 150;
-	background: var(--bg-elevated);
-	border: 1px solid var(--border-focus);
+	background: var(--glass-light-strong);
+	backdrop-filter: blur(20px);
+	-webkit-backdrop-filter: blur(20px);
+	border: 1px solid var(--border-warm-20);
 	border-radius: 8px;
 	min-width: 180px;
-	box-shadow: var(--shadow-lg);
+	box-shadow: 0 12px 32px -12px var(--shadow-dark-md);
 	padding: 4px;
 	animation: modalIn 0.1s ease-out;
+}
+
+[data-theme="dark"] .ctx-menu {
+	background: var(--glass-dark-strong);
+	border-color: var(--glass-border-dark);
 }
 
 .ctx-menu.open {
@@ -77,7 +84,7 @@
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	background: rgba(0, 0, 0, 0.15);
+	background: var(--overlay-light);
 	backdrop-filter: blur(1px);
 }
 
@@ -254,7 +261,7 @@
 	display: none;
 	position: fixed;
 	inset: 0;
-	background: rgba(0, 0, 0, 0.5);
+	background: var(--overlay-heavy);
 	backdrop-filter: blur(4px);
 	z-index: 250;
 	align-items: flex-start;
@@ -269,12 +276,19 @@
 .cmd-palette {
 	width: 520px;
 	max-width: 90%;
-	background: var(--bg-elevated);
-	border: 1px solid var(--border);
+	background: var(--glass-light-strong);
+	backdrop-filter: blur(20px);
+	-webkit-backdrop-filter: blur(20px);
+	border: 1px solid var(--border-warm-20);
 	border-radius: 16px;
-	box-shadow: 0 20px 60px -12px rgba(25, 28, 29, 0.2);
+	box-shadow: 0 20px 60px -12px var(--shadow-dark-lg);
 	overflow: hidden;
 	animation: cmdIn 0.12s ease-out;
+}
+
+[data-theme="dark"] .cmd-palette {
+	background: var(--glass-dark-strong);
+	border-color: var(--glass-border-dark);
 }
 
 @keyframes cmdIn {
@@ -404,7 +418,7 @@
 	align-items: center;
 	justify-content: center;
 	background: linear-gradient(135deg, var(--accent), var(--accent-hover));
-	box-shadow: 0 8px 32px rgba(157, 67, 0, 0.25);
+	box-shadow: 0 8px 32px var(--shadow-accent-2xl);
 }
 
 .welcome-logo svg {
@@ -493,21 +507,186 @@
 }
 
 .conn-stripe.green {
-	background: linear-gradient(90deg, var(--conn-green), #22c55e);
+	background: linear-gradient(90deg, var(--conn-green), var(--conn-green-end));
 }
 
 .conn-stripe.yellow {
-	background: linear-gradient(90deg, var(--conn-yellow), #f59e0b);
+	background: linear-gradient(90deg, var(--conn-yellow), var(--conn-yellow-end));
 }
 
 .conn-stripe.red {
-	background: linear-gradient(90deg, var(--conn-red), #ef4444);
+	background: linear-gradient(90deg, var(--conn-red), var(--conn-red-end));
 }
 
 .conn-stripe.blue {
-	background: linear-gradient(90deg, var(--conn-blue), #6366f1);
+	background: linear-gradient(90deg, var(--conn-blue), var(--conn-blue-end));
 }
 
 .conn-stripe.purple {
-	background: linear-gradient(90deg, var(--conn-purple), #8b5cf6);
+	background: linear-gradient(90deg, var(--conn-purple), var(--conn-purple-end));
+}
+
+.fk-dropdown,
+.sql-autocomplete {
+	background: var(--glass-light-solid);
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
+	border-color: var(--border-warm-20);
+}
+
+[data-theme="dark"] .fk-dropdown,
+[data-theme="dark"] .sql-autocomplete {
+	background: var(--glass-dark-solid);
+	border-color: var(--glass-border-dark);
+}
+
+.conn-cards-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+	gap: 16px;
+	padding: 16px;
+}
+
+.conn-card {
+	background: var(--bg-elevated);
+	border: 1px solid var(--border-warm-10);
+	border-radius: 12px;
+	padding: 20px;
+	transition: all 0.15s ease;
+	cursor: default;
+}
+
+.conn-card:hover {
+	background: var(--bg-input);
+	border-color: var(--border-warm-20);
+}
+
+.conn-card.offline {
+	filter: grayscale(1);
+	opacity: 0.75;
+}
+
+.conn-card .card-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: flex-start;
+	margin-bottom: 16px;
+}
+
+.conn-card .card-icon {
+	width: 40px;
+	height: 40px;
+	background: var(--bg-hover);
+	border-radius: 8px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--border-warm-10);
+}
+
+.conn-card .card-icon svg {
+	width: 20px;
+	height: 20px;
+	color: var(--accent);
+}
+
+.conn-card .card-status {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 8px;
+	border-radius: 4px;
+	font-size: 10px;
+	font-weight: 900;
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+	font-family: var(--font-ui);
+}
+
+.conn-card .card-status.connected {
+	background: var(--card-connected-bg);
+	color: var(--success);
+	border: 1px solid var(--card-connected-border);
+}
+
+.conn-card .card-status.idle {
+	background: var(--card-idle-bg);
+	color: var(--tertiary);
+	border: 1px solid var(--card-idle-border);
+}
+
+.conn-card .card-status.offline {
+	background: var(--overlay-subtle);
+	color: var(--text-muted);
+	border: 1px solid var(--overlay-faint);
+}
+
+.conn-card .card-hostname {
+	font-family: var(--font-mono);
+	font-size: 14px;
+	font-weight: 700;
+	color: var(--text-primary);
+	letter-spacing: -0.02em;
+	margin-bottom: 4px;
+}
+
+.conn-card .card-desc {
+	font-size: 13px;
+	color: var(--on-surface-variant, var(--text-secondary));
+	font-weight: 500;
+	margin-bottom: 16px;
+}
+
+.conn-card .card-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding-top: 16px;
+	border-top: 1px solid var(--border-warm-05);
+}
+
+.conn-card .card-actions .card-btn {
+	flex: 1;
+	height: 36px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--bg-hover);
+	border: none;
+	border-radius: 8px;
+	font-size: 12px;
+	font-weight: 700;
+	color: var(--accent);
+	cursor: pointer;
+	font-family: var(--font-ui);
+	transition: all var(--transition);
+}
+
+.conn-card .card-actions .card-btn:hover {
+	background: var(--accent);
+	color: var(--accent-text);
+}
+
+.conn-card .card-actions .card-btn-settings {
+	width: 36px;
+	height: 36px;
+	flex: none;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--bg-surface);
+	border: none;
+	border-radius: 8px;
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: all var(--transition);
+}
+
+.conn-card .card-actions .card-btn-settings:hover {
+	background: var(--bg-hover);
+	color: var(--text-primary);
+}
+
+.conn-card .card-actions .card-btn-settings svg {
+	width: 16px;
+	height: 16px;
 }

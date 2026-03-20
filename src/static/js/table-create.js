@@ -4,30 +4,35 @@ let createTableColCount = 0;
 
 function addCreateTableCol() {
 	const container = $('create-table-cols');
-	const row = document.createElement('div');
-	row.className = 'create-col-row';
 	const idx = createTableColCount++;
-	row.innerHTML =
-		'<input class="col-name-input" placeholder="column_name" data-idx="' +
-		idx +
-		'" spellcheck="false">' +
-		'<select class="col-type-select" data-idx="' +
-		idx +
-		'">' +
-		'<option>integer</option><option>bigint</option><option>serial</option><option>bigserial</option>' +
-		'<option selected>text</option><option>varchar(255)</option><option>boolean</option>' +
-		'<option>numeric</option><option>real</option><option>double precision</option>' +
-		'<option>date</option><option>timestamp</option><option>timestamptz</option>' +
-		'<option>json</option><option>jsonb</option><option>uuid</option>' +
-		'</select>' +
-		'<label style="display:flex;align-items:center;gap:3px;font-size:10px;color:var(--text-muted);white-space:nowrap"><input type="checkbox" class="col-pk-check" data-idx="' +
-		idx +
-		'" style="accent-color:var(--accent)">PK</label>' +
-		'<label style="display:flex;align-items:center;gap:3px;font-size:10px;color:var(--text-muted);white-space:nowrap"><input type="checkbox" class="col-nn-check" data-idx="' +
-		idx +
-		'" style="accent-color:var(--accent)">NN</label>' +
-		'<button class="col-del-btn" title="Remove">&times;</button>';
-	row.querySelector('.col-del-btn').onclick = () => row.remove();
+
+	const typeOptions = [
+		'integer', 'bigint', 'serial', 'bigserial',
+		'text', 'varchar(255)', 'boolean',
+		'numeric', 'real', 'double precision',
+		'date', 'timestamp', 'timestamptz',
+		'json', 'jsonb', 'uuid',
+	];
+	const select = h('select', { cls: 'col-type-select', 'data-idx': String(idx) });
+	typeOptions.forEach((t) => {
+		const opt = h('option', { value: t, text: t });
+		if (t === 'text') opt.selected = true;
+		select.appendChild(opt);
+	});
+
+	const checkLabel = (cls, labelText) =>
+		h('label', { style: 'display:flex;align-items:center;gap:3px;font-size:10px;color:var(--text-muted);white-space:nowrap' },
+			h('input', { type: 'checkbox', cls, 'data-idx': String(idx), style: 'accent-color:var(--accent)' }),
+			labelText
+		);
+
+	const row = h('div', { cls: 'create-col-row' },
+		h('input', { cls: 'col-name-input', placeholder: 'column_name', 'data-idx': String(idx), spellcheck: 'false' }),
+		select,
+		checkLabel('col-pk-check', 'PK'),
+		checkLabel('col-nn-check', 'NN'),
+		h('button', { cls: 'col-del-btn', title: 'Remove', text: '\u00d7', onclick: () => row.remove() })
+	);
 	container.appendChild(row);
 }
 
@@ -72,8 +77,7 @@ $('btn-create-table').onclick = () => {
 	createTableColCount = 0;
 	addCreateTableCol();
 	addCreateTableCol();
-	$('create-table-overlay').classList.add('open');
-	trapFocus($('create-table-overlay'));
+	openModal('create-table-overlay');
 };
 
 $('create-add-col').onclick = addCreateTableCol;
@@ -88,10 +92,7 @@ $('create-table-preview').onclick = () => {
 	syncHighlight();
 	releaseFocus($('create-table-overlay'));
 	closeModal('create-table-overlay');
-	$$('.tab').forEach((t) => t.classList.remove('active'));
-	$$('.tab-panel').forEach((p) => p.classList.remove('active'));
-	document.querySelector('[data-tab="sql"]').classList.add('active');
-	$('panel-sql').classList.add('active');
+	switchTab('sql');
 	toast('DDL preview in SQL editor', 'info');
 };
 
@@ -105,11 +106,7 @@ $('create-table-ok').onclick = async () => {
 	releaseFocus($('create-table-overlay'));
 	closeModal('create-table-overlay');
 	try {
-		const data = await fetchJson('/api/sql', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ sql, force: 'true' }),
-		});
+		const data = await postJson('/api/sql', { sql, force: 'true' });
 		if (data.error) toast(data.error, 'error');
 		else {
 			toast('Table created', 'success');

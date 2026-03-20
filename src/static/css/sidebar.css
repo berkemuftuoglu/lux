@@ -1,8 +1,8 @@
 .sidebar {
-	width: 260px;
-	min-width: 200px;
+	width: 230px;
+	min-width: 180px;
 	background: var(--bg-surface);
-	border-right: 1px solid var(--border);
+	border-right: 1px solid var(--border-warm-10);
 	display: flex;
 	flex-direction: column;
 	flex-shrink: 0;
@@ -14,7 +14,40 @@
 
 .sidebar-connect {
 	padding: 12px;
-	border-bottom: 1px solid var(--border);
+	border-bottom: 1px solid var(--border-warm-10);
+}
+
+.conn-field-row {
+	display: flex;
+	gap: 6px;
+	margin-bottom: 6px;
+}
+
+.conn-field-row:last-of-type {
+	margin-bottom: 0;
+}
+
+.conn-field-row .conn-input {
+	flex: 1;
+}
+
+.conn-toggle-raw {
+	display: block;
+	width: 100%;
+	margin-top: 6px;
+	background: transparent;
+	border: none;
+	color: var(--text-muted);
+	font-size: 10px;
+	cursor: pointer;
+	font-family: var(--font-ui);
+	text-align: center;
+	padding: 2px 0;
+	transition: color 0.12s;
+}
+
+.conn-toggle-raw:hover {
+	color: var(--accent);
 }
 
 .conn-input-row {
@@ -61,13 +94,13 @@
 	flex-shrink: 0;
 	font-family: var(--font-ui);
 	transition: all var(--transition);
-	box-shadow: 0 2px 0 0 rgba(157, 67, 0, 0.15);
+	box-shadow: 0 2px 0 0 var(--shadow-accent-lg);
 }
 
 .conn-btn:hover {
 	background: linear-gradient(135deg, var(--accent-hover), var(--accent));
 	transform: translateY(-1px);
-	box-shadow: 0 3px 8px rgba(157, 67, 0, 0.2);
+	box-shadow: 0 3px 8px var(--shadow-accent-xl);
 }
 
 .conn-btn:active {
@@ -287,25 +320,35 @@
 
 .tree-col .col-type {
 	font-size: 10px;
-	opacity: 0.45;
+	font-weight: 700;
+	font-family: var(--font-mono);
+	padding: 0 6px;
+	border-radius: var(--radius-sm);
+	background: var(--chip-type-bg, var(--tertiary-fixed));
+	color: var(--chip-type-text, var(--on-tertiary-fixed-variant));
+	opacity: 1;
+	line-height: 16px;
 }
 
 .tree-col .badge {
-	font-size: 10px;
-	padding: 1px 4px;
+	font-size: 9px;
+	font-weight: 900;
+	padding: 0px 4px;
 	border-radius: 2px;
 	font-family: var(--font-ui);
-	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	line-height: 14px;
 }
 
 .tree-col .badge.pk {
-	color: var(--warning);
-	background: var(--warning-muted);
+	color: var(--badge-pk-text, #9a3412);
+	background: var(--badge-pk-bg, rgba(249, 115, 22, 0.1));
 }
 
 .tree-col .badge.fk {
-	color: var(--accent);
-	background: var(--accent-muted);
+	color: var(--badge-fk-text, #1d4ed8);
+	background: var(--badge-fk-bg, rgba(0, 99, 152, 0.1));
 }
 
 .sidebar-empty {

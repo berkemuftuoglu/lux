@@ -5,6 +5,17 @@ let fkItems = [];
 let fkIndex = -1;
 let fkSelecting = false;
 
+function getPkForRow(rowIdx) {
+	const row = State.currentRows[rowIdx];
+	if (State.currentPkMode === 'ctid') {
+		const ctidIdx = State.currentColumns.indexOf('ctid');
+		return { col: 'ctid', val: row[ctidIdx], mode: 'ctid' };
+	}
+	const pkCol = State.currentPkColumns[0] || State.currentColumns[0];
+	const pkIdx = State.currentColumns.indexOf(pkCol);
+	return { col: pkCol, val: row[pkIdx], mode: 'column' };
+}
+
 function getColumnMeta(tableName, colName) {
 	if (!State.schemaData || !State.schemaData.tables) return null;
 	const tbl = State.schemaData.tables.find((t) => t.name === tableName);
@@ -188,33 +199,20 @@ async function saveEdit() {
 		return;
 	}
 
-	let pkCol, pkVal;
-	if (State.currentPkMode === 'ctid') {
-		pkCol = 'ctid';
-		const ctidIdx = State.currentColumns.indexOf('ctid');
-		pkVal = State.currentRows[row][ctidIdx];
-	} else {
-		pkCol = State.currentPkColumns[0] || State.currentColumns[0];
-		const pkIdx = State.currentColumns.indexOf(pkCol);
-		pkVal = State.currentRows[row][pkIdx];
-	}
+	const pk = getPkForRow(row);
 
 	State.editingCell = null;
 	td.classList.remove('editing');
 
 	try {
-		const data = await fetchJson('/api/update', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				table: State.currentTable,
-				column: col,
-				value: newVal,
-				pk_column: pkCol,
-				pk_value: pkVal,
-				pk_mode: State.currentPkMode,
-				old_value: originalVal || '',
-			}),
+		const data = await postJson('/api/update', {
+			table: State.currentTable,
+			column: col,
+			value: newVal,
+			pk_column: pk.col,
+			pk_value: pk.val,
+			pk_mode: State.currentPkMode,
+			old_value: originalVal || '',
 		});
 		if (data.error) {
 			toast(data.error, 'error');
@@ -242,39 +240,26 @@ async function deleteRow(rowIdx) {
 		return;
 	}
 
-	let pkCol, pkVal;
-	if (State.currentPkMode === 'ctid') {
-		pkCol = 'ctid';
-		const ctidIdx = State.currentColumns.indexOf('ctid');
-		pkVal = State.currentRows[rowIdx][ctidIdx];
-	} else {
-		pkCol = State.currentPkColumns[0] || State.currentColumns[0];
-		const pkIdx = State.currentColumns.indexOf(pkCol);
-		pkVal = State.currentRows[rowIdx][pkIdx];
-	}
+	const pk = getPkForRow(rowIdx);
 
 	const ok = await confirm(
 		'Delete Row',
 		'DELETE FROM "' +
 			State.currentTable +
 			'" WHERE "' +
-			pkCol +
+			pk.col +
 			'" = \'' +
-			pkVal +
+			pk.val +
 			"'"
 	);
 	if (!ok) return;
 
 	try {
-		const data = await fetchJson('/api/delete-row', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				table: State.currentTable,
-				pk_column: pkCol,
-				pk_value: pkVal,
-				pk_mode: State.currentPkMode,
-			}),
+		const data = await postJson('/api/delete-row', {
+			table: State.currentTable,
+			pk_column: pk.col,
+			pk_value: pk.val,
+			pk_mode: State.currentPkMode,
 		});
 		if (data.error) toast(data.error, 'error');
 		else {
@@ -311,16 +296,11 @@ async function submitInsert() {
 		hasValues = true;
 	});
 
-	releaseFocus($('insert-overlay'));
-	$('insert-overlay').classList.remove('open');
+	closeModal('insert-overlay');
 	try {
 		const payload = { table: State.currentTable };
 		if (hasValues) payload.values = values;
-		const data = await fetchJson('/api/insert-row', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify(payload),
-		});
+		const data = await postJson('/api/insert-row', payload);
 		if (data.error) toast(data.error, 'error');
 		else {
 			toast(`Row inserted into ${State.currentTable}`, 'success');
@@ -337,32 +317,19 @@ async function setToNull(rowIdx, colName, td) {
 		toast('Read-only mode', 'error');
 		return;
 	}
-	let pkCol, pkVal;
-	if (State.currentPkMode === 'ctid') {
-		pkCol = 'ctid';
-		const ctidIdx = State.currentColumns.indexOf('ctid');
-		pkVal = State.currentRows[rowIdx][ctidIdx];
-	} else {
-		pkCol = State.currentPkColumns[0] || State.currentColumns[0];
-		const pkIdx = State.currentColumns.indexOf(pkCol);
-		pkVal = State.currentRows[rowIdx][pkIdx];
-	}
+	const pk = getPkForRow(rowIdx);
 	const dataIdx = State.currentColumns.indexOf(colName);
 	const oldVal = State.currentRows[rowIdx][dataIdx];
 
 	try {
-		const data = await fetchJson('/api/update', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({
-				table: State.currentTable,
-				column: colName,
-				value: '__NULL__',
-				pk_column: pkCol,
-				pk_value: pkVal,
-				pk_mode: State.currentPkMode,
-				old_value: oldVal || '',
-			}),
+		const data = await postJson('/api/update', {
+			table: State.currentTable,
+			column: colName,
+			value: '__NULL__',
+			pk_column: pk.col,
+			pk_value: pk.val,
+			pk_mode: State.currentPkMode,
+			old_value: oldVal || '',
 		});
 		if (data.error) toast(data.error, 'error');
 		else {
@@ -439,116 +406,79 @@ async function loadJournal() {
 		}
 		$('journal-empty').style.display = 'none';
 
-		let html = '';
+		list.querySelectorAll('.journal-entry').forEach((e) => e.remove());
 		entries.reverse().forEach((entry) => {
 			const opClass = entry.operation || 'update';
-			html +=
-				'<div class="journal-entry' +
-				(entry.undone ? ' undone' : '') +
-				'" data-id="' +
-				entry.id +
-				'">';
-			html += `<span class="op ${opClass}">${escHtml(opClass)}</span>`;
-			html += '<div class="details">';
-			html += `<span class="tbl">${escHtml(entry.table || '')}</span>`;
-			if (
-				entry.operation === 'delete' &&
-				entry.old_value &&
-				entry.old_value.startsWith('{')
-			) {
+			const detailsChildren = [h('span', { cls: 'tbl', text: entry.table || '' })];
+
+			const isDeletedRow = entry.operation === 'delete' && entry.old_value && entry.old_value.startsWith('{');
+			if (isDeletedRow) {
 				try {
 					const rowData = JSON.parse(entry.old_value);
 					const keys = Object.keys(rowData).slice(0, 4);
-					html += '<div class="journal-deleted-row">';
-					keys.forEach((k) => {
-						const v = rowData[k];
-						html +=
-							'<span class="journal-kv"><span class="col">' +
-							escHtml(k) +
-							'</span>=<span class="val old">' +
-							escHtml(String(v)) +
-							'</span></span> ';
-					});
+					const kvChildren = keys.map((k) =>
+						h('span', { cls: 'journal-kv' },
+							h('span', { cls: 'col', text: k }),
+							document.createTextNode('='),
+							h('span', { cls: 'val old', text: String(rowData[k]) }),
+							document.createTextNode(' ')
+						)
+					);
 					if (Object.keys(rowData).length > 4)
-						html +=
-							'<span class="val" style="opacity:0.5">+' +
-							(Object.keys(rowData).length - 4) +
-							' more</span>';
-					html += '</div>';
+						kvChildren.push(h('span', { cls: 'val', style: 'opacity:0.5', text: '+' + (Object.keys(rowData).length - 4) + ' more' }));
+					detailsChildren.push(h('div', { cls: 'journal-deleted-row' }, ...kvChildren));
 				} catch (_e) {
 					if (entry.pk_column && entry.pk_value) {
-						html +=
-							' <span class="val">(' +
-							escHtml(entry.pk_column) +
-							'=' +
-							escHtml(entry.pk_value) +
-							')</span>';
+						detailsChildren.push(
+							document.createTextNode(' '),
+							h('span', { cls: 'val', text: '(' + entry.pk_column + '=' + entry.pk_value + ')' })
+						);
 					}
 				}
 			} else if (entry.column) {
-				html += ` <span class="col">${escHtml(entry.column)}</span>`;
-				if (entry.old_value)
-					html += ` <span class="val old">${escHtml(entry.old_value)}</span>`;
-				if (entry.new_value)
-					html +=
-						' &rarr; <span class="val new">' +
-						escHtml(entry.new_value) +
-						'</span>';
+				detailsChildren.push(
+					document.createTextNode(' '),
+					h('span', { cls: 'col', text: entry.column })
+				);
+				if (entry.old_value) {
+					detailsChildren.push(
+						document.createTextNode(' '),
+						h('span', { cls: 'val old', text: entry.old_value })
+					);
+				}
+				if (entry.new_value) {
+					// Unicode arrow instead of &rarr; HTML entity
+					detailsChildren.push(document.createTextNode(' \u2192 '));
+					detailsChildren.push(h('span', { cls: 'val new', text: entry.new_value }));
+				}
 			}
-			if (
-				!(
-					entry.operation === 'delete' &&
-					entry.old_value &&
-					entry.old_value.startsWith('{')
-				) &&
-				entry.pk_column &&
-				entry.pk_value
-			) {
-				html +=
-					' <span class="val">(' +
-					escHtml(entry.pk_column) +
-					'=' +
-					escHtml(entry.pk_value) +
-					')</span>';
+			if (!isDeletedRow && entry.pk_column && entry.pk_value) {
+				detailsChildren.push(
+					document.createTextNode(' '),
+					h('span', { cls: 'val', text: '(' + entry.pk_column + '=' + entry.pk_value + ')' })
+				);
 			}
 			if (entry.timestamp) {
 				const d = new Date(entry.timestamp * 1000);
-				html += `<span class="ts">${d.toLocaleTimeString()}</span>`;
+				detailsChildren.push(h('span', { cls: 'ts', text: d.toLocaleTimeString() }));
 			}
-			html += '</div>';
+
+			const entryChildren = [
+				h('span', { cls: 'op ' + opClass, text: opClass }),
+				h('div', { cls: 'details' }, ...detailsChildren),
+			];
 			if (!entry.undone && entry.operation === 'update') {
-				html += `<button class="undo-btn" data-id="${entry.id}">Undo</button>`;
+				entryChildren.push(h('button', { cls: 'undo-btn', 'data-id': String(entry.id), text: 'Undo' }));
 			}
-			html += '</div>';
-		});
 
-		list.querySelectorAll('.journal-entry').forEach((e) => e.remove());
-		list.insertAdjacentHTML('beforeend', html);
+			const div = h('div', {
+				cls: 'journal-entry' + (entry.undone ? ' undone' : ''),
+				'data-id': String(entry.id),
+			}, ...entryChildren);
 
-		list.querySelectorAll('.undo-btn').forEach((btn) => {
-			btn.onclick = async () => {
-				try {
-					const data = await fetchJson('/api/journal/undo', {
-						method: 'POST',
-						headers: { 'Content-Type': 'application/json' },
-						body: JSON.stringify({ id: parseInt(btn.dataset.id, 10) }),
-					});
-					if (data.error) toast(data.error, 'error');
-					else {
-						toast('Change undone', 'success');
-						loadJournal();
-						if (State.currentTable) loadTableData();
-					}
-				} catch (_e) {
-					toast('Undo failed', 'error');
-				}
-			};
-		});
-
-		list.querySelectorAll('.journal-entry').forEach((entry) => {
-			const opEl = entry.querySelector('.op.delete');
-			if (opEl) {
-				const details = entry.querySelector('.details');
+			// Style delete entries without column details
+			if (opClass === 'delete') {
+				const details = div.querySelector('.details');
 				if (details && !details.querySelector('.col')) {
 					const valEl = details.querySelector('.val');
 					if (valEl) {
@@ -557,10 +487,26 @@ async function loadJournal() {
 					}
 				}
 			}
+
+			list.appendChild(div);
 		});
 	} catch (_e) {
 		toast('Failed to load journal', 'error');
 	}
 }
+
+delegate($('journal-list'), '.undo-btn', 'click', async function () {
+	try {
+		const data = await postJson('/api/journal/undo', { id: parseInt(this.dataset.id, 10) });
+		if (data.error) toast(data.error, 'error');
+		else {
+			toast('Change undone', 'success');
+			loadJournal();
+			if (State.currentTable) loadTableData();
+		}
+	} catch (_e) {
+		toast('Undo failed', 'error');
+	}
+});
 
 $('btn-journal-refresh').onclick = loadJournal;

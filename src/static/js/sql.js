@@ -3,6 +3,7 @@
 
 const sqlEditor = $('sql-editor');
 const sqlHighlight = $('sql-highlight');
+const sqlLineNums = $('sql-line-numbers');
 
 const acDropdown = $('sql-autocomplete');
 let acItems = [];
@@ -243,7 +244,20 @@ function syncHighlight() {
 sqlEditor.addEventListener('scroll', () => {
 	sqlHighlight.scrollTop = sqlEditor.scrollTop;
 	sqlHighlight.scrollLeft = sqlEditor.scrollLeft;
+	if (sqlLineNums) sqlLineNums.scrollTop = sqlEditor.scrollTop;
 });
+
+function updateLineNumbers() {
+	if (!sqlLineNums) return;
+	const lines = (sqlEditor.value || '').split('\n');
+	const count = Math.max(lines.length, 1);
+	while (sqlLineNums.firstChild) sqlLineNums.removeChild(sqlLineNums.firstChild);
+	for (let i = 1; i <= count; i++) {
+		const span = document.createElement('span');
+		span.textContent = i;
+		sqlLineNums.appendChild(span);
+	}
+}
 
 function getACWordAt(text, pos) {
 	let start = pos;
@@ -258,7 +272,7 @@ function buildACList(prefix) {
 	const seen = new Set();
 
 	if (State.schemaData?.tables) {
-		schemaData.tables.forEach((t) => {
+		State.schemaData.tables.forEach((t) => {
 			if (t.name.toLowerCase().startsWith(p) && !seen.has(t.name)) {
 				results.push({ text: t.name, type: 'tbl' });
 				seen.add(t.name);
@@ -342,30 +356,23 @@ function showAC() {
 }
 
 function renderAC() {
-	acDropdown.innerHTML = acItems
-		.map(
-			(item, i) =>
-				'<div class="sql-ac-item' +
-				(i === acIndex ? ' selected' : '') +
-				'" data-idx="' +
-				i +
-				'">' +
-				'<span class="ac-type ' +
-				item.type +
-				'">' +
-				item.type +
-				'</span>' +
-				escHtml(item.text) +
-				'</div>'
-		)
-		.join('');
-
-	acDropdown.querySelectorAll('.sql-ac-item').forEach((el) => {
-		el.addEventListener('mousedown', (e) => {
+	while (acDropdown.firstChild) acDropdown.removeChild(acDropdown.firstChild);
+	acItems.forEach((item, i) => {
+		const div = h(
+			'div',
+			{
+				cls: 'sql-ac-item' + (i === acIndex ? ' selected' : ''),
+				'data-idx': String(i),
+			},
+			h('span', { cls: 'ac-type ' + item.type, text: item.type }),
+			document.createTextNode(item.text)
+		);
+		div.addEventListener('mousedown', (e) => {
 			e.preventDefault();
-			acIndex = parseInt(el.dataset.idx, 10);
+			acIndex = i;
 			acceptAC();
 		});
+		acDropdown.appendChild(div);
 	});
 }
 
@@ -392,6 +399,7 @@ function hideAC() {
 
 sqlEditor.addEventListener('input', () => {
 	syncHighlight();
+	updateLineNumbers();
 	clearTimeout(acTimer);
 	acTimer = setTimeout(showAC, 80);
 });
@@ -460,11 +468,7 @@ async function runSQL() {
 	if (danger) {
 		let previewMsg = `${danger} without WHERE -- this affects the entire table.`;
 		try {
-			const pd = await fetchJson('/api/sql/preview', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ sql }),
-			});
+			const pd = await postJson('/api/sql/preview', { sql });
 			if (pd.row_count != null)
 				previewMsg += `\n\nRows affected: ${pd.row_count}`;
 			if (pd.columns && pd.rows && pd.rows.length > 0) {
@@ -486,7 +490,7 @@ async function runSQL() {
 	const t0 = performance.now();
 	showLoading('sql-results');
 	try {
-		const data = await fetchJson('/api/sql', {
+		const data = await fetchJsonAbortable('/api/sql', {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ sql, force: danger ? 'true' : undefined }),
@@ -502,11 +506,7 @@ async function runSQL() {
 			if (!ok) return;
 			showLoading('sql-results');
 			const t1 = performance.now();
-			const data2 = await fetchJson('/api/sql', {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ sql, force: 'true' }),
-			});
+			const data2 = await postJson('/api/sql', { sql, force: 'true' });
 			hideLoading('sql-results');
 			renderSQLResult(data2, Math.round(performance.now() - t1));
 			return;
@@ -520,14 +520,52 @@ async function runSQL() {
 	}
 }
 
+function showResultsHeader(rowCount, execTime) {
+	const header = $('sql-results-header');
+	if (!header) return;
+	header.style.display = '';
+	const rowEl = $('result-row-count');
+	if (rowEl) rowEl.textContent = rowCount + ' rows';
+	const timeEl = $('result-exec-time');
+	if (timeEl && execTime != null) timeEl.textContent = execTime + 'ms execution';
+	const statusTime = $('status-exec-time');
+	if (statusTime && execTime != null) statusTime.textContent = execTime + 'ms execution';
+}
+
+function hideResultsHeader() {
+	const header = $('sql-results-header');
+	if (header) header.style.display = 'none';
+	const statusTime = $('status-exec-time');
+	if (statusTime) statusTime.textContent = '';
+}
+
+async function fetchPgVersion() {
+	if (State.pgVersion) return;
+	try {
+		const data = await postJson('/api/sql', { sql: 'SHOW server_version' });
+		if (data.rows && data.rows.length > 0 && data.rows[0].length > 0) {
+			State.pgVersion = data.rows[0][0];
+			const chip = $('sql-pg-version');
+			if (chip) {
+				chip.textContent = 'PostgreSQL ' + State.pgVersion;
+				chip.style.display = '';
+			}
+		}
+	} catch (_e) {
+		/* version fetch is non-critical */
+	}
+}
+
 function renderSQLResult(data, elapsed) {
 	const timeStr = elapsed != null ? ` in ${elapsed}ms` : '';
 	if (data.error) {
+		hideResultsHeader();
 		$('sql-results').innerHTML =
 			`<div class="sql-error">${escHtml(data.error)}</div>`;
 		return;
 	}
 	if (!data.columns || data.columns.length === 0) {
+		hideResultsHeader();
 		$('sql-results').innerHTML =
 			'<div class="sql-message">' +
 			(data.row_count != null
@@ -535,33 +573,33 @@ function renderSQLResult(data, elapsed) {
 				: 'OK') +
 			timeStr +
 			'</div>';
+		if (elapsed != null) {
+			const statusTime = $('status-exec-time');
+			if (statusTime) statusTime.textContent = elapsed + 'ms execution';
+		}
 		if (State.currentTable) loadTableData();
+		fetchPgVersion();
 		return;
 	}
 
-	let html =
-		'<div class="sql-results-info">' +
-		escHtml(String(data.row_count || 0)) +
-		' rows' +
-		timeStr +
-		'</div>';
-	html +=
-		'<div class="grid-wrap" style="max-height:100%"><table class="grid"><thead><tr>';
-	data.columns.forEach((c) => {
-		html += `<th>${escHtml(c)}</th>`;
-	});
-	html += '</tr></thead><tbody>';
-	(data.rows || []).forEach((row) => {
-		html += '<tr>';
-		row.forEach((val) => {
-			if (val === null || val === 'NULL')
-				html += '<td class="null-val">NULL</td>';
-			else html += `<td>${escHtml(val)}</td>`;
-		});
-		html += '</tr>';
-	});
-	html += '</tbody></table></div>';
-	$('sql-results').innerHTML = html;
+	const resultsContainer = $('sql-results');
+	while (resultsContainer.firstChild) resultsContainer.removeChild(resultsContainer.firstChild);
+
+	const infoDiv = h('div', { cls: 'sql-results-info', text: String(data.row_count || 0) + ' rows' + timeStr });
+
+	const headerRow = h('tr', null, ...data.columns.map((c) => h('th', { text: c })));
+	const tbody = h('tbody', null, ...(data.rows || []).map((row) =>
+		h('tr', null, ...row.map((val) =>
+			val === null || val === 'NULL'
+				? h('td', { cls: 'null-val', text: 'NULL' })
+				: h('td', { text: String(val) })
+		))
+	));
+	const table = h('table', { cls: 'grid' }, h('thead', null, headerRow), tbody);
+	const gridWrap = h('div', { cls: 'grid-wrap', style: 'max-height:100%' }, table);
+
+	resultsContainer.appendChild(infoDiv);
+	resultsContainer.appendChild(gridWrap);
 
 	if (
 		data.columns &&
@@ -569,174 +607,18 @@ function renderSQLResult(data, elapsed) {
 		data.rows &&
 		data.rows.length > 0
 	) {
-		const resultsInfo = $('sql-results').querySelector('.sql-results-info');
-		if (resultsInfo) {
-			const csvBtn = document.createElement('button');
-			csvBtn.className = 'btn-export-inline';
-			csvBtn.textContent = 'Export CSV';
-			csvBtn.addEventListener('click', () => {
-				exportSqlResults('csv');
-			});
-			const jsonBtn = document.createElement('button');
-			jsonBtn.className = 'btn-export-inline';
-			jsonBtn.textContent = 'Export JSON';
-			jsonBtn.addEventListener('click', () => {
-				exportSqlResults('json');
-			});
-			resultsInfo.appendChild(csvBtn);
-			resultsInfo.appendChild(jsonBtn);
-		}
+		infoDiv.appendChild(
+			h('button', { cls: 'btn-export-inline', text: 'Export CSV', onclick: () => exportSqlResults('csv') })
+		);
+		infoDiv.appendChild(
+			h('button', { cls: 'btn-export-inline', text: 'Export JSON', onclick: () => exportSqlResults('json') })
+		);
 	}
 	State.lastSqlQuery = sqlEditor.value.trim();
-}
 
-function formatSQL(sql) {
-	const majorClauses = [
-		'SELECT',
-		'FROM',
-		'WHERE',
-		'AND',
-		'OR',
-		'JOIN',
-		'LEFT JOIN',
-		'RIGHT JOIN',
-		'INNER JOIN',
-		'OUTER JOIN',
-		'FULL JOIN',
-		'CROSS JOIN',
-		'ON',
-		'GROUP BY',
-		'ORDER BY',
-		'HAVING',
-		'LIMIT',
-		'OFFSET',
-		'UNION',
-		'UNION ALL',
-		'INSERT INTO',
-		'VALUES',
-		'UPDATE',
-		'SET',
-		'DELETE FROM',
-		'CREATE TABLE',
-		'ALTER TABLE',
-		'DROP TABLE',
-		'WITH',
-		'RETURNING',
-		'CASE',
-		'WHEN',
-		'THEN',
-		'ELSE',
-		'END',
-	];
-
-	let i = 0;
-	const tokens = [];
-	while (i < sql.length) {
-		if (sql[i] === "'") {
-			let j = i + 1;
-			while (j < sql.length) {
-				if (sql[j] === "'" && sql[j + 1] === "'") j += 2;
-				else if (sql[j] === "'") {
-					j++;
-					break;
-				} else j++;
-			}
-			tokens.push({ type: 'string', text: sql.slice(i, j) });
-			i = j;
-		} else if (sql[i] === '-' && sql[i + 1] === '-') {
-			const end = sql.indexOf('\n', i);
-			tokens.push({
-				type: 'comment',
-				text: end === -1 ? sql.slice(i) : sql.slice(i, end),
-			});
-			i = end === -1 ? sql.length : end;
-		} else if (/\s/.test(sql[i])) {
-			let j = i;
-			while (j < sql.length && /\s/.test(sql[j])) j++;
-			tokens.push({ type: 'ws', text: ' ' });
-			i = j;
-		} else if (/[a-zA-Z_]/.test(sql[i])) {
-			let j = i;
-			while (j < sql.length && /[a-zA-Z0-9_]/.test(sql[j])) j++;
-			tokens.push({ type: 'word', text: sql.slice(i, j) });
-			i = j;
-		} else {
-			tokens.push({ type: 'sym', text: sql[i] });
-			i++;
-		}
-	}
-
-	let formatted = '';
-	for (let ti = 0; ti < tokens.length; ti++) {
-		const t = tokens[ti];
-		if (t.type === 'word') {
-			const upper = t.text.toUpperCase();
-			let twoWord = '';
-			if (
-				ti + 2 < tokens.length &&
-				tokens[ti + 1].type === 'ws' &&
-				tokens[ti + 2].type === 'word'
-			) {
-				twoWord = `${upper} ${tokens[ti + 2].text.toUpperCase()}`;
-			}
-			if (majorClauses.includes(twoWord)) {
-				if (
-					[
-						'SELECT',
-						'INSERT INTO',
-						'UPDATE',
-						'DELETE FROM',
-						'CREATE TABLE',
-						'WITH',
-					].includes(twoWord)
-				) {
-					if (formatted.trim()) formatted += '\n';
-				} else {
-					formatted += '\n';
-				}
-				formatted += twoWord;
-				ti += 2; // skip ws + second word
-				continue;
-			}
-			if (majorClauses.includes(upper)) {
-				const isSubClause = [
-					'AND',
-					'OR',
-					'ON',
-					'WHEN',
-					'THEN',
-					'ELSE',
-				].includes(upper);
-				if (
-					['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'CREATE', 'WITH'].includes(
-						upper
-					)
-				) {
-					if (formatted.trim()) formatted += '\n';
-				} else {
-					formatted += `\n${'  '.repeat(isSubClause ? 1 : 0)}`;
-				}
-				if (SQL_KW.has(upper)) formatted += upper;
-				else formatted += t.text;
-			} else {
-				if (SQL_KW.has(upper) || SQL_FN.has(upper)) formatted += upper;
-				else formatted += t.text;
-			}
-		} else if (t.type === 'string' || t.type === 'comment') {
-			formatted += t.text;
-		} else if (t.type === 'ws') {
-			if (
-				formatted.length > 0 &&
-				!formatted.endsWith(' ') &&
-				!formatted.endsWith('\n')
-			) {
-				formatted += ' ';
-			}
-		} else {
-			formatted += t.text;
-		}
-	}
-	return formatted.trim();
+	const rowCount = data.rows ? data.rows.length : (data.row_count || 0);
+	showResultsHeader(rowCount, elapsed);
+	fetchPgVersion();
 }
 
 async function exportSqlResults(format) {
@@ -781,11 +663,7 @@ $('btn-explain').onclick = async () => {
 	if (!sql) return;
 	showLoading('sql-results');
 	try {
-		const data = await fetchJson('/api/sql', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ sql: `EXPLAIN ANALYZE ${sql}` }),
-		});
+		const data = await postJson('/api/sql', { sql: `EXPLAIN ANALYZE ${sql}` });
 		hideLoading('sql-results');
 		renderSQLResult(data);
 	} catch (e) {
@@ -799,11 +677,7 @@ $('btn-preview-sql').onclick = async () => {
 	if (!sql) return;
 	showLoading('sql-results');
 	try {
-		const data = await fetchJson('/api/sql/preview', {
-			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
-			body: JSON.stringify({ sql }),
-		});
+		const data = await postJson('/api/sql/preview', { sql });
 		hideLoading('sql-results');
 		renderSQLResult(data);
 		if (data.preview) toast('Preview only -- not committed', 'info');
@@ -821,61 +695,64 @@ $('btn-format-sql').onclick = () => {
 	toast('SQL formatted', 'success');
 };
 
+let historyEntries = [];
+
 $('btn-sql-history').onclick = async () => {
-	$('history-overlay').classList.add('open');
-	trapFocus($('history-overlay'));
+	openModal('history-overlay');
 	try {
 		const data = await fetchJson('/api/history');
-		const entries = data.entries || [];
+		historyEntries = data.entries || [];
 		const list = $('history-list');
-		if (entries.length === 0) {
-			list.innerHTML =
-				'<div style="padding:32px;text-align:center;color:var(--text-muted)">No queries yet</div>';
+		while (list.firstChild) list.removeChild(list.firstChild);
+		if (historyEntries.length === 0) {
+			list.appendChild(
+				h('div', { style: 'padding:32px;text-align:center;color:var(--text-muted)', text: 'No queries yet' })
+			);
 			return;
 		}
-		let html = '';
-		entries.forEach((entry) => {
+		historyEntries.forEach((entry, i) => {
 			const time = new Date(entry.timestamp * 1000);
-			const timeStr = time.toLocaleTimeString();
-			html += `<div class="history-entry${entry.is_error ? ' error' : ''}">`;
-			html +=
-				'<div class="sql-preview">' +
-				escHtml(entry.sql.substring(0, 200)) +
-				'</div>';
-			html += '<div class="history-meta">';
-			html += `<span>${timeStr}</span>`;
-			html += `<span class="dur">${entry.duration_ms}ms</span>`;
+			const metaChildren = [
+				h('span', { text: time.toLocaleTimeString() }),
+				h('span', { cls: 'dur', text: entry.duration_ms + 'ms' }),
+			];
 			if (entry.row_count != null)
-				html += `<span>${escHtml(String(entry.row_count))} rows</span>`;
+				metaChildren.push(h('span', { text: String(entry.row_count) + ' rows' }));
 			if (entry.error)
-				html +=
-					'<span style="color:var(--error)">' +
-					escHtml(entry.error.substring(0, 80)) +
-					'</span>';
-			html += '</div></div>';
-		});
-		list.innerHTML = html;
-		list.querySelectorAll('.history-entry').forEach((el, i) => {
-			el.addEventListener('click', () => {
-				sqlEditor.value = entries[i].sql;
-				syncHighlight();
-				releaseFocus($('history-overlay'));
-				closeModal('history-overlay');
-				$$('.tab').forEach((t) => t.classList.remove('active'));
-				$$('.tab-panel').forEach((p) => p.classList.remove('active'));
-				document.querySelector('[data-tab="sql"]').classList.add('active');
-				$('panel-sql').classList.add('active');
-				sqlEditor.focus();
-			});
+				metaChildren.push(h('span', { style: 'color:var(--error)', text: entry.error.substring(0, 80) }));
+			const div = h(
+				'div',
+				{ cls: 'history-entry' + (entry.is_error ? ' error' : ''), 'data-history-idx': String(i) },
+				h('div', { cls: 'sql-preview', text: entry.sql.substring(0, 200) }),
+				h('div', { cls: 'history-meta' }, ...metaChildren)
+			);
+			list.appendChild(div);
 		});
 	} catch (_e) {
-		$('history-list').innerHTML =
-			'<div style="padding:16px;color:var(--error)">Failed to load history</div>';
+		const list = $('history-list');
+		while (list.firstChild) list.removeChild(list.firstChild);
+		list.appendChild(
+			h('div', { style: 'padding:16px;color:var(--error)', text: 'Failed to load history' })
+		);
 	}
 };
-$('history-overlay').onclick = (e) => {
-	if (e.target === $('history-overlay')) {
+
+delegate($('history-list'), '.history-entry', 'click', function () {
+	const idx = parseInt(this.dataset.historyIdx, 10);
+	if (idx >= 0 && idx < historyEntries.length) {
+		sqlEditor.value = historyEntries[idx].sql;
+		syncHighlight();
 		releaseFocus($('history-overlay'));
 		closeModal('history-overlay');
+		$$('.tab').forEach((t) => t.classList.remove('active'));
+		$$('.tab-panel').forEach((p) => p.classList.remove('active'));
+		document.querySelector('[data-tab="sql"]').classList.add('active');
+		$('panel-sql').classList.add('active');
+		sqlEditor.focus();
 	}
+});
+$('history-overlay').onclick = (e) => {
+	if (e.target === $('history-overlay')) closeModal('history-overlay');
 };
+
+updateLineNumbers();

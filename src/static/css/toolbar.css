@@ -64,19 +64,25 @@
 }
 
 .toolbar-btn.primary {
-	background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+	background: linear-gradient(to right, var(--accent), var(--primary-container, var(--accent-hover)));
 	color: var(--accent-text);
 	border-color: transparent;
 	font-weight: 700;
 	letter-spacing: -0.01em;
-	box-shadow: 0 2px 0 0 rgba(157, 67, 0, 0.15);
+	box-shadow: 0 4px 0 0 var(--shadow-accent);
+	border-radius: var(--radius-sm);
 }
 
 .toolbar-btn.primary:hover {
-	background: linear-gradient(135deg, var(--accent-hover), var(--accent));
+	background: linear-gradient(to right, var(--accent-hover), var(--primary-container, var(--accent)));
 	border-color: transparent;
 	transform: translateY(-1px);
-	box-shadow: 0 3px 8px rgba(157, 67, 0, 0.2);
+	box-shadow: 0 5px 0 0 var(--shadow-accent-md);
+}
+
+.toolbar-btn.primary:active {
+	transform: translateY(1px);
+	box-shadow: 0 1px 0 0 var(--shadow-accent);
 }
 
 .toolbar-btn svg {
@@ -89,4 +95,88 @@
 	height: 16px;
 	background: var(--border);
 	margin: 0 2px;
+}
+
+/* Action Bar — Kinetic Architect split layout (tools left, primary action right) */
+
+.action-bar {
+	height: 56px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0 24px;
+	background: var(--bg-elevated);
+	border-bottom: 1px solid var(--border-warm-10);
+	flex-shrink: 0;
+}
+
+.action-bar .action-group {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.action-bar .action-sep {
+	width: 1px;
+	height: 16px;
+	background: var(--border-warm-30);
+	margin: 0 8px;
+}
+
+.action-bar .action-btn {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 12px;
+	background: var(--bg-surface);
+	border: none;
+	border-radius: var(--radius-sm);
+	color: var(--text-secondary);
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	font-family: var(--font-ui);
+	transition: all var(--transition);
+}
+
+.action-bar .action-btn:hover {
+	background: var(--bg-hover);
+	color: var(--text-primary);
+}
+
+.action-bar .action-btn svg {
+	width: 14px;
+	height: 14px;
+}
+
+.action-bar .action-btn-primary {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 6px 16px;
+	background: linear-gradient(to right, var(--accent), var(--primary-container, var(--accent-hover)));
+	color: var(--accent-text);
+	border: none;
+	border-radius: var(--radius-sm);
+	font-size: 12px;
+	font-weight: 700;
+	cursor: pointer;
+	font-family: var(--font-ui);
+	box-shadow: 0 4px 0 0 var(--shadow-accent);
+	transition: all var(--transition);
+}
+
+.action-bar .action-btn-primary:hover {
+	transform: translateY(-1px);
+	box-shadow: 0 5px 0 0 var(--shadow-accent-md);
+}
+
+.action-bar .action-btn-primary:active {
+	transform: translateY(1px);
+	box-shadow: 0 1px 0 0 var(--shadow-accent);
+}
+
+.action-bar .action-btn-primary svg {
+	width: 14px;
+	height: 14px;
 }

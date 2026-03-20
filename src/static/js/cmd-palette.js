@@ -4,7 +4,7 @@ let cmdIndex = 0;
 let cmdItems = [];
 
 function openCmdPalette() {
-	$('cmd-overlay').classList.add('open');
+	openModal('cmd-overlay');
 	$('cmd-input').value = '';
 	$('cmd-input').focus();
 	buildCmdResults('');
@@ -99,7 +99,7 @@ function buildCmdResults(query) {
 			label: 'Keyboard Shortcuts',
 			hint: '?',
 			action: () => {
-				$('shortcuts-overlay').classList.add('open');
+				openModal('shortcuts-overlay');
 				closeCmdPalette();
 			},
 		},
@@ -107,7 +107,7 @@ function buildCmdResults(query) {
 			label: 'ER Diagram',
 			hint: '',
 			action: () => {
-				switchToTab('er');
+				switchTab('er');
 				closeCmdPalette();
 			},
 		},
@@ -115,7 +115,7 @@ function buildCmdResults(query) {
 			label: 'Change Journal',
 			hint: '',
 			action: () => {
-				switchToTab('journal');
+				switchTab('journal');
 				closeCmdPalette();
 			},
 		},
@@ -137,7 +137,7 @@ function buildCmdResults(query) {
 }
 
 function selectTableFromCmd(name) {
-	switchToTab('tables');
+	switchTab('tables');
 	const tree = $('schema-tree');
 	tree.querySelectorAll('.tree-table').forEach((el) => {
 		el.classList.remove('active');
@@ -146,68 +146,55 @@ function selectTableFromCmd(name) {
 	selectTable(name);
 }
 
-function switchToTab(tabName) {
-	$$('.tab').forEach((t) => t.classList.remove('active'));
-	$$('.tab-panel').forEach((p) => p.classList.remove('active'));
-	const tab = document.querySelector(`[data-tab="${tabName}"]`);
-	if (tab) tab.classList.add('active');
-	$(`panel-${tabName}`).classList.add('active');
-	if (tabName === 'journal') {
-		loadJournal();
-		clearJournalBadge();
-	}
-	if (tabName === 'er') drawER();
+function switchToSqlTab() {
+	switchTab('sql');
+	sqlEditor.focus();
 }
 
-function switchToSqlTab() {
-	switchToTab('sql');
-	sqlEditor.focus();
+function makeSvgIcon(svgString) {
+	const wrap = h('div');
+	wrap.innerHTML = svgString;
+	return wrap.firstElementChild;
 }
 
 function renderCmdResults() {
 	const container = $('cmd-results');
 	if (cmdItems.length === 0) {
-		container.innerHTML = '<div class="cmd-empty">No results found</div>';
+		container.textContent = '';
+		container.appendChild(h('div', { cls: 'cmd-empty', text: 'No results found' }));
 		return;
 	}
-	container.innerHTML = cmdItems
-		.slice(0, 20)
-		.map(
-			(item, i) =>
-				'<div class="cmd-item' +
-				(i === cmdIndex ? ' selected' : '') +
-				'" data-idx="' +
-				i +
-				'">' +
-				'<div class="cmd-icon">' +
-				item.icon +
-				'</div>' +
-				'<span class="cmd-label">' +
-				escHtml(item.label) +
-				'</span>' +
-				'<span class="cmd-hint">' +
-				escHtml(item.hint) +
-				'</span>' +
-				'</div>'
-		)
-		.join('');
-
-	container.querySelectorAll('.cmd-item').forEach((el) => {
-		el.addEventListener('click', () => {
-			const idx = parseInt(el.dataset.idx, 10);
-			if (cmdItems[idx]) cmdItems[idx].action();
-		});
-		el.addEventListener('mousemove', () => {
-			cmdIndex = parseInt(el.dataset.idx, 10);
-			container.querySelectorAll('.cmd-item').forEach((item, i) => {
-				item.classList.toggle('selected', i === cmdIndex);
-			});
-		});
+	container.textContent = '';
+	cmdItems.slice(0, 20).forEach((item, i) => {
+		const iconDiv = h('div', { cls: 'cmd-icon' }, makeSvgIcon(item.icon));
+		container.appendChild(
+			h('div', {
+				cls: 'cmd-item' + (i === cmdIndex ? ' selected' : ''),
+				'data-idx': String(i),
+			},
+				iconDiv,
+				h('span', { cls: 'cmd-label', text: item.label }),
+				h('span', { cls: 'cmd-hint', text: item.hint })
+			)
+		);
 	});
 
 	const selected = container.querySelector('.cmd-item.selected');
 	if (selected) selected.scrollIntoView({ block: 'nearest' });
 }
+
+delegate($('cmd-results'), '.cmd-item', 'click', function () {
+	const idx = parseInt(this.dataset.idx, 10);
+	if (cmdItems[idx]) cmdItems[idx].action();
+});
+delegate($('cmd-results'), '.cmd-item', 'mousemove', function () {
+	const newIdx = parseInt(this.dataset.idx, 10);
+	if (newIdx === cmdIndex) return;
+	cmdIndex = newIdx;
+	$('cmd-results').querySelectorAll('.cmd-item').forEach((item, i) => {
+		item.classList.toggle('selected', i === cmdIndex);
+	});
+});
 
 $('cmd-input').addEventListener('input', () =>
 	buildCmdResults($('cmd-input').value)

@@ -3,7 +3,7 @@
 	overflow: auto;
 	position: relative;
 	background: var(--bg-base);
-	padding: 12px;
+	padding: 24px;
 }
 
 .grid-wrap .grid {
@@ -11,7 +11,7 @@
 	border-radius: 12px;
 	overflow: hidden;
 	box-shadow: var(--shadow-lg);
-	border: 1px solid var(--border-subtle);
+	border: 1px solid var(--border-warm-05);
 }
 
 .grid {
@@ -24,15 +24,15 @@
 
 .grid thead th {
 	height: 36px;
-	padding: 0 14px;
+	padding: 0 16px;
 	font-family: var(--font-ui);
 	font-size: 10px;
 	font-weight: 600;
 	text-transform: uppercase;
 	letter-spacing: 0.1em;
-	color: var(--text-muted);
+	color: var(--on-surface-variant, var(--text-muted));
 	background: var(--bg-surface);
-	border-bottom: 1px solid var(--border);
+	border-bottom: 1px solid var(--border-warm-10);
 	text-align: left;
 	white-space: nowrap;
 	position: sticky;
@@ -50,10 +50,37 @@
 	color: var(--text-secondary);
 }
 
+.grid thead th .constraint-badge {
+	margin-left: 4px;
+	vertical-align: middle;
+	font-size: 8px;
+	padding: 0 4px;
+	line-height: 14px;
+}
+
+.grid thead th .col-type-chip {
+	margin-left: 4px;
+	vertical-align: middle;
+	font-size: 9px;
+	padding: 0 5px;
+	line-height: 14px;
+	font-weight: 600;
+	text-transform: uppercase;
+}
+
 .grid thead th .sort-arrow {
 	font-size: 9px;
 	margin-left: 3px;
+	opacity: 0;
+}
+
+.grid thead th:hover .sort-arrow {
 	opacity: 0.3;
+}
+
+.grid thead th .sort-arrow.active {
+	opacity: 1;
+	color: var(--accent);
 }
 
 .grid thead th.sorted .sort-arrow {
@@ -75,7 +102,7 @@
 }
 
 .grid tbody tr {
-	border-bottom: 1px solid var(--border-subtle);
+	border-bottom: 1px solid var(--border-warm-05);
 	transition: background 0.1s ease-out;
 	position: relative;
 }
@@ -86,6 +113,7 @@
 
 .grid tbody tr:hover {
 	background: var(--bg-hover);
+	transition: background-color 0.15s ease;
 }
 
 .grid tbody tr:hover td.row-num {
@@ -95,8 +123,8 @@
 }
 
 .grid tbody td {
-	padding: 0 14px;
-	height: 34px;
+	padding: 0 16px;
+	height: 44px;
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -104,8 +132,8 @@
 	vertical-align: middle;
 	color: var(--text-primary);
 	cursor: default;
-	line-height: 34px;
-	transition: background 0.08s, box-shadow 0.1s ease-out;
+	line-height: 44px;
+	transition: background 0.15s ease, box-shadow 0.1s ease-out;
 }
 
 .grid tbody td.editable {
@@ -182,7 +210,7 @@
 }
 
 .grid tbody td.type-uuid {
-	color: var(--text-secondary);
+	color: var(--tertiary);
 	font-size: 11px;
 	letter-spacing: -0.02em;
 }
@@ -261,6 +289,8 @@
 	user-select: none;
 	font-variant-numeric: tabular-nums;
 	transition: all 0.08s;
+	line-height: normal;
+	vertical-align: middle;
 }
 
 .grid tbody td.row-actions {
@@ -268,7 +298,8 @@
 	text-align: center;
 }
 
-.grid .del-btn {
+.grid .del-btn,
+.grid .more-btn {
 	display: none;
 	width: 22px;
 	height: 22px;
@@ -277,11 +308,12 @@
 	color: var(--text-muted);
 	cursor: pointer;
 	border-radius: 3px;
-	font-size: 13px;
+	font-size: 16px;
 	line-height: 1;
 }
 
-.grid tbody tr:hover .del-btn {
+.grid tbody tr:hover .del-btn,
+.grid tbody tr:hover .more-btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -290,6 +322,11 @@
 .grid .del-btn:hover {
 	background: var(--error-muted);
 	color: var(--error);
+}
+
+.grid .more-btn:hover {
+	background: var(--bg-hover);
+	color: var(--text-primary);
 }
 
 .grid thead tr.filter-row th {
@@ -546,4 +583,82 @@
 .grid-empty svg {
 	margin-bottom: 14px;
 	opacity: 0.18;
+}
+
+.col-type-chip {
+	display: inline-block;
+	padding: 1px 8px;
+	border-radius: var(--radius-sm);
+	font-family: var(--font-mono);
+	font-size: 11px;
+	font-weight: 700;
+	background: var(--chip-type-bg, var(--tertiary-fixed));
+	color: var(--chip-type-text, var(--on-tertiary-fixed-variant));
+	white-space: nowrap;
+	line-height: 18px;
+	vertical-align: middle;
+}
+
+.constraint-badge {
+	display: inline-block;
+	padding: 1px 6px;
+	border-radius: 2px;
+	font-size: 9px;
+	font-weight: 900;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	font-family: var(--font-ui);
+	line-height: 16px;
+	vertical-align: middle;
+	white-space: nowrap;
+}
+
+.constraint-badge.pk {
+	background: var(--badge-pk-bg, rgba(249, 115, 22, 0.1));
+	color: var(--badge-pk-text, #9a3412);
+}
+
+.constraint-badge.fk {
+	background: var(--badge-fk-bg, rgba(0, 99, 152, 0.1));
+	color: var(--badge-fk-text, #1d4ed8);
+}
+
+.constraint-badge.indexed {
+	background: var(--badge-indexed-bg, rgba(0, 0, 0, 0.04));
+	color: var(--badge-indexed-text, #64748b);
+}
+
+.constraint-badge.notnull {
+	background: var(--badge-notnull-bg, rgba(0, 0, 0, 0.04));
+	color: var(--badge-notnull-text, #64748b);
+}
+
+.constraint-badge.check-constraint {
+	background: var(--badge-check-bg, rgba(21, 128, 61, 0.06));
+	color: var(--badge-check-text, #15803d);
+}
+
+.constraint-badge.default-val {
+	background: var(--badge-default-bg, rgba(0, 0, 0, 0.04));
+	color: var(--badge-default-text, #64748b);
+}
+
+.grid tbody td.row-actions .more-btn {
+	opacity: 0;
+	padding: 4px;
+	background: transparent;
+	border: none;
+	border-radius: var(--radius-sm);
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: opacity 0.15s, background 0.15s;
+}
+
+.grid tbody tr:hover td.row-actions .more-btn {
+	opacity: 1;
+}
+
+.grid tbody td.row-actions .more-btn:hover {
+	background: var(--bg-hover);
+	color: var(--text-primary);
 }
