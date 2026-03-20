@@ -69,24 +69,57 @@ pub fn escapeStringValue(allocator: std.mem.Allocator, value: []const u8) String
     return buf;
 }
 
-pub fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
-    const hex_digits = "0123456789abcdef";
-    for (s) |ch| {
-        switch (ch) {
-            '"' => try writer.writeAll("\\\""),
-            '\\' => try writer.writeAll("\\\\"),
-            '\n' => try writer.writeAll("\\n"),
-            '\r' => try writer.writeAll("\\r"),
-            '\t' => try writer.writeAll("\\t"),
-            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => {
-                try writer.writeAll("\\u00");
-                try writer.writeByte(hex_digits[ch >> 4]);
-                try writer.writeByte(hex_digits[ch & 0x0f]);
-            },
-            else => try writer.writeByte(ch),
-        }
+/// Write a SQL value to a JSON streaming writer. The "NULL" sentinel becomes JSON null.
+pub fn writeSqlValue(jw: *std.json.Stringify, val: []const u8) std.json.Stringify.Error!void {
+    if (std.mem.eql(u8, val, "NULL")) {
+        try jw.write(null);
+    } else {
+        try jw.write(val);
     }
 }
+
+/// Write "columns" and "rows" fields from a query result into an already-open JSON object.
+pub fn writeColumnsAndRows(jw: *std.json.Stringify, col_names: []const []const u8, rows: []const []const []const u8) std.json.Stringify.Error!void {
+    try jw.objectField("columns");
+    try jw.write(col_names);
+    try jw.objectField("rows");
+    try jw.beginArray();
+    for (rows) |row| {
+        try jw.beginArray();
+        for (row) |val| {
+            try writeSqlValue(jw, val);
+        }
+        try jw.endArray();
+    }
+    try jw.endArray();
+}
+
+/// Allocating JSON writer backed by std.io.Writer.Allocating.
+/// Call init() then access jw/aw via pointer to avoid dangling
+/// self-referential pointers from value-copy.
+pub const JsonWriter = struct {
+    aw: std.io.Writer.Allocating,
+    jw: std.json.Stringify,
+
+    pub fn init(allocator: std.mem.Allocator) JsonWriter {
+        return .{
+            .aw = .init(allocator),
+            .jw = undefined,
+        };
+    }
+
+    /// Wire the JSON serializer to the allocating writer.
+    /// Must be called after the struct is at its final stack address
+    /// (i.e. after `var jw = JsonWriter.init(...);`).
+    pub fn writer(self: *JsonWriter) *std.json.Stringify {
+        self.jw = .{ .writer = &self.aw.writer };
+        return &self.jw;
+    }
+
+    pub fn toOwnedSlice(self: *JsonWriter) error{OutOfMemory}![]u8 {
+        return self.aw.toOwnedSlice();
+    }
+};
 
 pub fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const val = obj.get(key) orelse return null;
@@ -99,10 +132,7 @@ pub fn getJsonString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 pub fn matchesIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (haystack.len < needle.len) return false;
     for (needle, 0..) |c, idx| {
-        const h = haystack[idx];
-        const lower_h = if (h >= 'A' and h <= 'Z') h + 32 else h;
-        const lower_c = if (c >= 'A' and c <= 'Z') c + 32 else c;
-        if (lower_h != lower_c) return false;
+        if (std.ascii.toLower(haystack[idx]) != std.ascii.toLower(c)) return false;
     }
     return true;
 }
@@ -134,13 +164,6 @@ test "indexOfIgnoreCase: finds at any position" {
     try std.testing.expectEqual(@as(usize, 0), indexOfIgnoreCase("DROP TABLE t", "drop").?);
     try std.testing.expectEqual(@as(usize, 16), indexOfIgnoreCase("ALTER TABLE foo ADD COLUMN bar", "ADD").?);
     try std.testing.expect(indexOfIgnoreCase("SELECT * FROM t", "DROP") == null);
-}
-
-test "writeJsonEscaped: all escape types" {
-    var buf = std.ArrayList(u8){};
-    defer buf.deinit(std.testing.allocator);
-    try writeJsonEscaped(buf.writer(std.testing.allocator), "quote:\" slash:\\ nl:\n cr:\r tab:\t nul:\x00");
-    try std.testing.expectEqualStrings("quote:\\\" slash:\\\\ nl:\\n cr:\\r tab:\\t nul:\\u0000", buf.items);
 }
 
 test "escapeStringValue: doubles quotes and backslashes, rejects null" {

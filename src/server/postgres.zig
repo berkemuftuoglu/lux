@@ -119,11 +119,15 @@ pub const EnumRowData = struct {
     label: []const u8,
 };
 
+// Arbitrary -- enough for one query + background ops (health check, schema refresh)
+// from a single browser tab. No reason to go higher for a local-first tool.
+pub const pool_size = 5;
+
 /// Create a connection pool from a PostgreSQL URI string.
 pub fn initPool(allocator: std.mem.Allocator, uri_string: []const u8) PgError!*pg.Pool {
     const uri = std.Uri.parse(uri_string) catch return error.ConnectionFailed;
     const pool = pg.Pool.initUri(allocator, uri, .{
-        .size = 5,
+        .size = pool_size,
         .timeout = 10 * std.time.ms_per_s,
     }) catch |err| {
         if (err == error.PG) {
@@ -156,6 +160,40 @@ pub fn runQueryOnConn(conn: *pg.Conn, backing: std.mem.Allocator, sql: []const u
     };
     defer result.deinit();
     return extractResult(backing, result);
+}
+
+pub fn runQueryParams(pool: *pg.Pool, backing: std.mem.Allocator, sql: []const u8, params: anytype) PgError!QueryResult {
+    var conn = pool.acquire() catch return error.ConnectionFailed;
+    defer conn.release();
+    return runQueryOnConnParams(conn, backing, sql, params);
+}
+
+pub fn runQueryOnConnParams(conn: *pg.Conn, backing: std.mem.Allocator, sql: []const u8, params: anytype) PgError!QueryResult {
+    var result = conn.queryOpts(sql, params, .{ .column_names = true }) catch |err| {
+        if (err == error.PG) {
+            if (conn.err) |pge| {
+                log.warn("query failed: {s}", .{pge.message});
+            }
+        }
+        return error.QueryFailed;
+    };
+    defer result.deinit();
+    return extractResult(backing, result);
+}
+
+/// Execute a raw SQL statement without extracting results (for SET commands).
+pub fn runRawSql(pool: *pg.Pool, sql: []const u8) PgError!void {
+    var conn = pool.acquire() catch return error.ConnectionFailed;
+    defer conn.release();
+    var result = conn.queryOpts(sql, .{}, .{}) catch |err| {
+        if (err == error.PG) {
+            if (conn.err) |pge| {
+                log.warn("raw sql failed: {s}", .{pge.message});
+            }
+        }
+        return error.QueryFailed;
+    };
+    result.deinit();
 }
 
 /// Get the error message from a connection after a PG error.
@@ -198,7 +236,8 @@ fn extractResult(backing: std.mem.Allocator, result: *pg.Result) PgError!QueryRe
 
         const row_data = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
         for (0..n_cols) |col_idx| {
-            // pg.zig returns binary data; read as optional bytes and convert to text
+            // BUG: a column containing the literal text "NULL" becomes JSON null.
+            // Fixing requires changing rows to [][]?[]const u8 (~50 call sites).
             const maybe_val: ?[]const u8 = row.get(?[]const u8, col_idx) catch null;
             if (maybe_val) |val| {
                 row_data[col_idx] = alloc.dupe(u8, val) catch return error.OutOfMemory;

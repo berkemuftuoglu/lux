@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const httpz = @import("httpz");
+const pg = @import("pg");
 const postgres = @import("postgres");
 const utils = @import("utils");
 const web = @import("web");
@@ -16,16 +17,8 @@ const ConnectionFileError = error{
     ParseFailed,
 };
 
-fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
-
-fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
-    res.status = status;
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
+const sendJsonResponse = web.sendJsonResponse;
+const sendJsonError = web.sendJsonError;
 
 fn formatConnectionJson(allocator: std.mem.Allocator, id: u64, name: []const u8, conninfo: []const u8, color: []const u8) ConnectionFileError![]u8 {
     const entry = .{ .id = id, .name = name, .conninfo = conninfo, .color = color };
@@ -213,17 +206,22 @@ pub fn handleConnect(handler: *web.Handler, req: *httpz.Request, res: *httpz.Res
         state.enhanced_arena = es.arena;
     }
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(arena);
-    w.writeAll("{\"status\":\"connected\",\"schema\":\"") catch {
+    var jw = utils.JsonWriter.init(arena);
+    const s = jw.writer();
+    s.beginObject() catch {
         sendJsonResponse(res, "{\"status\":\"connected\"}");
         return;
     };
-    utils.writeJsonEscaped(w, schema_text) catch return;
+    s.objectField("status") catch return;
+    s.write("connected") catch return;
+    s.objectField("schema") catch return;
+    s.write(schema_text) catch return;
     var n_tables: usize = 0;
     if (state.schema_tables) |tables| n_tables = tables.len;
-    w.print("\",\"tables\":{d}}}", .{n_tables}) catch return;
-    sendJsonResponse(res, json_buf.items);
+    s.objectField("tables") catch return;
+    s.write(n_tables) catch return;
+    s.endObject() catch return;
+    sendJsonResponse(res, jw.toOwnedSlice() catch return);
 }
 
 pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -269,83 +267,78 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
         return;
     };
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(arena);
+    var jw = utils.JsonWriter.init(arena);
+    const s = jw.writer();
 
-    try w.writeAll("{\"tables\":[");
+    try s.beginObject();
+    try s.objectField("tables");
+    try s.beginArray();
 
     if (state.enhanced_schema) |etables| {
-        for (etables, 0..) |etable, ti| {
-            if (ti > 0) try w.writeByte(',');
-            try w.writeAll("{\"name\":\"");
-            try utils.writeJsonEscaped(w, etable.name);
-            try w.print("\",\"has_primary_key\":{s},\"primary_key_columns\":[", .{if (etable.has_primary_key) "true" else "false"});
-            for (etable.primary_key_columns, 0..) |pk_col, pi| {
-                if (pi > 0) try w.writeByte(',');
-                try w.writeByte('"');
-                try utils.writeJsonEscaped(w, pk_col);
-                try w.writeByte('"');
-            }
-            try w.writeAll("],\"columns\":[");
-            for (etable.columns, 0..) |col, ci| {
-                if (ci > 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":\"");
-                try utils.writeJsonEscaped(w, col.name);
-                try w.writeAll("\",\"type\":\"");
-                try utils.writeJsonEscaped(w, col.data_type);
-                try w.print("\",\"is_primary_key\":{s},\"is_nullable\":{s}", .{
-                    if (col.is_primary_key) "true" else "false",
-                    if (col.is_nullable) "true" else "false",
-                });
+        for (etables) |etable| {
+            try s.beginObject();
+            try s.objectField("name");
+            try s.write(etable.name);
+            try s.objectField("has_primary_key");
+            try s.write(etable.has_primary_key);
+            try s.objectField("primary_key_columns");
+            try s.write(etable.primary_key_columns);
+            try s.objectField("columns");
+            try s.beginArray();
+            for (etable.columns) |col| {
+                try s.beginObject();
+                try s.objectField("name");
+                try s.write(col.name);
+                try s.objectField("type");
+                try s.write(col.data_type);
+                try s.objectField("is_primary_key");
+                try s.write(col.is_primary_key);
+                try s.objectField("is_nullable");
+                try s.write(col.is_nullable);
                 if (col.column_default) |def| {
-                    try w.writeAll(",\"column_default\":\"");
-                    try utils.writeJsonEscaped(w, def);
-                    try w.writeByte('"');
+                    try s.objectField("column_default");
+                    try s.write(def);
                 }
                 if (col.fk_target_table) |fkt| {
-                    try w.writeAll(",\"fk_target_table\":\"");
-                    try utils.writeJsonEscaped(w, fkt);
-                    try w.writeByte('"');
+                    try s.objectField("fk_target_table");
+                    try s.write(fkt);
                 }
                 if (col.fk_target_column) |fkc| {
-                    try w.writeAll(",\"fk_target_column\":\"");
-                    try utils.writeJsonEscaped(w, fkc);
-                    try w.writeByte('"');
+                    try s.objectField("fk_target_column");
+                    try s.write(fkc);
                 }
                 if (col.enum_values) |vals| {
-                    try w.writeAll(",\"enum_values\":[");
-                    for (vals, 0..) |v, vi| {
-                        if (vi > 0) try w.writeByte(',');
-                        try w.writeByte('"');
-                        try utils.writeJsonEscaped(w, v);
-                        try w.writeByte('"');
-                    }
-                    try w.writeByte(']');
+                    try s.objectField("enum_values");
+                    try s.write(vals);
                 }
-                try w.writeByte('}');
+                try s.endObject();
             }
-            try w.writeAll("]}");
+            try s.endArray();
+            try s.endObject();
         }
     } else {
-        for (tables, 0..) |table, ti| {
-            if (ti > 0) try w.writeByte(',');
-            try w.writeAll("{\"name\":\"");
-            try utils.writeJsonEscaped(w, table.name);
-            try w.writeAll("\",\"columns\":[");
-            for (table.columns, 0..) |col, ci| {
-                if (ci > 0) try w.writeByte(',');
-                try w.writeAll("{\"name\":\"");
-                try utils.writeJsonEscaped(w, col.name);
-                try w.writeAll("\",\"type\":\"");
-                try utils.writeJsonEscaped(w, col.data_type);
-                try w.writeAll("\"}");
+        for (tables) |table| {
+            try s.beginObject();
+            try s.objectField("name");
+            try s.write(table.name);
+            try s.objectField("columns");
+            try s.beginArray();
+            for (table.columns) |col| {
+                try s.beginObject();
+                try s.objectField("name");
+                try s.write(col.name);
+                try s.objectField("type");
+                try s.write(col.data_type);
+                try s.endObject();
             }
-            try w.writeAll("]}");
+            try s.endArray();
+            try s.endObject();
         }
     }
-    try w.writeAll("]}");
+    try s.endArray();
+    try s.endObject();
 
-    sendJsonResponse(res, json_buf.items);
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -389,17 +382,22 @@ pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Res
         state.enhanced_arena = es.arena;
     }
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(arena);
-    w.writeAll("{\"ok\":true,\"schema\":\"") catch {
+    var jw = utils.JsonWriter.init(arena);
+    const s = jw.writer();
+    s.beginObject() catch {
         sendJsonResponse(res, "{\"ok\":true}");
         return;
     };
-    utils.writeJsonEscaped(w, schema_text) catch return;
+    s.objectField("ok") catch return;
+    s.write(true) catch return;
+    s.objectField("schema") catch return;
+    s.write(schema_text) catch return;
     var n_tables: usize = 0;
     if (state.schema_tables) |tbls| n_tables = tbls.len;
-    w.print("\",\"tables\":{d}}}", .{n_tables}) catch return;
-    sendJsonResponse(res, json_buf.items);
+    s.objectField("tables") catch return;
+    s.write(n_tables) catch return;
+    s.endObject() catch return;
+    sendJsonResponse(res, jw.toOwnedSlice() catch return);
 }
 
 pub fn handleHealthCheck(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -439,15 +437,45 @@ pub fn handleReadOnlyToggle(handler: *web.Handler, req: *httpz.Request, res: *ht
     };
     const enabled_str = utils.getJsonString(obj, "enabled") orelse {
         state.flags.read_only = !state.flags.read_only;
+        setReadOnlyOnPool(state);
         var resp_buf: [64]u8 = undefined;
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
         sendJsonResponse(res, resp);
         return;
     };
     state.flags.read_only = std.mem.eql(u8, enabled_str, "true");
+    setReadOnlyOnPool(state);
     var resp_buf: [64]u8 = undefined;
     const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
     sendJsonResponse(res, resp);
+}
+
+/// SET default_transaction_read_only on ALL pooled connections.
+/// Acquires every connection in the pool, applies the setting, then releases them all.
+fn setReadOnlyOnPool(state: *web.ServerState) void {
+    const pool = state.pool orelse return;
+    const set_sql = if (state.flags.read_only)
+        "SET default_transaction_read_only = on"
+    else
+        "SET default_transaction_read_only = off";
+
+    var conns: [postgres.pool_size]*pg.Conn = undefined;
+    var count: usize = 0;
+
+    while (count < postgres.pool_size) {
+        const conn = pool.acquire() catch break;
+        _ = conn.queryOpts(set_sql, .{}, .{}) catch |err| {
+            log.warn("SET read_only on conn {d} failed: {s}", .{ count, @errorName(err) });
+        };
+        conns[count] = conn;
+        count += 1;
+    }
+
+    var i = count;
+    while (i > 0) {
+        i -= 1;
+        conns[i].release();
+    }
 }
 
 pub fn handleReadOnlyGet(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -485,73 +513,75 @@ pub fn handlePostConnection(handler: *web.Handler, req: *httpz.Request, res: *ht
     };
     const color = utils.getJsonString(obj, "color") orelse "gray";
 
-    const existing = readConnectionsFile(allocator) catch {
-        const entry = formatConnectionJson(allocator, 1, name, conninfo, color) catch {
-            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-            return;
-        };
+    const existing = readConnectionsFile(allocator) catch "{}";
 
-        var new_file = std.ArrayList(u8){};
-        const nw = new_file.writer(allocator);
-        nw.writeAll("{\"connections\":[") catch {
-            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-            return;
-        };
-        nw.writeAll(entry) catch return;
-        nw.writeAll("]}") catch return;
-        writeConnectionsFile(allocator, new_file.items) catch {
-            sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
-            return;
-        };
-        state.next_connection_id = 2;
-        sendJsonResponse(res, "{\"id\":1}");
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, existing, .{}) catch {
+        sendJsonError(res, 500, "{\"error\":\"Malformed connections file\"}");
         return;
     };
 
-    const max_id = findMaxConnectionId(allocator, existing);
+    const conns_val = switch (parsed.value) {
+        .object => |o| o.get("connections"),
+        else => null,
+    };
+    var conns_arr = if (conns_val) |cv| switch (cv) {
+        .array => |a| a,
+        else => std.json.Array.init(allocator),
+    } else std.json.Array.init(allocator);
+
+    var max_id: u64 = 0;
+    for (conns_arr.items) |item| {
+        const item_obj = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const id_val = item_obj.get("id") orelse continue;
+        const obj_id: u64 = switch (id_val) {
+            .integer => |i| @intCast(@as(u64, @bitCast(@as(i64, i)))),
+            else => continue,
+        };
+        if (obj_id > max_id) max_id = obj_id;
+    }
+
     const new_id = @max(max_id + 1, state.next_connection_id);
     state.next_connection_id = new_id + 1;
 
-    const entry = formatConnectionJson(allocator, new_id, name, conninfo, color) catch {
+    // Build new entry as a std.json.Value object
+    var new_entry = std.json.ObjectMap.init(allocator);
+    new_entry.put("id", .{ .integer = @intCast(new_id) }) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        return;
+    };
+    new_entry.put("name", .{ .string = name }) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        return;
+    };
+    new_entry.put("conninfo", .{ .string = conninfo }) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        return;
+    };
+    new_entry.put("color", .{ .string = color }) catch {
         sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
 
-    var new_file = std.ArrayList(u8){};
-    const nw = new_file.writer(allocator);
-
-    const close_bracket = std.mem.lastIndexOfScalar(u8, existing, ']') orelse {
-        nw.writeAll("{\"connections\":[") catch {
-            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-            return;
-        };
-        nw.writeAll(entry) catch return;
-        nw.writeAll("]}") catch return;
-        writeConnectionsFile(allocator, new_file.items) catch {
-            sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
-            return;
-        };
-        var id_buf: [64]u8 = undefined;
-        const id_resp = std.fmt.bufPrint(&id_buf, "{{\"id\":{d}}}", .{new_id}) catch {
-            sendJsonResponse(res, "{\"id\":0}");
-            return;
-        };
-        sendJsonResponse(res, id_resp);
-        return;
-    };
-
-    const before_bracket = std.mem.trimRight(u8, existing[0..close_bracket], " \t\n\r");
-    const needs_comma = before_bracket.len > 0 and before_bracket[before_bracket.len - 1] != '[';
-
-    nw.writeAll(existing[0..close_bracket]) catch {
+    conns_arr.append(.{ .object = new_entry }) catch {
         sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
-    if (needs_comma) nw.writeByte(',') catch return;
-    nw.writeAll(entry) catch return;
-    nw.writeAll("]}") catch return;
 
-    writeConnectionsFile(allocator, new_file.items) catch {
+    // Re-serialize the whole file
+    var out_obj = std.json.ObjectMap.init(allocator);
+    out_obj.put("connections", .{ .array = conns_arr }) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        return;
+    };
+    const serialized = std.json.Stringify.valueAlloc(allocator, std.json.Value{ .object = out_obj }, .{}) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        return;
+    };
+
+    writeConnectionsFile(allocator, serialized) catch {
         sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
         return;
     };
@@ -587,55 +617,67 @@ pub fn handleDeleteConnection(handler: *web.Handler, req: *httpz.Request, res: *
         return;
     };
 
-    const conns_val = parsed.value.object.get("connections") orelse {
-        sendJsonError(res, 500, "{\"error\":\"Malformed connections file\"}");
-        return;
+    const conns_val = switch (parsed.value) {
+        .object => |o| o.get("connections"),
+        else => null,
     };
-    const conns_arr = switch (conns_val) {
+    var conns_arr = if (conns_val) |cv| switch (cv) {
         .array => |a| a,
         else => {
             sendJsonError(res, 500, "{\"error\":\"Malformed connections file\"}");
             return;
         },
-    };
-
-    var new_file = std.ArrayList(u8){};
-    const nw = new_file.writer(allocator);
-    nw.writeAll("{\"connections\":[") catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+    } else {
+        sendJsonError(res, 500, "{\"error\":\"Malformed connections file\"}");
         return;
     };
 
     var found = false;
-    var first = true;
-    for (conns_arr.items) |item| {
+    var i: usize = 0;
+    while (i < conns_arr.items.len) {
+        const item = conns_arr.items[i];
         const obj = switch (item) {
             .object => |o| o,
-            else => continue,
+            else => {
+                i += 1;
+                continue;
+            },
         };
-        const id_val = obj.get("id") orelse continue;
+        const id_val = obj.get("id") orelse {
+            i += 1;
+            continue;
+        };
         const obj_id: u64 = switch (id_val) {
-            .integer => |i| @intCast(@as(u64, @bitCast(@as(i64, i)))),
-            else => continue,
+            .integer => |iv| @intCast(@as(u64, @bitCast(@as(i64, iv)))),
+            else => {
+                i += 1;
+                continue;
+            },
         };
         if (obj_id == target_id) {
+            _ = conns_arr.orderedRemove(i);
             found = true;
         } else {
-            if (!first) nw.writeByte(',') catch return;
-            const item_json = std.json.Stringify.valueAlloc(allocator, item, .{}) catch return;
-            nw.writeAll(item_json) catch return;
-            first = false;
+            i += 1;
         }
     }
-
-    nw.writeAll("]}") catch return;
 
     if (!found) {
         sendJsonError(res, 404, "{\"error\":\"Connection not found\"}");
         return;
     }
 
-    writeConnectionsFile(allocator, new_file.items) catch {
+    var out_obj = std.json.ObjectMap.init(allocator);
+    out_obj.put("connections", .{ .array = conns_arr }) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        return;
+    };
+    const serialized = std.json.Stringify.valueAlloc(allocator, std.json.Value{ .object = out_obj }, .{}) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        return;
+    };
+
+    writeConnectionsFile(allocator, serialized) catch {
         sendJsonError(res, 500, "{\"error\":\"Failed to write connections file\"}");
         return;
     };

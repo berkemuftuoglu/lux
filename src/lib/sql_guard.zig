@@ -157,7 +157,7 @@ pub fn isSqlReadSafe(sql: []const u8) bool {
 
 /// Word-boundary aware: "delete_log" and 'DELETE' inside strings don't trigger.
 pub fn containsWriteKeyword(sql: []const u8) bool {
-    const keywords = [_][]const u8{ "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "COPY", "GRANT", "REVOKE" };
+    const keywords = [_][]const u8{ "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE", "CREATE", "COPY", "GRANT", "REVOKE", "SET" };
     var i: usize = 0;
     while (i < sql.len) {
         const ch = sql[i];
@@ -327,6 +327,23 @@ test "isSqlReadSafe: whitelist-based read safety" {
     // Write keywords inside strings/identifiers don't trigger
     try std.testing.expect(isSqlReadSafe("SELECT * FROM users WHERE action = 'DELETE'"));
     try std.testing.expect(isSqlReadSafe("SELECT * FROM delete_log"));
+}
+
+test "isSqlReadSafe: blocks SET statements" {
+    try std.testing.expect(!isSqlReadSafe("SET default_transaction_read_only = off"));
+    try std.testing.expect(!isSqlReadSafe("set search_path to public"));
+    // SET inside a word boundary shouldn't trigger
+    try std.testing.expect(isSqlReadSafe("SELECT * FROM dataset"));
+    try std.testing.expect(isSqlReadSafe("SELECT * FROM settings"));
+}
+
+test "containsWriteKeyword: detects SET keyword" {
+    try std.testing.expect(containsWriteKeyword("SET x = 1"));
+    try std.testing.expect(containsWriteKeyword("set default_transaction_read_only = on"));
+    // SET inside a word doesn't trigger
+    try std.testing.expect(!containsWriteKeyword("SELECT * FROM dataset"));
+    try std.testing.expect(!containsWriteKeyword("SELECT * FROM settings"));
+    try std.testing.expect(!containsWriteKeyword("SELECT offset FROM t"));
 }
 
 fn fuzzHasMultipleStatements(_: void, input: []const u8) anyerror!void {

@@ -18,16 +18,8 @@ const CsvParseError = error{
     OutOfMemory,
 };
 
-fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
-
-fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
-    res.status = status;
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
+const sendJsonResponse = web.sendJsonResponse;
+const sendJsonError = web.sendJsonError;
 
 fn escapeCsvField(writer: anytype, field: []const u8) !void {
     var needs_quoting = false;
@@ -85,40 +77,25 @@ fn formatResultAsJson(
     col_names: []const []const u8,
     rows: []const []const []const u8,
 ) ExportError![]u8 {
-    var buf = std.ArrayList(u8){};
-    errdefer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
 
-    w.writeByte('[') catch return error.OutOfMemory;
-
-    for (rows, 0..) |row, ri| {
-        if (ri > 0) w.writeByte(',') catch return error.OutOfMemory;
-        w.writeByte('{') catch return error.OutOfMemory;
-
+    s.beginArray() catch return error.OutOfMemory;
+    for (rows) |row| {
+        s.beginObject() catch return error.OutOfMemory;
         for (row, 0..) |val, ci| {
-            if (ci > 0) w.writeByte(',') catch return error.OutOfMemory;
-
-            w.writeByte('"') catch return error.OutOfMemory;
             if (ci < col_names.len) {
-                utils.writeJsonEscaped(w, col_names[ci]) catch return error.OutOfMemory;
-            }
-            w.writeAll("\":") catch return error.OutOfMemory;
-
-            if (std.mem.eql(u8, val, "NULL")) {
-                w.writeAll("null") catch return error.OutOfMemory;
+                s.objectField(col_names[ci]) catch return error.OutOfMemory;
             } else {
-                w.writeByte('"') catch return error.OutOfMemory;
-                utils.writeJsonEscaped(w, val) catch return error.OutOfMemory;
-                w.writeByte('"') catch return error.OutOfMemory;
+                s.objectField("") catch return error.OutOfMemory;
             }
+            utils.writeSqlValue(s, val) catch return error.OutOfMemory;
         }
-
-        w.writeByte('}') catch return error.OutOfMemory;
+        s.endObject() catch return error.OutOfMemory;
     }
+    s.endArray() catch return error.OutOfMemory;
 
-    w.writeByte(']') catch return error.OutOfMemory;
-
-    return buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    return jw.toOwnedSlice() catch return error.OutOfMemory;
 }
 
 fn parseCsvContent(
@@ -228,10 +205,12 @@ fn buildAndExecuteInsert(
     defer sql_buf.deinit(allocator);
     const w = sql_buf.writer(allocator);
 
-    w.print("INSERT INTO \"{s}\" (", .{table_name}) catch return false;
+    const esc_tbl = utils.escapeIdentifier(allocator, table_name) catch return false;
+    w.print("INSERT INTO \"{s}\" (", .{esc_tbl}) catch return false;
     for (col_names, 0..) |col, i| {
         if (i > 0) w.writeAll(", ") catch return false;
-        w.print("\"{s}\"", .{col}) catch return false;
+        const esc_col = utils.escapeIdentifier(allocator, col) catch return false;
+        w.print("\"{s}\"", .{esc_col}) catch return false;
     }
     w.writeAll(") VALUES (") catch return false;
     for (values, 0..) |val, i| {
@@ -298,9 +277,13 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     }
 
-    var sql_buf: [256]u8 = undefined;
+    const esc_table_id = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
+        return;
+    };
+    var sql_buf: [512]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&sql_buf);
-    fbs.writer().print("SELECT * FROM \"{s}\"", .{table_name}) catch {
+    fbs.writer().print("SELECT * FROM \"{s}\"", .{esc_table_id}) catch {
         sendJsonError(res, 500, "{\"error\":\"Table name too long\"}");
         return;
     };
@@ -444,7 +427,7 @@ pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
         }
     }
 
-    const escaped_name = utils.escapeStringValue(allocator, table_name) catch {
+    const escaped_val = utils.escapeStringValue(allocator, table_name) catch {
         sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
@@ -468,7 +451,7 @@ pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
             "LEFT JOIN information_schema.columns c ON c.table_schema = ns.nspname AND c.table_name = cls.relname " ++
             "WHERE ns.nspname = 'public' AND cls.relname = '",
     );
-    try sw.writeAll(escaped_name);
+    try sw.writeAll(escaped_val);
     try sw.writeAll("' AND cls.relkind IN ('r', 'v') GROUP BY cls.relkind, cls.relname, cls.oid");
 
     var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
@@ -484,12 +467,13 @@ pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
 
     const ddl_text = pg_result.rows[0][0];
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(allocator);
-    try w.writeAll("{\"ddl\":\"");
-    try utils.writeJsonEscaped(w, ddl_text);
-    try w.writeAll("\"}");
-    sendJsonResponse(res, json_buf.items);
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
+    try s.beginObject();
+    try s.objectField("ddl");
+    try s.write(ddl_text);
+    try s.endObject();
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -555,13 +539,17 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     if (has_header) {
         for (csv_result.headers) |header| {
             if (!crud.findColumnInTable(table_info, header)) {
-                var err_buf: [256]u8 = undefined;
-                var fbs = std.io.fixedBufferStream(&err_buf);
-                const ew = fbs.writer();
-                ew.writeAll("{\"error\":\"CSV column '") catch return;
-                utils.writeJsonEscaped(ew, header) catch return;
-                ew.writeAll("' not found in table schema\"}") catch return;
-                sendJsonError(res, 400, fbs.getWritten());
+                const err_msg = std.fmt.allocPrint(allocator, "CSV column '{s}' not found in table schema", .{header}) catch {
+                    sendJsonError(res, 400, "{\"error\":\"CSV column not found in table schema\"}");
+                    return;
+                };
+                var jw = utils.JsonWriter.init(allocator);
+                const s = jw.writer();
+                s.beginObject() catch return;
+                s.objectField("error") catch return;
+                s.write(err_msg) catch return;
+                s.endObject() catch return;
+                sendJsonError(res, 400, jw.toOwnedSlice() catch return);
                 return;
             }
             col_names.append(allocator, header) catch {
@@ -588,7 +576,7 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
-    defer pool.release(conn);
+    defer conn.release();
 
     conn.begin() catch {
         sendJsonResponse(res, "{\"error\":\"Failed to start transaction\"}");
@@ -681,7 +669,11 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         }
     }
 
-    const escaped_name = utils.escapeStringValue(allocator, table_name) catch {
+    const escaped_id = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
+        return;
+    };
+    const escaped_val = utils.escapeStringValue(allocator, table_name) catch {
         sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
@@ -692,7 +684,7 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         "SELECT " ++
             "(SELECT count(*)::text FROM \"",
     );
-    try sw.writeAll(escaped_name);
+    try sw.writeAll(escaped_id);
     try sw.writeAll(
         "\") AS row_count, " ++
             "CASE WHEN c.relkind = 'v' THEN 'N/A (view)' ELSE pg_size_pretty(pg_relation_size(c.oid)) END AS table_size, " ++
@@ -702,7 +694,7 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
             "JOIN pg_namespace n ON c.relnamespace = n.oid " ++
             "WHERE n.nspname = 'public' AND c.relname = '",
     );
-    try sw.writeAll(escaped_name);
+    try sw.writeAll(escaped_val);
     try sw.writeAll("' AND c.relkind IN ('r', 'v')");
 
     var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
@@ -722,19 +714,23 @@ pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.
     const index_size = if (row.len > 2) row[2] else "0 bytes";
     const total_size = if (row.len > 3) row[3] else "0 bytes";
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(allocator);
-    try w.writeAll("{\"row_estimate\":");
-    try w.writeAll(row_estimate);
-    try w.writeAll(",\"table_size\":\"");
-    try utils.writeJsonEscaped(w, table_size);
-    try w.writeAll("\",\"index_size\":\"");
-    try utils.writeJsonEscaped(w, index_size);
-    try w.writeAll("\",\"total_size\":\"");
-    try utils.writeJsonEscaped(w, total_size);
-    try w.writeAll("\"}");
+    // row_estimate is a numeric string from SQL — write it as a raw number
+    const row_count_num = std.fmt.parseInt(i64, row_estimate, 10) catch 0;
 
-    sendJsonResponse(res, json_buf.items);
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
+    try s.beginObject();
+    try s.objectField("row_estimate");
+    try s.write(row_count_num);
+    try s.objectField("table_size");
+    try s.write(table_size);
+    try s.objectField("index_size");
+    try s.write(index_size);
+    try s.objectField("total_size");
+    try s.write(total_size);
+    try s.endObject();
+
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 test "escapeCsvField: plain text passes through" {

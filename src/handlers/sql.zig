@@ -12,16 +12,8 @@ const ServerState = web.ServerState;
 const QueryHistoryEntry = web.QueryHistoryEntry;
 const max_history_entries = web.max_history_entries;
 
-fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
-
-fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
-    res.status = status;
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
+const sendJsonResponse = web.sendJsonResponse;
+const sendJsonError = web.sendJsonError;
 
 pub fn addHistoryEntry(
     state: *ServerState,
@@ -83,14 +75,17 @@ pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Respons
     if (!is_forced) {
         const guard = sql_guard.analyzeSql(sql_text);
         if (guard.is_destructive) {
-            var warn_buf = std.ArrayList(u8){};
-            const ww = warn_buf.writer(allocator);
-            try ww.writeAll("{\"requires_confirmation\":true,\"operation\":\"");
-            try utils.writeJsonEscaped(ww, guard.operation);
-            try ww.writeAll("\",\"warning\":\"");
-            try utils.writeJsonEscaped(ww, guard.warning);
-            try ww.writeAll("\"}");
-            sendJsonResponse(res, warn_buf.items);
+            var jw = utils.JsonWriter.init(allocator);
+            const s = jw.writer();
+            try s.beginObject();
+            try s.objectField("requires_confirmation");
+            try s.write(true);
+            try s.objectField("operation");
+            try s.write(guard.operation);
+            try s.objectField("warning");
+            try s.write(guard.warning);
+            try s.endObject();
+            sendJsonResponse(res, try jw.toOwnedSlice());
             return;
         }
     }
@@ -102,27 +97,28 @@ pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Respons
     }
 
     const start_time = std.time.milliTimestamp();
-    var result = postgres.runQuery(pool, allocator, sql_text) catch {
+    // Acquire a dedicated connection so we can read the error message on failure
+    var conn = pool.acquire() catch {
+        addHistoryEntry(state, sql_text, 0, null, true, "Connection failed");
+        sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
+        return;
+    };
+    var result = postgres.runQueryOnConn(conn, allocator, sql_text) catch {
         const end_time = std.time.milliTimestamp();
         const duration: u64 = @intCast(@max(0, end_time - start_time));
-        // Try to get error message from a connection
-        var conn = pool.acquire() catch {
-            addHistoryEntry(state, sql_text, duration, null, true, "Query failed");
-            sendJsonResponse(res, "{\"error\":\"Query failed\"}");
-            return;
-        };
         const err_msg = postgres.connErrorMessage(conn);
         addHistoryEntry(state, sql_text, duration, null, true, err_msg);
         conn.release();
-        var err_buf: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&err_buf);
-        const ew = fbs.writer();
-        ew.writeAll("{\"error\":\"") catch return;
-        utils.writeJsonEscaped(ew, err_msg) catch return;
-        ew.writeAll("\"}") catch return;
-        sendJsonResponse(res, fbs.getWritten());
+        var jw = utils.JsonWriter.init(allocator);
+        const s = jw.writer();
+        s.beginObject() catch return;
+        s.objectField("error") catch return;
+        s.write(err_msg) catch return;
+        s.endObject() catch return;
+        sendJsonResponse(res, jw.toOwnedSlice() catch return);
         return;
     };
+    conn.release();
     defer result.deinit();
     const end_time = std.time.milliTimestamp();
     const duration: u64 = @intCast(@max(0, end_time - start_time));
@@ -162,7 +158,7 @@ pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         sendJsonResponse(res, "{\"error\":\"Database connection failed\"}");
         return;
     };
-    defer pool.release(conn);
+    defer conn.release();
 
     conn.begin() catch {
         sendJsonResponse(res, "{\"error\":\"Failed to start transaction\"}");
@@ -184,37 +180,29 @@ pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         log.warn("rollback after preview: {s}", .{@errorName(rb_err)});
     };
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(allocator);
-    try w.print("{{\"preview\":true,\"affected_rows\":{d},", .{pg_result.n_rows});
-
-    try w.writeAll("\"columns\":[");
-    for (pg_result.col_names, 0..) |name, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.writeByte('"');
-        try utils.writeJsonEscaped(w, name);
-        try w.writeByte('"');
-    }
-    try w.writeAll("],\"rows\":[");
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
+    try s.beginObject();
+    try s.objectField("preview");
+    try s.write(true);
+    try s.objectField("affected_rows");
+    try s.write(pg_result.n_rows);
+    try s.objectField("columns");
+    try s.write(pg_result.col_names);
+    try s.objectField("rows");
+    try s.beginArray();
     const max_preview_rows: usize = 10;
     const rows_to_show = @min(pg_result.n_rows, max_preview_rows);
-    for (pg_result.rows[0..rows_to_show], 0..) |row, ri| {
-        if (ri > 0) try w.writeByte(',');
-        try w.writeByte('[');
-        for (row, 0..) |val, ci| {
-            if (ci > 0) try w.writeByte(',');
-            if (std.mem.eql(u8, val, "NULL")) {
-                try w.writeAll("null");
-            } else {
-                try w.writeByte('"');
-                try utils.writeJsonEscaped(w, val);
-                try w.writeByte('"');
-            }
+    for (pg_result.rows[0..rows_to_show]) |row| {
+        try s.beginArray();
+        for (row) |val| {
+            try utils.writeSqlValue(s, val);
         }
-        try w.writeByte(']');
+        try s.endArray();
     }
-    try w.writeAll("]}");
-    sendJsonResponse(res, json_buf.items);
+    try s.endArray();
+    try s.endObject();
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
@@ -296,25 +284,30 @@ pub fn handleSchemaPreview(handler: *web.Handler, req: *httpz.Request, res: *htt
 
     const guard = sql_guard.analyzeSql(sql_text);
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(allocator);
-    try w.writeAll("{\"operation\":\"");
-    try utils.writeJsonEscaped(w, guard.operation);
-    try w.writeAll("\",\"warning\":\"");
-    try utils.writeJsonEscaped(w, guard.warning);
-    try w.writeAll("\",\"rollback_sql\":\"");
-    try utils.writeJsonEscaped(w, rollback);
-    try w.writeAll("\"}");
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
+    try s.beginObject();
+    try s.objectField("operation");
+    try s.write(guard.operation);
+    try s.objectField("warning");
+    try s.write(guard.warning);
+    try s.objectField("rollback_sql");
+    try s.write(rollback);
+    try s.endObject();
 
-    sendJsonResponse(res, json_buf.items);
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleHistory(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
     const alloc = res.arena;
 
-    var json = std.ArrayList(u8){};
-    try json.appendSlice(alloc, "{\"entries\":[");
+    var jw = utils.JsonWriter.init(alloc);
+    const s = jw.writer();
+
+    try s.beginObject();
+    try s.objectField("entries");
+    try s.beginArray();
 
     const items = state.query_history.items;
     const count = @min(items.len, 100);
@@ -323,70 +316,73 @@ pub fn handleHistory(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respo
     var i: usize = items.len;
     while (i > 0 and wrote < count) {
         i -= 1;
-        if (wrote > 0) try json.appendSlice(alloc, ",");
-        try json.appendSlice(alloc, "{\"sql\":\"");
-        try utils.writeJsonEscaped(json.writer(alloc), items[i].sql);
-        try json.appendSlice(alloc, "\",\"timestamp\":");
-        var ts_buf: [20]u8 = undefined;
-        const ts_str = std.fmt.bufPrint(&ts_buf, "{d}", .{items[i].timestamp}) catch ts_buf[0..0];
-        try json.appendSlice(alloc, ts_str);
-        try json.appendSlice(alloc, ",\"duration_ms\":");
-        var dur_buf: [20]u8 = undefined;
-        const dur_str = std.fmt.bufPrint(&dur_buf, "{d}", .{items[i].duration_ms}) catch dur_buf[0..0];
-        try json.appendSlice(alloc, dur_str);
+        try s.beginObject();
+        try s.objectField("sql");
+        try s.write(items[i].sql);
+        try s.objectField("timestamp");
+        try s.write(items[i].timestamp);
+        try s.objectField("duration_ms");
+        try s.write(items[i].duration_ms);
+        try s.objectField("row_count");
         if (items[i].row_count) |rc| {
-            try json.appendSlice(alloc, ",\"row_count\":");
-            var rc_buf: [20]u8 = undefined;
-            const rc_str = std.fmt.bufPrint(&rc_buf, "{d}", .{rc}) catch rc_buf[0..0];
-            try json.appendSlice(alloc, rc_str);
+            try s.write(rc);
         } else {
-            try json.appendSlice(alloc, ",\"row_count\":null");
+            try s.write(null);
         }
-        try json.appendSlice(alloc, ",\"is_error\":");
-        try json.appendSlice(alloc, if (items[i].is_error) "true" else "false");
+        try s.objectField("is_error");
+        try s.write(items[i].is_error);
         if (items[i].error_msg) |em| {
-            try json.appendSlice(alloc, ",\"error\":\"");
-            try utils.writeJsonEscaped(json.writer(alloc), em);
-            try json.appendSlice(alloc, "\"");
+            try s.objectField("error");
+            try s.write(em);
         }
-        try json.appendSlice(alloc, "}");
+        try s.endObject();
         wrote += 1;
     }
 
-    try json.appendSlice(alloc, "]}");
-    sendJsonResponse(res, json.items);
+    try s.endArray();
+    try s.endObject();
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleJournal(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
     const arena = res.arena;
 
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(arena);
+    var jw = utils.JsonWriter.init(arena);
+    const s = jw.writer();
 
-    try w.writeAll("{\"entries\":[");
+    try s.beginObject();
+    try s.objectField("entries");
+    try s.beginArray();
     const items = state.change_journal.items;
     const start = if (items.len > 100) items.len - 100 else 0;
-    for (items[start..], 0..) |entry, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.print("{{\"id\":{d},\"timestamp\":{d},\"table\":\"", .{ entry.id, entry.timestamp });
-        try utils.writeJsonEscaped(w, entry.table_name);
-        try w.writeAll("\",\"operation\":\"");
-        try utils.writeJsonEscaped(w, entry.operation);
-        try w.writeAll("\",\"column\":\"");
-        try utils.writeJsonEscaped(w, entry.column_name);
-        try w.writeAll("\",\"old_value\":\"");
-        try utils.writeJsonEscaped(w, entry.old_value);
-        try w.writeAll("\",\"new_value\":\"");
-        try utils.writeJsonEscaped(w, entry.new_value);
-        try w.writeAll("\",\"pk_column\":\"");
-        try utils.writeJsonEscaped(w, entry.pk_column);
-        try w.writeAll("\",\"pk_value\":\"");
-        try utils.writeJsonEscaped(w, entry.pk_value);
-        try w.print("\",\"undone\":{s}}}", .{if (entry.undone) "true" else "false"});
+    for (items[start..]) |entry| {
+        try s.beginObject();
+        try s.objectField("id");
+        try s.write(entry.id);
+        try s.objectField("timestamp");
+        try s.write(entry.timestamp);
+        try s.objectField("table");
+        try s.write(entry.table_name);
+        try s.objectField("operation");
+        try s.write(entry.operation);
+        try s.objectField("column");
+        try s.write(entry.column_name);
+        try s.objectField("old_value");
+        try s.write(entry.old_value);
+        try s.objectField("new_value");
+        try s.write(entry.new_value);
+        try s.objectField("pk_column");
+        try s.write(entry.pk_column);
+        try s.objectField("pk_value");
+        try s.write(entry.pk_value);
+        try s.objectField("undone");
+        try s.write(entry.undone);
+        try s.endObject();
     }
-    try w.writeAll("]}");
-    sendJsonResponse(res, json_buf.items);
+    try s.endArray();
+    try s.endObject();
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -429,47 +425,55 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
         return;
     }
 
+    const esc_j_table = utils.escapeIdentifier(allocator, entry.table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name in journal entry\"}");
+        return;
+    };
+    const esc_j_pk = utils.escapeIdentifier(allocator, entry.pk_column) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid pk column in journal entry\"}");
+        return;
+    };
+
     var sql_buf = std.ArrayList(u8){};
     const w = sql_buf.writer(allocator);
 
     if (std.mem.eql(u8, entry.operation, "update")) {
-        const escaped_pk = utils.escapeStringValue(allocator, entry.pk_value) catch {
-            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        const esc_j_col = utils.escapeIdentifier(allocator, entry.column_name) catch {
+            sendJsonError(res, 400, "{\"error\":\"Invalid column name in journal entry\"}");
             return;
         };
         if (entry.old_value.len == 0) {
-            try w.print("UPDATE \"{s}\" SET \"{s}\" = NULL WHERE \"{s}\" = '{s}'", .{
-                entry.table_name, entry.column_name, entry.pk_column, escaped_pk,
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = NULL WHERE \"{s}\" = $1", .{
+                esc_j_table, esc_j_col, esc_j_pk,
             });
         } else {
-            const escaped_old = utils.escapeStringValue(allocator, entry.old_value) catch {
-                sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-                return;
-            };
-            try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\" = '{s}'", .{
-                entry.table_name, entry.column_name, escaped_old, entry.pk_column, escaped_pk,
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = $1 WHERE \"{s}\" = $2", .{
+                esc_j_table, esc_j_col, esc_j_pk,
             });
         }
     } else if (std.mem.eql(u8, entry.operation, "delete")) {
         sendJsonError(res, 400, "{\"error\":\"Undo delete not yet supported\"}");
         return;
     } else if (std.mem.eql(u8, entry.operation, "insert")) {
-        const escaped_pk = utils.escapeStringValue(allocator, entry.pk_value) catch {
-            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-            return;
-        };
-        try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = '{s}'", .{
-            entry.table_name, entry.pk_column, escaped_pk,
+        try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = $1", .{
+            esc_j_table, esc_j_pk,
         });
     } else {
         sendJsonError(res, 400, "{\"error\":\"Unknown operation\"}");
         return;
     }
 
-    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
-        sendJsonResponse(res, "{\"error\":\"Undo query failed\"}");
-        return;
-    };
+    // Use parameterized queries to avoid SQL injection via journal values
+    var pg_result = if (std.mem.eql(u8, entry.operation, "update") and entry.old_value.len > 0)
+        postgres.runQueryParams(pool, allocator, sql_buf.items, .{ entry.old_value, entry.pk_value }) catch {
+            sendJsonResponse(res, "{\"error\":\"Undo query failed\"}");
+            return;
+        }
+    else
+        postgres.runQueryParams(pool, allocator, sql_buf.items, .{entry.pk_value}) catch {
+            sendJsonResponse(res, "{\"error\":\"Undo query failed\"}");
+            return;
+        };
     defer pg_result.deinit();
 
     entry.undone = true;

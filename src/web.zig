@@ -45,6 +45,7 @@ const static_files = .{
     .{ "/js/utils.js", "application/javascript", "src/static/js/utils.js", @embedFile("static/js/utils.js") },
     .{ "/js/connection.js", "application/javascript", "src/static/js/connection.js", @embedFile("static/js/connection.js") },
     .{ "/js/sql-tabs.js", "application/javascript", "src/static/js/sql-tabs.js", @embedFile("static/js/sql-tabs.js") },
+    .{ "/js/sql-format.js", "application/javascript", "src/static/js/sql-format.js", @embedFile("static/js/sql-format.js") },
     .{ "/js/sql.js", "application/javascript", "src/static/js/sql.js", @embedFile("static/js/sql.js") },
     .{ "/js/saved-queries.js", "application/javascript", "src/static/js/saved-queries.js", @embedFile("static/js/saved-queries.js") },
     .{ "/js/cmd-palette.js", "application/javascript", "src/static/js/cmd-palette.js", @embedFile("static/js/cmd-palette.js") },
@@ -53,15 +54,19 @@ const static_files = .{
     .{ "/js/app.js", "application/javascript", "src/static/js/app.js", @embedFile("static/js/app.js") },
     .{ "/js/grid.js", "application/javascript", "src/static/js/grid.js", @embedFile("static/js/grid.js") },
     .{ "/js/sidebar.js", "application/javascript", "src/static/js/sidebar.js", @embedFile("static/js/sidebar.js") },
+    .{ "/js/er-diagram.js", "application/javascript", "src/static/js/er-diagram.js", @embedFile("static/js/er-diagram.js") },
     .{ "/js/crud.js", "application/javascript", "src/static/js/crud.js", @embedFile("static/js/crud.js") },
 };
 
-pub fn isValidPath(path: []const u8) bool {
-    if (path.len == 0) return false;
-    for (path) |byte| {
-        if (byte < 0x20 or byte > 0x7E) return false;
-    }
-    return true;
+pub fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
+}
+
+pub fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
+    res.status = status;
+    res.content_type = httpz.ContentType.JSON;
+    res.body = body;
 }
 
 pub const HandlerError = error{
@@ -455,40 +460,8 @@ test "ServerState: deinit cleans up empty state without crash" {
     state.deinit();
 }
 
-test "isValidPath: valid API path" {
-    try std.testing.expect(isValidPath("/api/tables/users"));
-}
-
-test "isValidPath: valid JS path" {
-    try std.testing.expect(isValidPath("/js/app.js"));
-}
-
-test "isValidPath: empty path is invalid" {
-    try std.testing.expect(!isValidPath(""));
-}
-
-test "isValidPath: null byte is invalid" {
-    try std.testing.expect(!isValidPath("/api/tables/users\x00"));
-}
-
-test "isValidPath: control char 0x01 is invalid" {
-    try std.testing.expect(!isValidPath("/api/tables/users\x01"));
-}
-
-test "isValidPath: DEL 0x7F is invalid" {
-    try std.testing.expect(!isValidPath("/api/tables/users\x7F"));
-}
-
-test "isValidPath: root path is valid" {
-    try std.testing.expect(isValidPath("/"));
-}
-
-test "isValidPath: space 0x20 is valid" {
-    try std.testing.expect(isValidPath("/api/search?q=hello world"));
-}
-
-test "static_files tuple: has 28 JS/CSS entries" {
-    try std.testing.expectEqual(@as(usize, 28), static_files.len);
+test "static_files tuple: has 30 JS/CSS entries" {
+    try std.testing.expectEqual(@as(usize, 30), static_files.len);
 }
 
 comptime {

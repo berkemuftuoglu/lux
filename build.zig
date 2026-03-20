@@ -76,6 +76,7 @@ pub fn build(b: *std.Build) void {
     // Wire pg to modules that need direct pool/conn access
     mod_web.addImport("pg", mod_pg);
     mod_export.addImport("pg", mod_pg);
+    mod_schema.addImport("pg", mod_pg);
 
     // Wire module dependencies
     mod_crud.addImport("postgres", mod_postgres);
@@ -106,7 +107,6 @@ pub fn build(b: *std.Build) void {
     mod_web.addImport("sql", mod_sql);
 
     mod_main.addImport("web", mod_web);
-    mod_main.addImport("postgres", mod_postgres);
 
     // --- Main executable ---
     const exe = b.addExecutable(.{

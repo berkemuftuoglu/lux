@@ -39,16 +39,8 @@ pub fn findColumnInTable(table: postgres.TableInfo, col_name: []const u8) bool {
     return false;
 }
 
-fn sendJsonResponse(res: *httpz.Response, body: []const u8) void {
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
-
-fn sendJsonError(res: *httpz.Response, status: u16, body: []const u8) void {
-    res.status = status;
-    res.content_type = httpz.ContentType.JSON;
-    res.body = body;
-}
+const sendJsonResponse = web.sendJsonResponse;
+const sendJsonError = web.sendJsonError;
 
 pub fn enforceReadOnly(state: *const ServerState, res: *httpz.Response) bool {
     if (state.flags.read_only) {
@@ -77,24 +69,19 @@ pub fn validateCtid(ctid: []const u8) bool {
 }
 
 fn formatRowAsJsonCompact(allocator: std.mem.Allocator, col_names: []const []const u8, row: []const []const u8) ![]u8 {
-    var buf = std.ArrayList(u8){};
-    errdefer buf.deinit(allocator);
-    const bw = buf.writer(allocator);
-    try bw.writeByte('{');
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
+    try s.beginObject();
     const len = @min(col_names.len, row.len);
     for (0..len) |i| {
-        if (i > 0) try bw.writeByte(',');
-        try bw.writeByte('"');
-        try utils.writeJsonEscaped(bw, col_names[i]);
-        try bw.writeAll("\":\"");
-        try utils.writeJsonEscaped(bw, row[i]);
-        try bw.writeByte('"');
+        try s.objectField(col_names[i]);
+        try s.write(row[i]);
     }
-    try bw.writeByte('}');
-    return buf.toOwnedSlice(allocator);
+    try s.endObject();
+    return jw.toOwnedSlice();
 }
 
-fn extractValuesFromJsonObject(allocator: std.mem.Allocator, obj: std.json.ObjectMap) ?[]KVPair {
+fn extractValuesFromJsonObject(allocator: std.mem.Allocator, obj: std.json.ObjectMap) error{OutOfMemory}!?[]KVPair {
     const values_val = obj.get("values") orelse return null;
     const inner = switch (values_val) {
         .object => |o| o,
@@ -102,6 +89,7 @@ fn extractValuesFromJsonObject(allocator: std.mem.Allocator, obj: std.json.Objec
     };
 
     var pairs = std.ArrayList(KVPair){};
+    errdefer pairs.deinit(allocator);
     var it = inner.iterator();
     while (it.next()) |entry| {
         const value: []const u8 = switch (entry.value_ptr.*) {
@@ -109,16 +97,10 @@ fn extractValuesFromJsonObject(allocator: std.mem.Allocator, obj: std.json.Objec
             .string => |s| s,
             else => continue,
         };
-        pairs.append(allocator, .{ .key = entry.key_ptr.*, .value = value }) catch {
-            pairs.deinit(allocator);
-            return null;
-        };
+        try pairs.append(allocator, .{ .key = entry.key_ptr.*, .value = value });
     }
 
-    return pairs.toOwnedSlice(allocator) catch {
-        pairs.deinit(allocator);
-        return null;
-    };
+    return try pairs.toOwnedSlice(allocator);
 }
 
 pub fn addJournalEntry(
@@ -177,34 +159,7 @@ pub fn addJournalEntry(
     return entry.id;
 }
 
-fn writeColumnsAndRows(w: anytype, pg_result: *const postgres.QueryResult) !void {
-    try w.writeAll("\"columns\":[");
-    for (pg_result.col_names, 0..) |name, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.writeByte('"');
-        try utils.writeJsonEscaped(w, name);
-        try w.writeByte('"');
-    }
-    try w.writeAll("],\"rows\":[");
-
-    for (pg_result.rows, 0..) |row, ri| {
-        if (ri > 0) try w.writeByte(',');
-        try w.writeByte('[');
-        for (row, 0..) |val, ci| {
-            if (ci > 0) try w.writeByte(',');
-            if (std.mem.eql(u8, val, "NULL")) {
-                try w.writeAll("null");
-            } else {
-                try w.writeByte('"');
-                try utils.writeJsonEscaped(w, val);
-                try w.writeByte('"');
-            }
-        }
-        try w.writeByte(']');
-    }
-
-    try w.writeByte(']');
-}
+// writeColumnsAndRows removed -- replaced by utils.writeColumnsAndRows
 
 pub fn sendTableDataJson(
     allocator: std.mem.Allocator,
@@ -214,31 +169,36 @@ pub fn sendTableDataJson(
     table_name: []const u8,
     meta: TableDataMeta,
 ) !void {
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(allocator);
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
 
-    try w.print("{{\"total\":{d},\"limit\":{d},\"offset\":{d},\"count_exact\":{s},\"pk_mode\":\"{s}\",\"pagination\":\"{s}\",", .{
-        meta.total,                                    meta.limit,                                  meta.offset,
-        if (meta.use_exact_count) "true" else "false", if (meta.table_has_pk) "column" else "ctid", if (meta.use_keyset) "keyset" else "offset",
-    });
+    try s.beginObject();
+    try s.objectField("total");
+    try s.write(meta.total);
+    try s.objectField("limit");
+    try s.write(meta.limit);
+    try s.objectField("offset");
+    try s.write(meta.offset);
+    try s.objectField("count_exact");
+    try s.write(meta.use_exact_count);
+    try s.objectField("pk_mode");
+    try s.write(if (meta.table_has_pk) "column" else "ctid");
+    try s.objectField("pagination");
+    try s.write(if (meta.use_keyset) "keyset" else "offset");
 
     if (state.enhanced_schema) |etables| {
         for (etables) |et| {
             if (std.mem.eql(u8, et.name, table_name)) {
-                try w.print("\"has_primary_key\":{s},\"pk_columns\":[", .{if (et.has_primary_key) "true" else "false"});
-                for (et.primary_key_columns, 0..) |pk, pi| {
-                    if (pi > 0) try w.writeByte(',');
-                    try w.writeByte('"');
-                    try utils.writeJsonEscaped(w, pk);
-                    try w.writeByte('"');
-                }
-                try w.writeAll("],");
+                try s.objectField("has_primary_key");
+                try s.write(et.has_primary_key);
+                try s.objectField("pk_columns");
+                try s.write(et.primary_key_columns);
                 break;
             }
         }
     }
 
-    try writeColumnsAndRows(w, pg_result);
+    try utils.writeColumnsAndRows(s, pg_result.col_names, pg_result.rows);
 
     if (meta.use_keyset and meta.pk_col_name != null and pg_result.n_rows > 0) {
         var pk_result_idx: ?usize = null;
@@ -252,29 +212,28 @@ pub fn sendTableDataJson(
             const first_row = pg_result.rows[0];
             const last_row = pg_result.rows[pg_result.n_rows - 1];
             if (pki < first_row.len and pki < last_row.len) {
-                try w.writeAll(",\"first_cursor\":\"");
-                try utils.writeJsonEscaped(w, first_row[pki]);
-                try w.writeAll("\",\"last_cursor\":\"");
-                try utils.writeJsonEscaped(w, last_row[pki]);
-                try w.writeByte('"');
+                try s.objectField("first_cursor");
+                try s.write(first_row[pki]);
+                try s.objectField("last_cursor");
+                try s.write(last_row[pki]);
             }
         }
     }
 
-    try w.writeByte('}');
-    sendJsonResponse(res, json_buf.items);
+    try s.endObject();
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn sendQueryResultJson(allocator: std.mem.Allocator, res: *httpz.Response, pg_result: *postgres.QueryResult) !void {
-    var json_buf = std.ArrayList(u8){};
-    const w = json_buf.writer(allocator);
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
 
-    try w.print("{{\"row_count\":{d},", .{pg_result.n_rows});
-
-    try writeColumnsAndRows(w, pg_result);
-
-    try w.writeByte('}');
-    sendJsonResponse(res, json_buf.items);
+    try s.beginObject();
+    try s.objectField("row_count");
+    try s.write(pg_result.n_rows);
+    try utils.writeColumnsAndRows(s, pg_result.col_names, pg_result.rows);
+    try s.endObject();
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -314,6 +273,11 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
             return;
         }
     }
+
+    const esc_table = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
+        return;
+    };
 
     const qs = try req.query();
 
@@ -418,10 +382,16 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
     for (filters[0..filter_count]) |f| {
         if (where_parts > 0) try ww.writeAll(" AND ");
+        const esc_fcol = utils.escapeIdentifier(allocator, f.column) catch continue;
         const esc_val = utils.escapeStringValue(allocator, f.value) catch continue;
-        try ww.print("\"{s}\"::text ILIKE '%{s}%'", .{ f.column, esc_val });
+        try ww.print("\"{s}\"::text ILIKE '%{s}%'", .{ esc_fcol, esc_val });
         where_parts += 1;
     }
+
+    const esc_pk_col = if (pk_col_name) |pkn| (utils.escapeIdentifier(allocator, pkn) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid pk column name\"}");
+        return;
+    }) else null;
 
     if (use_keyset) {
         if (after_cursor) |cursor| {
@@ -430,7 +400,7 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
                 sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                 return;
             };
-            try ww.print("\"{s}\" > '{s}'", .{ pk_col_name.?, esc_cursor });
+            try ww.print("\"{s}\" > '{s}'", .{ esc_pk_col.?, esc_cursor });
             where_parts += 1;
         } else if (before_cursor) |cursor| {
             if (where_parts > 0) try ww.writeAll(" AND ");
@@ -438,7 +408,7 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
                 sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
                 return;
             };
-            try ww.print("\"{s}\" < '{s}'", .{ pk_col_name.?, esc_cursor });
+            try ww.print("\"{s}\" < '{s}'", .{ esc_pk_col.?, esc_cursor });
             where_parts += 1;
         }
     }
@@ -452,22 +422,26 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         };
         try count_buf.writer(allocator).print("SELECT COALESCE(n_live_tup, 0)::text FROM pg_stat_user_tables WHERE relname = '{s}'", .{esc_count_tn});
     } else {
-        try count_buf.writer(allocator).print("SELECT COUNT(*)::text FROM \"{s}\"{s}", .{ table_name, where_clause });
+        try count_buf.writer(allocator).print("SELECT COUNT(*)::text FROM \"{s}\"{s}", .{ esc_table, where_clause });
     }
 
     var sql_list = std.ArrayList(u8){};
     const sw = sql_list.writer(allocator);
 
     if (use_keyset and before_cursor != null) {
-        try sw.print("SELECT {s} FROM \"{s}\"{s}", .{ select_cols, table_name, where_clause });
-        try sw.print(" ORDER BY \"{s}\" DESC", .{pk_col_name.?});
+        try sw.print("SELECT {s} FROM \"{s}\"{s}", .{ select_cols, esc_table, where_clause });
+        try sw.print(" ORDER BY \"{s}\" DESC", .{esc_pk_col.?});
         try sw.print(" LIMIT {d}", .{limit});
     } else if (sort_col) |col| {
-        try sw.print("SELECT {s} FROM \"{s}\"{s} ORDER BY \"{s}\" {s} LIMIT {d} OFFSET {d}", .{ select_cols, table_name, where_clause, col, sort_dir, limit, offset });
+        const esc_sort = utils.escapeIdentifier(allocator, col) catch {
+            sendJsonError(res, 400, "{\"error\":\"Invalid sort column\"}");
+            return;
+        };
+        try sw.print("SELECT {s} FROM \"{s}\"{s} ORDER BY \"{s}\" {s} LIMIT {d} OFFSET {d}", .{ select_cols, esc_table, where_clause, esc_sort, sort_dir, limit, offset });
     } else if (use_keyset) {
-        try sw.print("SELECT {s} FROM \"{s}\"{s} ORDER BY \"{s}\" ASC LIMIT {d}", .{ select_cols, table_name, where_clause, pk_col_name.?, limit });
+        try sw.print("SELECT {s} FROM \"{s}\"{s} ORDER BY \"{s}\" ASC LIMIT {d}", .{ select_cols, esc_table, where_clause, esc_pk_col.?, limit });
     } else {
-        try sw.print("SELECT {s} FROM \"{s}\"{s} LIMIT {d} OFFSET {d}", .{ select_cols, table_name, where_clause, limit, offset });
+        try sw.print("SELECT {s} FROM \"{s}\"{s} LIMIT {d} OFFSET {d}", .{ select_cols, esc_table, where_clause, limit, offset });
     }
 
     var count_result = postgres.runQuery(pool, allocator, count_buf.items) catch {
@@ -561,16 +535,6 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         }
     }
 
-    const escaped_value = utils.escapeStringValue(allocator, value) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-        return;
-    };
-
-    const escaped_pk = utils.escapeStringValue(allocator, pk_value) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-        return;
-    };
-
     var is_json_col = false;
     if (state.enhanced_schema) |etables| {
         for (etables) |et| {
@@ -587,21 +551,34 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
             }
         }
     }
-    const value_expr: []const u8 = if (is_json_col) "'::jsonb" else "'";
+    const cast_suffix: []const u8 = if (is_json_col) "::jsonb" else "";
+
+    const esc_upd_table = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
+        return;
+    };
+    const esc_upd_col = utils.escapeIdentifier(allocator, column_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid column name\"}");
+        return;
+    };
 
     var sql_buf = std.ArrayList(u8){};
     const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
-        try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}{s} WHERE ctid = '{s}'::tid RETURNING \"{s}\"", .{
-            table_name, column_name, escaped_value, value_expr, escaped_pk, column_name,
+        try w.print("UPDATE \"{s}\" SET \"{s}\" = $1{s} WHERE ctid = $2::tid RETURNING \"{s}\"", .{
+            esc_upd_table, esc_upd_col, cast_suffix, esc_upd_col,
         });
     } else {
-        try w.print("UPDATE \"{s}\" SET \"{s}\" = '{s}{s} WHERE \"{s}\" = '{s}' RETURNING \"{s}\"", .{
-            table_name, column_name, escaped_value, value_expr, pk_column, escaped_pk, column_name,
+        const esc_upd_pk = utils.escapeIdentifier(allocator, pk_column) catch {
+            sendJsonError(res, 400, "{\"error\":\"Invalid pk column name\"}");
+            return;
+        };
+        try w.print("UPDATE \"{s}\" SET \"{s}\" = $1{s} WHERE \"{s}\" = $2 RETURNING \"{s}\"", .{
+            esc_upd_table, esc_upd_col, cast_suffix, esc_upd_pk, esc_upd_col,
         });
     }
 
-    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+    var pg_result = postgres.runQueryParams(pool, allocator, sql_buf.items, .{ value, pk_value }) catch {
         sendJsonResponse(res, "{\"error\":\"Update query failed\"}");
         return;
     };
@@ -669,10 +646,14 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
 
-    const escaped_pk = utils.escapeStringValue(allocator, pk_value) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+    const esc_del_table = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
         return;
     };
+    const esc_del_pk = if (!is_ctid_mode) (utils.escapeIdentifier(allocator, pk_column) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid pk column name\"}");
+        return;
+    }) else "";
 
     // Fetch the row BEFORE deleting so we can record it in the journal
     var old_row_json: []const u8 = "";
@@ -680,16 +661,16 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         var sel_buf = std.ArrayList(u8){};
         const sel_w = sel_buf.writer(allocator);
         if (is_ctid_mode) {
-            sel_w.print("SELECT * FROM \"{s}\" WHERE ctid = '{s}'::tid LIMIT 1", .{ table_name, escaped_pk }) catch |err| {
+            sel_w.print("SELECT * FROM \"{s}\" WHERE ctid = $1::tid LIMIT 1", .{esc_del_table}) catch |err| {
                 log.warn("sel_buf write failed: {s}", .{@errorName(err)});
             };
         } else {
-            sel_w.print("SELECT * FROM \"{s}\" WHERE \"{s}\" = '{s}' LIMIT 1", .{ table_name, pk_column, escaped_pk }) catch |err| {
+            sel_w.print("SELECT * FROM \"{s}\" WHERE \"{s}\" = $1 LIMIT 1", .{ esc_del_table, esc_del_pk }) catch |err| {
                 log.warn("sel_buf write failed: {s}", .{@errorName(err)});
             };
         }
         if (sel_buf.items.len > 0) {
-            if (postgres.runQuery(pool, allocator, sel_buf.items)) |sel_res| {
+            if (postgres.runQueryParams(pool, allocator, sel_buf.items, .{pk_value})) |sel_res| {
                 var sel_result = sel_res;
                 defer sel_result.deinit();
                 if (sel_result.rows.len > 0) {
@@ -704,12 +685,12 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     var sql_buf = std.ArrayList(u8){};
     const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
-        try w.print("DELETE FROM \"{s}\" WHERE ctid = '{s}'::tid", .{ table_name, escaped_pk });
+        try w.print("DELETE FROM \"{s}\" WHERE ctid = $1::tid", .{esc_del_table});
     } else {
-        try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = '{s}'", .{ table_name, pk_column, escaped_pk });
+        try w.print("DELETE FROM \"{s}\" WHERE \"{s}\" = $1", .{ esc_del_table, esc_del_pk });
     }
 
-    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
+    var pg_result = postgres.runQueryParams(pool, allocator, sql_buf.items, .{pk_value}) catch {
         sendJsonResponse(res, "{\"error\":\"Delete query failed\"}");
         return;
     };
@@ -751,7 +732,7 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     }
 
-    const values = extractValuesFromJsonObject(allocator, obj);
+    const values = try extractValuesFromJsonObject(allocator, obj);
 
     if (values) |pairs| {
         const table_info = findTableInSchema(tables, table_name) orelse {
@@ -766,12 +747,17 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
 
+    const esc_ins_table = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
+        return;
+    };
+
     var sql_builder = std.ArrayList(u8){};
     const sw = sql_builder.writer(allocator);
 
     if (values) |pairs| {
         if (pairs.len > 0) {
-            try sw.print("INSERT INTO \"{s}\" (", .{table_name});
+            try sw.print("INSERT INTO \"{s}\" (", .{esc_ins_table});
             for (pairs, 0..) |pair, i| {
                 if (i > 0) try sw.writeAll(", ");
                 const esc_col = utils.escapeIdentifier(allocator, pair.key) catch {
@@ -795,10 +781,10 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
             }
             try sw.writeAll(") RETURNING *");
         } else {
-            try sw.print("INSERT INTO \"{s}\" DEFAULT VALUES RETURNING *", .{table_name});
+            try sw.print("INSERT INTO \"{s}\" DEFAULT VALUES RETURNING *", .{esc_ins_table});
         }
     } else {
-        try sw.print("INSERT INTO \"{s}\" DEFAULT VALUES RETURNING *", .{table_name});
+        try sw.print("INSERT INTO \"{s}\" DEFAULT VALUES RETURNING *", .{esc_ins_table});
     }
 
     var pg_result = postgres.runQuery(pool, allocator, sql_builder.items) catch {
@@ -816,32 +802,25 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         }
     }
 
-    var json_buf = std.ArrayList(u8){};
-    const jw = json_buf.writer(allocator);
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
 
-    try jw.writeAll("{\"success\":true,\"columns\":[");
-    for (pg_result.col_names, 0..) |name, i| {
-        if (i > 0) try jw.writeByte(',');
-        try jw.writeByte('"');
-        try utils.writeJsonEscaped(jw, name);
-        try jw.writeByte('"');
-    }
-    try jw.writeAll("],\"row\":[");
+    try s.beginObject();
+    try s.objectField("success");
+    try s.write(true);
+    try s.objectField("columns");
+    try s.write(pg_result.col_names);
+    try s.objectField("row");
+    try s.beginArray();
     if (pg_result.n_rows > 0) {
-        for (pg_result.rows[0], 0..) |val, ci| {
-            if (ci > 0) try jw.writeByte(',');
-            if (std.mem.eql(u8, val, "NULL")) {
-                try jw.writeAll("null");
-            } else {
-                try jw.writeByte('"');
-                try utils.writeJsonEscaped(jw, val);
-                try jw.writeByte('"');
-            }
+        for (pg_result.rows[0]) |val| {
+            try utils.writeSqlValue(s, val);
         }
     }
-    try jw.writeAll("]}");
+    try s.endArray();
+    try s.endObject();
 
-    sendJsonResponse(res, json_buf.items);
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -894,6 +873,15 @@ pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
         return;
     };
 
+    const esc_fk_table = utils.escapeIdentifier(allocator, target_table) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid FK table name\"}");
+        return;
+    };
+    const esc_fk_col = utils.escapeIdentifier(allocator, target_col) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid FK column name\"}");
+        return;
+    };
+
     var fk_limit: usize = 20;
     if (qs.get("limit")) |v| {
         fk_limit = std.fmt.parseInt(usize, v, 10) catch 20;
@@ -904,39 +892,38 @@ pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
     const sw = sql_buf.writer(allocator);
 
     if (search.len > 0) {
-        const esc_search = utils.escapeStringValue(allocator, search) catch {
-            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+        try sw.print("SELECT \"{s}\" FROM \"{s}\" WHERE \"{s}\"::text ILIKE '%' || $1 || '%' LIMIT {d}", .{ esc_fk_col, esc_fk_table, esc_fk_col, fk_limit });
+    } else {
+        try sw.print("SELECT \"{s}\" FROM \"{s}\" LIMIT {d}", .{ esc_fk_col, esc_fk_table, fk_limit });
+    }
+
+    var pg_result = if (search.len > 0)
+        postgres.runQueryParams(pool, allocator, sql_buf.items, .{search}) catch {
+            sendJsonResponse(res, "{\"error\":\"FK lookup query failed\"}");
+            return;
+        }
+    else
+        postgres.runQuery(pool, allocator, sql_buf.items) catch {
+            sendJsonResponse(res, "{\"error\":\"FK lookup query failed\"}");
             return;
         };
-        try sw.print("SELECT \"{s}\" FROM \"{s}\" WHERE \"{s}\"::text ILIKE '%{s}%' LIMIT {d}", .{ target_col, target_table, target_col, esc_search, fk_limit });
-    } else {
-        try sw.print("SELECT \"{s}\" FROM \"{s}\" LIMIT {d}", .{ target_col, target_table, fk_limit });
-    }
-
-    var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
-        sendJsonResponse(res, "{\"error\":\"FK lookup query failed\"}");
-        return;
-    };
     defer pg_result.deinit();
 
-    var json_buf = std.ArrayList(u8){};
-    const jw = json_buf.writer(allocator);
-    try jw.writeAll("{\"values\":[");
-    for (pg_result.rows, 0..) |row, ri| {
-        if (ri > 0) try jw.writeByte(',');
+    var jw = utils.JsonWriter.init(allocator);
+    const s = jw.writer();
+
+    try s.beginObject();
+    try s.objectField("values");
+    try s.beginArray();
+    for (pg_result.rows) |row| {
         if (row.len > 0) {
-            if (std.mem.eql(u8, row[0], "NULL")) {
-                try jw.writeAll("null");
-            } else {
-                try jw.writeByte('"');
-                try utils.writeJsonEscaped(jw, row[0]);
-                try jw.writeByte('"');
-            }
+            try utils.writeSqlValue(s, row[0]);
         }
     }
-    try jw.writeAll("]}");
+    try s.endArray();
+    try s.endObject();
 
-    sendJsonResponse(res, json_buf.items);
+    sendJsonResponse(res, try jw.toOwnedSlice());
 }
 
 pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -988,15 +975,19 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         return;
     }
 
-    const esc_find = utils.escapeStringValue(allocator, find_val) catch {
-        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
+    const esc_bulk_table = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
+        return;
+    };
+    const esc_bulk_col = utils.escapeIdentifier(allocator, column) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid column name\"}");
         return;
     };
 
     if (!force) {
         var cnt_sql = std.ArrayList(u8){};
-        try cnt_sql.writer(allocator).print("SELECT COUNT(*)::text FROM \"{s}\" WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_find });
-        var cnt_result = postgres.runQuery(pool, allocator, cnt_sql.items) catch {
+        try cnt_sql.writer(allocator).print("SELECT COUNT(*)::text FROM \"{s}\" WHERE \"{s}\"::text = $1", .{ esc_bulk_table, esc_bulk_col });
+        var cnt_result = postgres.runQueryParams(pool, allocator, cnt_sql.items, .{find_val}) catch {
             sendJsonResponse(res, "{\"error\":\"Count query failed\"}");
             return;
         };
@@ -1009,13 +1000,9 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         const resp = std.fmt.bufPrint(&resp_buf, "{{\"affected_rows\":{d},\"requires_confirmation\":true}}", .{affected}) catch "{\"error\":\"fmt\"}";
         sendJsonResponse(res, resp);
     } else {
-        const esc_replace = utils.escapeStringValue(allocator, replace_val) catch {
-            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
-            return;
-        };
         var upd_sql = std.ArrayList(u8){};
-        try upd_sql.writer(allocator).print("UPDATE \"{s}\" SET \"{s}\" = '{s}' WHERE \"{s}\"::text = '{s}'", .{ table_name, column, esc_replace, column, esc_find });
-        var upd_result = postgres.runQuery(pool, allocator, upd_sql.items) catch {
+        try upd_sql.writer(allocator).print("UPDATE \"{s}\" SET \"{s}\" = $1 WHERE \"{s}\"::text = $2", .{ esc_bulk_table, esc_bulk_col, esc_bulk_col });
+        var upd_result = postgres.runQueryParams(pool, allocator, upd_sql.items, .{ replace_val, find_val }) catch {
             sendJsonResponse(res, "{\"error\":\"Update query failed\"}");
             return;
         };
@@ -1057,8 +1044,12 @@ pub fn handleTruncateTable(handler: *web.Handler, req: *httpz.Request, res: *htt
         return;
     }
 
+    const esc_trunc_table = utils.escapeIdentifier(allocator, table_name) catch {
+        sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
+        return;
+    };
     var sql_buf = std.ArrayList(u8){};
-    try sql_buf.writer(allocator).print("TRUNCATE TABLE \"{s}\"", .{table_name});
+    try sql_buf.writer(allocator).print("TRUNCATE TABLE \"{s}\"", .{esc_trunc_table});
 
     var pg_result = postgres.runQuery(pool, allocator, sql_buf.items) catch {
         sendJsonResponse(res, "{\"error\":\"TRUNCATE failed\"}");
