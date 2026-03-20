@@ -12,6 +12,34 @@
             .url = "git+https://github.com/karlseguin/pg.zig?ref=master#e58b318b7867ef065b3135983f829219c5eef891",
             .hash = "pg-0.0.0-Wp_7gXFoBgD0fQ72WICKa-bxLga03AXXQ3BbIsjjohQ3",
         },
+        .zul = .{
+            .url = "git+https://github.com/karlseguin/zul?ref=master#e770047f208cf4538fcd9fc64550c84fd5492fc4",
+            .hash = "zul-0.0.0-1oDot9yRBwDA_ovd6GC1M_ViW3LarywMaGrH6vcuEjqv",
+        },
+        .@"zig-clap" = .{
+            .url = "git+https://github.com/Hejsil/zig-clap?ref=0.11.0#5289e0753cd274d65344bef1c114284c633536ea",
+            .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
+        },
+        .mecha = .{
+            .url = "git+https://github.com/Hejsil/mecha?ref=master#4ee15ea13107bc504a5c17291a7de1d3bf909a32",
+            .hash = "mecha-0.11.0-dVGaSNuLAQDk3kihQu0WAoRKEOaR1KUF7z55Mj33DQ6A",
+        },
+        .websocket = .{
+            .url = "git+https://github.com/karlseguin/websocket.zig?ref=master#97fefafa59cc78ce177cff540b8685cd7f699276",
+            .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
+        },
+        .cache = .{
+            .url = "git+https://github.com/karlseguin/cache.zig?ref=master#b8b04054bc56bac1026ad72487983a89e5b7f93c",
+            .hash = "cache-0.0.0-winRwGaTAABp4XWPw3uPq-zvkue-fQi0L5KxpyyJEePO",
+        },
+        .@"log.zig" = .{
+            .url = "git+https://github.com/karlseguin/log.zig?ref=master#b4a0b6b38d8fad1b94649046a967a700df5ce576",
+            .hash = "logz-0.0.0-O9YWXraFAgBQxWV4eh_4wp9axpoLhrzTIpYws4oxMLYh",
+        },
+        .validate = .{
+            .url = "git+https://github.com/karlseguin/validate.zig?ref=master#7fb2b8b6127f028f867b3ce5859af3ec5047141f",
+            .hash = "validate-0.0.0-33_V_fpSAwBXJJKzCBw-60vh8tHR7vf5i6Sr_UJgo2zK",
+        },
     },
     .paths = .{
         "build.zig",

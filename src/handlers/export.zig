@@ -15,6 +15,8 @@ const CsvParseError = error{
     EmptyCsv,
     NoDataRows,
     ColumnCountMismatch,
+    UnclosedQuote,
+    MalformedQuote,
     OutOfMemory,
 };
 
@@ -113,7 +115,11 @@ fn parseCsvContent(
         }
     }
 
-    var pos: usize = 0;
+    // Strip UTF-8 BOM (Excel/Google Sheets add this)
+    var pos: usize = if (csv.len >= 3 and csv[0] == 0xEF and csv[1] == 0xBB and csv[2] == 0xBF) 3 else 0;
+
+    var expected_fields: ?usize = null;
+
     while (pos < csv.len) {
         var check = pos;
         while (check < csv.len and (csv[check] == '\r' or csv[check] == '\n' or csv[check] == ' ')) check += 1;
@@ -132,6 +138,7 @@ fn parseCsvContent(
                 pos += 1;
                 var field_buf = std.ArrayList(u8){};
                 errdefer field_buf.deinit(allocator);
+                var closed = false;
                 while (pos < csv.len) {
                     if (csv[pos] == '"') {
                         if (pos + 1 < csv.len and csv[pos + 1] == '"') {
@@ -139,12 +146,18 @@ fn parseCsvContent(
                             pos += 2;
                         } else {
                             pos += 1;
+                            closed = true;
                             break;
                         }
                     } else {
                         field_buf.append(allocator, csv[pos]) catch return error.OutOfMemory;
                         pos += 1;
                     }
+                }
+                if (!closed) return error.UnclosedQuote;
+                // Validate: only comma, CR, LF, or EOF may follow a closing quote
+                if (pos < csv.len and csv[pos] != ',' and csv[pos] != '\r' and csv[pos] != '\n') {
+                    return error.MalformedQuote;
                 }
                 const owned = field_buf.toOwnedSlice(allocator) catch return error.OutOfMemory;
                 fields.append(allocator, owned) catch return error.OutOfMemory;
@@ -169,6 +182,12 @@ fn parseCsvContent(
         }
 
         if (fields.items.len > 0) {
+            // Validate consistent field count
+            if (expected_fields) |ef| {
+                if (fields.items.len != ef) return error.ColumnCountMismatch;
+            } else {
+                expected_fields = fields.items.len;
+            }
             const row_slice = fields.toOwnedSlice(allocator) catch return error.OutOfMemory;
             all_rows.append(allocator, row_slice) catch return error.OutOfMemory;
         } else {
@@ -215,7 +234,8 @@ fn buildAndExecuteInsert(
     w.writeAll(") VALUES (") catch return false;
     for (values, 0..) |val, i| {
         if (i > 0) w.writeAll(", ") catch return false;
-        if (val.len == 0) {
+        if (std.mem.eql(u8, val, "\\N")) {
+            // \N is PostgreSQL COPY convention for NULL
             w.writeAll("NULL") catch return false;
         } else {
             const escaped = utils.escapeStringValue(allocator, val) catch return false;
@@ -527,7 +547,9 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         const msg = switch (err) {
             error.EmptyCsv => "{\"error\":\"CSV content is empty\"}",
             error.NoDataRows => "{\"error\":\"CSV has no data rows\"}",
-            error.ColumnCountMismatch => "{\"error\":\"CSV column count mismatch\"}",
+            error.ColumnCountMismatch => "{\"error\":\"CSV rows have inconsistent column counts\"}",
+            error.UnclosedQuote => "{\"error\":\"CSV has an unclosed quoted field\"}",
+            error.MalformedQuote => "{\"error\":\"CSV has invalid characters after a closing quote\"}",
             error.OutOfMemory => "{\"error\":\"Out of memory parsing CSV\"}",
         };
         sendJsonError(res, 400, msg);

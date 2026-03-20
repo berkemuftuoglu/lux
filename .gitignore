@@ -23,7 +23,8 @@ docs/*
 .claude/
 .planning/
 
-# Playwright MCP
+# E2E tests
+e2e/
 .playwright-mcp/
 
 # OS
