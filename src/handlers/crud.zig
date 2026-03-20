@@ -1122,19 +1122,8 @@ test "validateCtid: rejects invalid formats" {
 }
 
 test "addJournalEntry: adds entry" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.change_journal.items) |entry| {
-            std.testing.allocator.free(entry.table_name);
-            std.testing.allocator.free(entry.operation);
-            std.testing.allocator.free(entry.column_name);
-            std.testing.allocator.free(entry.old_value);
-            std.testing.allocator.free(entry.new_value);
-            std.testing.allocator.free(entry.pk_column);
-            std.testing.allocator.free(entry.pk_value);
-        }
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     const id = try addJournalEntry(&state, "users", "update", "name", "old", "new", "id", "1");
     try std.testing.expectEqual(@as(u64, 1), id);
     try std.testing.expectEqual(@as(usize, 1), state.change_journal.items.len);

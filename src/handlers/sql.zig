@@ -481,15 +481,8 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
 }
 
 test "addHistoryEntry: adds to history" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.query_history.items) |entry| {
-            std.testing.allocator.free(entry.sql);
-            if (entry.error_msg) |e| std.testing.allocator.free(e);
-        }
-        state.query_history.deinit(std.testing.allocator);
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     addHistoryEntry(&state, "SELECT 1", 42, 1, false, null);
     try std.testing.expectEqual(@as(usize, 1), state.query_history.items.len);
     try std.testing.expectEqualStrings("SELECT 1", state.query_history.items[0].sql);
@@ -500,15 +493,8 @@ test "addHistoryEntry: adds to history" {
 }
 
 test "addHistoryEntry: records error" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.query_history.items) |entry| {
-            std.testing.allocator.free(entry.sql);
-            if (entry.error_msg) |e| std.testing.allocator.free(e);
-        }
-        state.query_history.deinit(std.testing.allocator);
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     addHistoryEntry(&state, "BAD SQL", 5, null, true, "syntax error");
     try std.testing.expectEqual(@as(usize, 1), state.query_history.items.len);
     try std.testing.expect(state.query_history.items[0].is_error);
@@ -517,15 +503,8 @@ test "addHistoryEntry: records error" {
 }
 
 test "addHistoryEntry: multiple entries" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.query_history.items) |entry| {
-            std.testing.allocator.free(entry.sql);
-            if (entry.error_msg) |e| std.testing.allocator.free(e);
-        }
-        state.query_history.deinit(std.testing.allocator);
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     addHistoryEntry(&state, "SELECT 1", 10, 1, false, null);
     addHistoryEntry(&state, "SELECT 2", 20, 2, false, null);
     addHistoryEntry(&state, "SELECT 3", 30, 3, false, null);
@@ -535,15 +514,8 @@ test "addHistoryEntry: multiple entries" {
 }
 
 test "addHistoryEntry: caps at max_history_entries" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.query_history.items) |entry| {
-            std.testing.allocator.free(entry.sql);
-            if (entry.error_msg) |e| std.testing.allocator.free(e);
-        }
-        state.query_history.deinit(std.testing.allocator);
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     var i: usize = 0;
     while (i < max_history_entries + 5) : (i += 1) {
         addHistoryEntry(&state, "SELECT 1", 1, 1, false, null);
@@ -552,29 +524,15 @@ test "addHistoryEntry: caps at max_history_entries" {
 }
 
 test "addHistoryEntry: error msg null when no error" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.query_history.items) |entry| {
-            std.testing.allocator.free(entry.sql);
-            if (entry.error_msg) |e| std.testing.allocator.free(e);
-        }
-        state.query_history.deinit(std.testing.allocator);
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     addHistoryEntry(&state, "SELECT 1", 0, 0, false, null);
     try std.testing.expect(state.query_history.items[0].error_msg == null);
 }
 
 test "addHistoryEntry: dupes sql string" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.query_history.items) |entry| {
-            std.testing.allocator.free(entry.sql);
-            if (entry.error_msg) |e| std.testing.allocator.free(e);
-        }
-        state.query_history.deinit(std.testing.allocator);
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     var buf: [10]u8 = undefined;
     @memcpy(buf[0..8], "SELECT 1");
     addHistoryEntry(&state, buf[0..8], 1, 1, false, null);
@@ -583,11 +541,8 @@ test "addHistoryEntry: dupes sql string" {
 }
 
 test "ServerState: history starts empty" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        state.query_history.deinit(std.testing.allocator);
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     try std.testing.expectEqual(@as(usize, 0), state.query_history.items.len);
 }
 
@@ -665,19 +620,8 @@ test "generateRollbackSql: CREATE INDEX generates DROP INDEX" {
 }
 
 test "handleJournal: serializes entries as JSON" {
-    var state = web.ServerState.init(std.testing.allocator);
-    defer {
-        for (state.change_journal.items) |entry| {
-            std.testing.allocator.free(entry.table_name);
-            std.testing.allocator.free(entry.operation);
-            std.testing.allocator.free(entry.column_name);
-            std.testing.allocator.free(entry.old_value);
-            std.testing.allocator.free(entry.new_value);
-            std.testing.allocator.free(entry.pk_column);
-            std.testing.allocator.free(entry.pk_value);
-        }
-        state.change_journal.deinit(std.testing.allocator);
-    }
+    var state = try web.ServerState.init(std.testing.allocator);
+    defer state.deinit();
     _ = crud.addJournalEntry(&state, "t1", "delete", "", "", "", "id", "5") catch 0;
     _ = crud.addJournalEntry(&state, "t2", "insert", "", "", "", "id", "10") catch 0;
     try std.testing.expectEqual(@as(usize, 2), state.change_journal.items.len);

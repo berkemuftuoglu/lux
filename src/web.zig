@@ -9,6 +9,8 @@ const crud = @import("crud");
 const schema_mod = @import("schema");
 const export_mod = @import("export");
 const sql_mod = @import("sql");
+const cache_mod = @import("cache");
+const logz = @import("logz");
 
 const log = std.log.scoped(.web);
 
@@ -27,20 +29,7 @@ fn readStaticFile(allocator: std.mem.Allocator, disk_path: []const u8, embedded:
 
 const static_files = .{
     .{ "/css/variables.css", "text/css", "src/static/css/variables.css", @embedFile("static/css/variables.css") },
-    .{ "/css/base.css", "text/css", "src/static/css/base.css", @embedFile("static/css/base.css") },
-    .{ "/css/layout.css", "text/css", "src/static/css/layout.css", @embedFile("static/css/layout.css") },
-    .{ "/css/sidebar.css", "text/css", "src/static/css/sidebar.css", @embedFile("static/css/sidebar.css") },
-    .{ "/css/toolbar.css", "text/css", "src/static/css/toolbar.css", @embedFile("static/css/toolbar.css") },
-    .{ "/css/grid.css", "text/css", "src/static/css/grid.css", @embedFile("static/css/grid.css") },
-    .{ "/css/pagination.css", "text/css", "src/static/css/pagination.css", @embedFile("static/css/pagination.css") },
-    .{ "/css/sql-editor.css", "text/css", "src/static/css/sql-editor.css", @embedFile("static/css/sql-editor.css") },
-    .{ "/css/er-diagram.css", "text/css", "src/static/css/er-diagram.css", @embedFile("static/css/er-diagram.css") },
-    .{ "/css/journal.css", "text/css", "src/static/css/journal.css", @embedFile("static/css/journal.css") },
-    .{ "/css/status-bar.css", "text/css", "src/static/css/status-bar.css", @embedFile("static/css/status-bar.css") },
-    .{ "/css/modals.css", "text/css", "src/static/css/modals.css", @embedFile("static/css/modals.css") },
-    .{ "/css/toast.css", "text/css", "src/static/css/toast.css", @embedFile("static/css/toast.css") },
-    .{ "/css/overlays.css", "text/css", "src/static/css/overlays.css", @embedFile("static/css/overlays.css") },
-    .{ "/css/utilities.css", "text/css", "src/static/css/utilities.css", @embedFile("static/css/utilities.css") },
+    .{ "/css/styles.css", "text/css", "src/static/css/styles.css", @embedFile("static/css/styles.css") },
     .{ "/js/state.js", "application/javascript", "src/static/js/state.js", @embedFile("static/js/state.js") },
     .{ "/js/utils.js", "application/javascript", "src/static/js/utils.js", @embedFile("static/js/utils.js") },
     .{ "/js/connection.js", "application/javascript", "src/static/js/connection.js", @embedFile("static/js/connection.js") },
@@ -124,7 +113,6 @@ pub const ServerState = struct {
     pool: ?*pg.Pool = null,
     conninfo_uri: ?[]const u8 = null,
     schema_tables: ?[]postgres.TableInfo = null,
-    schema_text: ?[]u8 = null,
     schema_arena: ?std.heap.ArenaAllocator = null,
     enhanced_schema: ?[]postgres.EnhancedTableInfo = null,
     enhanced_arena: ?std.heap.ArenaAllocator = null,
@@ -136,23 +124,39 @@ pub const ServerState = struct {
     next_connection_id: u64 = 1,
     /// Stored for CSRF origin checks, not for binding.
     port: u16 = 8080,
+    schema_cache: cache_mod.Cache([]u8),
+    ws_clients: std.ArrayList(*httpz.websocket.Conn),
+    ws_mutex: std.Thread.Mutex,
 
-    pub fn init(allocator: std.mem.Allocator) ServerState {
+    pub fn init(allocator: std.mem.Allocator) !ServerState {
+        const sc = try cache_mod.Cache([]u8).init(allocator, .{ .max_size = 10, .segment_count = 1 });
         return .{
             .allocator = allocator,
             .change_journal = .{},
             .query_history = .{},
+            .schema_cache = sc,
+            .ws_clients = .{},
+            .ws_mutex = .{},
         };
     }
 
     pub fn create(allocator: std.mem.Allocator) !*ServerState {
         const self = try allocator.create(ServerState);
-        self.* = init(allocator);
+        self.* = try init(allocator);
         return self;
     }
 
     pub fn hasDbConnection(self: *const ServerState) bool {
         return self.pool != null;
+    }
+
+    /// Broadcast a message to all connected WebSocket clients.
+    pub fn broadcastAll(self: *ServerState, msg: []const u8) void {
+        self.ws_mutex.lock();
+        defer self.ws_mutex.unlock();
+        for (self.ws_clients.items) |conn| {
+            conn.write(msg) catch {};
+        }
     }
 
     pub fn deinit(self: *ServerState) void {
@@ -173,10 +177,11 @@ pub const ServerState = struct {
         self.query_history.deinit(self.allocator);
         if (self.pool) |p| p.deinit();
         if (self.conninfo_uri) |old| self.allocator.free(@constCast(old));
-        if (self.schema_text) |old| self.allocator.free(old);
         if (self.schema_arena) |*a| a.deinit();
         if (self.enhanced_arena) |*a| a.deinit();
         if (self.last_conninfo) |old| self.allocator.free(@constCast(old));
+        self.schema_cache.deinit();
+        self.ws_clients.deinit(self.allocator);
         self.* = undefined;
     }
 
@@ -190,6 +195,8 @@ pub const ServerState = struct {
 
 pub const Handler = struct {
     state: *ServerState,
+
+    pub const WebsocketHandler = WsClient;
 
     /// CSRF: block cross-origin POST/DELETE
     pub fn dispatch(self: *Handler, action: httpz.Action(*Handler), req: *httpz.Request, res: *httpz.Response) !void {
@@ -219,6 +226,31 @@ pub const Handler = struct {
         res.body = status_and_body[1];
     }
 };
+
+pub const WsClient = struct {
+    conn: *httpz.websocket.Conn,
+
+    pub fn init(conn: *httpz.websocket.Conn, _: *const void) !WsClient {
+        return .{ .conn = conn };
+    }
+
+    pub fn afterInit(self: *WsClient) !void {
+        try self.conn.write("{\"type\":\"connected\"}");
+    }
+
+    pub fn clientMessage(_: *WsClient, _: []const u8) !void {}
+
+    pub fn close(_: *WsClient) void {}
+};
+
+fn handleWs(_: *Handler, req: *httpz.Request, res: *httpz.Response) !void {
+    const ctx: void = {};
+    if (try httpz.upgradeWebsocket(WsClient, req, res, &ctx) == false) {
+        res.status = 400;
+        res.body = "invalid websocket upgrade";
+    }
+    // Do NOT use req or res after this point
+}
 
 fn mapHandlerError(err: anyerror) struct { u16, []const u8 } {
     return switch (err) {
@@ -341,6 +373,9 @@ pub fn serve(state: *ServerState, port: u16, bind_addr: []const u8) !void {
         router.get(entry[0], serveStaticFile, .{});
     }
 
+    // WebSocket upgrade endpoint
+    router.get("/ws", handleWs, .{});
+
     // API routes (exact match)
     router.get("/api/schema", schema_mod.handleSchema, .{});
     router.get("/api/settings/read-only", schema_mod.handleReadOnlyGet, .{});
@@ -388,9 +423,9 @@ pub fn serve(state: *ServerState, port: u16, bind_addr: []const u8) !void {
 }
 
 test "ServerState: init defaults" {
-    const state = ServerState.init(std.testing.allocator);
+    var state = try ServerState.init(std.testing.allocator);
+    defer state.deinit();
     try std.testing.expect(!state.hasDbConnection());
-    try std.testing.expect(state.schema_text == null);
     try std.testing.expect(!state.flags.read_only);
 }
 
@@ -407,7 +442,8 @@ test "ServerState.Flags: default is all false" {
 }
 
 test "ServerState: flags.read_only works like old read_only" {
-    var state = ServerState.init(std.testing.allocator);
+    var state = try ServerState.init(std.testing.allocator);
+    defer state.deinit();
     try std.testing.expect(!state.flags.read_only);
     state.flags.read_only = true;
     try std.testing.expect(state.flags.read_only);
@@ -456,12 +492,34 @@ test "ServerState: create returns heap-allocated state" {
 }
 
 test "ServerState: deinit cleans up empty state without crash" {
-    var state = ServerState.init(std.testing.allocator);
+    var state = try ServerState.init(std.testing.allocator);
     state.deinit();
 }
 
-test "static_files tuple: has 30 JS/CSS entries" {
-    try std.testing.expectEqual(@as(usize, 30), static_files.len);
+test "ServerState: schema_cache put and get round-trip" {
+    var state = try ServerState.init(std.testing.allocator);
+    defer state.deinit();
+    // Use a string literal — no heap allocation needed; cache stores the slice reference
+    const val: []u8 = @constCast("hello schema");
+    try state.schema_cache.put("schema", val, .{ .ttl = 30 });
+    const entry = state.schema_cache.get("schema") orelse return error.CacheMiss;
+    defer entry.release();
+    try std.testing.expectEqualStrings("hello schema", entry.value);
+}
+
+test "ServerState: schema_cache del makes get return null" {
+    var state = try ServerState.init(std.testing.allocator);
+    defer state.deinit();
+    const val: []u8 = @constCast("data");
+    try state.schema_cache.put("schema", val, .{ .ttl = 30 });
+    _ = state.schema_cache.del("schema");
+    const entry = state.schema_cache.get("schema");
+    try std.testing.expect(entry == null);
+}
+
+test "static_files tuple: has 17 JS/CSS entries" {
+    // 2 CSS (variables.css + styles.css consolidated) + 15 JS files
+    try std.testing.expectEqual(@as(usize, 17), static_files.len);
 }
 
 comptime {

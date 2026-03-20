@@ -12,6 +12,34 @@ pub fn build(b: *std.Build) void {
     const pg_dep = b.dependency("pg", .{ .target = target, .optimize = optimize });
     const mod_pg = pg_dep.module("pg");
 
+    // --- zig-clap dependency ---
+    const clap_dep = b.dependency("zig-clap", .{ .target = target, .optimize = optimize });
+    const mod_clap = clap_dep.module("clap");
+
+    // --- zul dependency ---
+    const zul_dep = b.dependency("zul", .{ .target = target, .optimize = optimize });
+    const mod_zul = zul_dep.module("zul");
+
+    // --- mecha dependency ---
+    const mecha_dep = b.dependency("mecha", .{ .target = target, .optimize = optimize });
+    _ = mecha_dep.module("mecha");
+
+    // --- websocket dependency ---
+    const websocket_dep = b.dependency("websocket", .{ .target = target, .optimize = optimize });
+    const mod_websocket = websocket_dep.module("websocket");
+
+    // --- cache dependency ---
+    const cache_dep = b.dependency("cache", .{ .target = target, .optimize = optimize });
+    const mod_cache = cache_dep.module("cache");
+
+    // --- log.zig dependency ---
+    const logzig_dep = b.dependency("log.zig", .{ .target = target, .optimize = optimize });
+    const mod_logz = logzig_dep.module("logz");
+
+    // --- validate dependency ---
+    const validate_dep = b.dependency("validate", .{ .target = target, .optimize = optimize });
+    const mod_validate = validate_dep.module("validate");
+
     // --- Named modules (cross-directory imports) ---
     const mod_utils = b.createModule(.{
         .root_source_file = b.path("src/lib/utils.zig"),
@@ -24,6 +52,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     mod_sql_guard.addImport("utils", mod_utils);
+    const mod_html_writer = b.createModule(.{
+        .root_source_file = b.path("src/lib/html_writer.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const mod_postgres = b.createModule(.{
         .root_source_file = b.path("src/server/postgres.zig"),
         .target = target,
@@ -78,6 +111,15 @@ pub fn build(b: *std.Build) void {
     mod_export.addImport("pg", mod_pg);
     mod_schema.addImport("pg", mod_pg);
 
+    // Wire new deps to their target modules
+    mod_web.addImport("cache", mod_cache);
+    mod_web.addImport("logz", mod_logz);
+    mod_web.addImport("websocket", mod_websocket);
+    mod_web.addImport("zul", mod_zul);
+    mod_main.addImport("logz", mod_logz);
+    mod_html_writer.addImport("zul", mod_zul);
+    mod_crud.addImport("validate", mod_validate);
+
     // Wire module dependencies
     mod_crud.addImport("postgres", mod_postgres);
     mod_crud.addImport("utils", mod_utils);
@@ -107,6 +149,7 @@ pub fn build(b: *std.Build) void {
     mod_web.addImport("sql", mod_sql);
 
     mod_main.addImport("web", mod_web);
+    mod_main.addImport("clap", mod_clap);
 
     // --- Main executable ---
     const exe = b.addExecutable(.{
@@ -131,6 +174,7 @@ pub fn build(b: *std.Build) void {
     addTestMod(b, test_step, mod_postgres);
     addTestMod(b, test_step, mod_utils);
     addTestMod(b, test_step, mod_sql_guard);
+    addTestMod(b, test_step, mod_html_writer);
     addTestMod(b, test_step, mod_crud);
     addTestMod(b, test_step, mod_schema);
     addTestMod(b, test_step, mod_export);

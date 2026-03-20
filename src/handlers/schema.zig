@@ -87,8 +87,7 @@ fn freeSchemaState(state: *web.ServerState) void {
     state.pool = null;
     if (state.conninfo_uri) |old| allocator.free(@constCast(old));
     state.conninfo_uri = null;
-    if (state.schema_text) |old| allocator.free(old);
-    state.schema_text = null;
+    _ = state.schema_cache.del("schema");
     state.schema_tables = null;
     if (state.schema_arena) |*a| a.deinit();
     state.schema_arena = null;
@@ -198,7 +197,7 @@ pub fn handleConnect(handler: *web.Handler, req: *httpz.Request, res: *httpz.Res
     state.conninfo_uri = allocator.dupe(u8, conninfo_str) catch null;
     if (state.last_conninfo) |old_ci| allocator.free(@constCast(old_ci));
     state.last_conninfo = allocator.dupe(u8, conninfo_str) catch null;
-    state.schema_text = schema_text;
+    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch {};
     state.schema_tables = schema.tables;
     state.schema_arena = schema.arena;
     if (enhanced) |*es| {
@@ -235,6 +234,13 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
     const arena = res.arena;
     const pool = state.pool.?;
 
+    // Check schema cache first -- avoids redundant DB round-trips within the TTL window
+    if (state.schema_cache.get("schema")) |entry| {
+        defer entry.release();
+        sendJsonResponse(res, entry.value);
+        return;
+    }
+
     // Fall back to cached data if re-fetch fails
     refresh: {
         var schema = postgres.fetchSchema(pool, allocator) catch break :refresh;
@@ -253,7 +259,7 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
         state.pool = saved_pool;
         state.conninfo_uri = saved_uri;
 
-        state.schema_text = new_text;
+        state.schema_cache.put("schema", new_text, .{ .ttl = 30 }) catch {};
         state.schema_tables = schema.tables;
         state.schema_arena = schema.arena;
         if (enhanced) |*es| {
@@ -374,7 +380,7 @@ pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Res
     freeSchemaState(state);
     state.pool = pool;
     state.conninfo_uri = allocator.dupe(u8, last_ci) catch null;
-    state.schema_text = schema_text;
+    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch {};
     state.schema_tables = schema.tables;
     state.schema_arena = schema.arena;
     if (enhanced) |*es| {
