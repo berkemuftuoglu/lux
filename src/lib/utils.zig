@@ -104,6 +104,7 @@ pub const JsonWriter = struct {
     pub fn init(allocator: std.mem.Allocator) JsonWriter {
         return .{
             .aw = .init(allocator),
+            // SAFETY: jw is initialized via writer() before first use, which wires it to aw
             .jw = undefined,
         };
     }

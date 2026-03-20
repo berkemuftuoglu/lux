@@ -22,13 +22,13 @@ pub fn main() !void {
         .diagnostic = &diag,
         .allocator = std.heap.page_allocator,
     }) catch |err| {
-        diag.reportToFile(.stderr(), err) catch {};
+        diag.reportToFile(.stderr(), err) catch |write_err| log.err("failed to report diagnostic: {s}", .{@errorName(write_err)});
         std.process.exit(1);
     };
     defer res.deinit();
 
     if (res.args.help != 0) {
-        clap.helpToFile(.stdout(), clap.Help, &params, .{}) catch {};
+        clap.helpToFile(.stdout(), clap.Help, &params, .{}) catch |err| log.err("failed to print help: {s}", .{@errorName(err)});
         return;
     }
 
