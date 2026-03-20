@@ -537,7 +537,6 @@ test "static_files tuple: has 17 JS/CSS entries" {
     try std.testing.expectEqual(@as(usize, 17), static_files.len);
 }
 
-
 comptime {
     std.testing.refAllDeclsRecursive(@This());
 }

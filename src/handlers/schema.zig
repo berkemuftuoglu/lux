@@ -197,7 +197,7 @@ pub fn handleConnect(handler: *web.Handler, req: *httpz.Request, res: *httpz.Res
     state.conninfo_uri = allocator.dupe(u8, conninfo_str) catch null;
     if (state.last_conninfo) |old_ci| allocator.free(@constCast(old_ci));
     state.last_conninfo = allocator.dupe(u8, conninfo_str) catch null;
-    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch {};
+    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch |err| log.warn("schema cache put failed: {s}", .{@errorName(err)});
     state.schema_tables = schema.tables;
     state.schema_arena = schema.arena;
     if (enhanced) |*es| {
@@ -259,7 +259,7 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
         state.pool = saved_pool;
         state.conninfo_uri = saved_uri;
 
-        state.schema_cache.put("schema", new_text, .{ .ttl = 30 }) catch {};
+        state.schema_cache.put("schema", new_text, .{ .ttl = 30 }) catch |err| log.warn("schema cache put failed: {s}", .{@errorName(err)});
         state.schema_tables = schema.tables;
         state.schema_arena = schema.arena;
         if (enhanced) |*es| {
@@ -380,7 +380,7 @@ pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Res
     freeSchemaState(state);
     state.pool = pool;
     state.conninfo_uri = allocator.dupe(u8, last_ci) catch null;
-    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch {};
+    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch |err| log.warn("schema cache put failed: {s}", .{@errorName(err)});
     state.schema_tables = schema.tables;
     state.schema_arena = schema.arena;
     if (enhanced) |*es| {
