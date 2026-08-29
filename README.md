@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/01-grid.png" alt="Lux table browser: schema tree, data grid, 1,247 rows" width="900" />
+  <img src="docs/screenshots/demo.gif" alt="Connecting to a database, browsing a table, sorting a column and running a query in Lux" width="900" />
 </p>
 
 ## Why Lux?
@@ -26,9 +26,12 @@ Lux compiles to a **~1.4 MB binary** (ReleaseSmall) that serves a full web UI fr
 No Electron, no Python, and no PostgreSQL client library: the wire protocol is spoken in
 pure Zig, so `ldd` shows nothing but libc. Download it and run it.
 
+<p align="center">
+  <img src="docs/size-comparison.svg" alt="Binary size: Lux 1.4 MB versus TablePlus 90 MB, DBeaver 115 MB, Beekeeper Studio 160 MB, pgAdmin 200 MB" width="760" />
+</p>
+
 | | Lux | pgAdmin | DBeaver | TablePlus | Beekeeper Studio |
 |---|---|---|---|---|---|
-| **Binary size** | ~1.4 MB | ~200 MB | ~115 MB | ~90 MB | ~160 MB |
 | **Price** | Free (MIT) | Free | Free / $12/mo | $89 | Free / $7/mo |
 | **Runtime deps** | None (libc) | Python, JS | JVM | None | Electron |
 | **Privacy** | Fully local | Local | Telemetry | License check | Telemetry |
@@ -39,6 +42,10 @@ pending-edit journal, command palette, dark/light themes, read-only mode.
 <summary><b>More screenshots</b></summary>
 
 <br />
+
+**Table browser** — schema tree, 1,247 rows, typed column alignment.
+
+<img src="docs/screenshots/01-grid.png" alt="Lux table browser showing the employees table" width="900" />
 
 **SQL editor** — CodeMirror 6 with autocomplete, results inline.
 
@@ -56,50 +63,30 @@ pending-edit journal, command palette, dark/light themes, read-only mode.
 
 ## Install
 
-### Download (recommended)
-
-Grab the binary for your platform from the [latest release](https://github.com/berkemuftuoglu/lux/releases/latest):
-
-| OS | Architecture | Artifact |
-|---|---|---|
-| Linux | x86_64 | `lux-v0.1.0-linux-x86_64` |
-| Linux | ARM64 | `lux-v0.1.0-linux-aarch64` |
-| macOS | Intel | `lux-v0.1.0-macos-x86_64` |
-| macOS | Apple Silicon | `lux-v0.1.0-macos-aarch64` |
-| Windows | x86_64 | `lux-v0.1.0-windows-x86_64.exe` |
-
-**Linux / macOS:**
+Download the binary for your platform from the
+[latest release](https://github.com/berkemuftuoglu/lux/releases/latest), make it
+executable, and run it:
 
 ```bash
-chmod +x lux-v0.1.0-* && ./lux-v0.1.0-*
+chmod +x lux-* && ./lux-*
 ```
 
-**Windows (PowerShell):**
+Then open <http://127.0.0.1:8080>.
 
-```powershell
-.\lux-v0.1.0-windows-x86_64.exe
+There is nothing else to install — no libpq, no runtime, no client library.
+
+```
+./lux              # default: 127.0.0.1:8080
+./lux -p 3000      # custom port
+./lux -b 0.0.0.0   # bind all interfaces
 ```
 
-Then open <http://127.0.0.1:8080> and connect from the UI.
+Works with any PostgreSQL — local, remote, or cloud (RDS, Supabase, Neon).
 
-There is nothing else to install. Lux talks to PostgreSQL over the wire protocol in
-pure Zig, so there is no libpq to install and no client library to keep in sync.
+<details>
+<summary>Build from source</summary>
 
-#### First-run friction (unsigned binaries)
-
-v0.1.0 binaries are not code-signed yet (Apple Developer ID and Windows EV certificates are tracked for a later release). One-time workaround per OS:
-
-- **macOS** — Gatekeeper will refuse to open the binary. Run once:
-  ```bash
-  xattr -d com.apple.quarantine ./lux-v0.1.0-macos-*
-  ```
-  After that, double-click or `./lux-...` works normally.
-
-- **Windows** — SmartScreen shows "Windows protected your PC". Click **More info** → **Run anyway**.
-
-- **Linux** — No friction. Binary runs after `chmod +x`.
-
-### Build from source
+<br />
 
 Requires [Zig 0.15.2+](https://ziglang.org/download/). No system libraries, no headers.
 
@@ -110,25 +97,34 @@ zig build -Doptimize=ReleaseSmall
 ./zig-out/bin/lux
 ```
 
-Use `-Doptimize=ReleaseSafe` instead for a development build with safety checks (larger: ~6 MB vs ~1.4 MB).
+`-Doptimize=ReleaseSafe` gives a build with safety checks (~6 MB vs ~1.4 MB).
 
-### Docker
+</details>
+
+<details>
+<summary>Docker</summary>
+
+<br />
 
 ```bash
 docker build -t lux .
 docker run -p 8080:8080 lux
 ```
 
-### Options
+</details>
 
-```
-./lux                          # start and connect from the UI
-./lux --pg "postgresql://..."  # auto-connect on startup
-./lux -p 3000                  # custom port (default: 8080)
-./lux -b 0.0.0.0               # bind to all interfaces (default: 127.0.0.1)
-```
+<details>
+<summary>Unsigned binaries — first-run friction on macOS and Windows</summary>
 
-Works with any PostgreSQL — local, remote, or cloud (RDS, Supabase, Neon).
+<br />
+
+Binaries are not code-signed yet. One-time workaround:
+
+- **macOS** — Gatekeeper refuses to open it. Run `xattr -d com.apple.quarantine ./lux-*` once.
+- **Windows** — SmartScreen shows "Windows protected your PC". Click **More info** → **Run anyway**.
+- **Linux** — none; it runs after `chmod +x`.
+
+</details>
 
 ## Contributing
 
