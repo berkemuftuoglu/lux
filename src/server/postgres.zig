@@ -1,5 +1,6 @@
 const std = @import("std");
 const pg = @import("pg");
+const pg_decode = @import("pg_decode");
 
 const log = std.log.scoped(.postgres);
 
@@ -163,9 +164,28 @@ pub fn runQueryOnConn(conn: *pg.Conn, backing: std.mem.Allocator, sql: []const u
 }
 
 pub fn runQueryParams(pool: *pg.Pool, backing: std.mem.Allocator, sql: []const u8, params: anytype) PgError!QueryResult {
+    return runQueryParamsReporting(pool, backing, sql, params, null);
+}
+
+/// As `runQueryParams`, but on a server-side failure copies PostgreSQL's own
+/// message into `err_out` (allocated from `backing`) so the handler can tell the
+/// user *why* the statement was rejected. Without this the message is logged and
+/// discarded, and the caller can only report a generic failure.
+pub fn runQueryParamsReporting(
+    pool: *pg.Pool,
+    backing: std.mem.Allocator,
+    sql: []const u8,
+    params: anytype,
+    err_out: ?*?[]const u8,
+) PgError!QueryResult {
     var conn = pool.acquire() catch return error.ConnectionFailed;
     defer conn.release();
-    return runQueryOnConnParams(conn, backing, sql, params);
+    return runQueryOnConnParams(conn, backing, sql, params) catch |err| {
+        if (err_out) |slot| {
+            if (conn.err) |pge| slot.* = backing.dupe(u8, pge.message) catch null;
+        }
+        return err;
+    };
 }
 
 pub fn runQueryOnConnParams(conn: *pg.Conn, backing: std.mem.Allocator, sql: []const u8, params: anytype) PgError!QueryResult {
@@ -216,6 +236,27 @@ pub fn connErrorFields(conn: *pg.Conn) PgErrorFields {
     return .{ .severity = null, .code = null, .message = null, .detail = null, .hint = null };
 }
 
+/// Decode a row's raw column bytes into text using each column's OID.
+/// NULL columns retain the legacy "NULL" sentinel string.
+/// Returned slices are arena-allocated.
+pub fn decodeRow(
+    arena: std.mem.Allocator,
+    col_oids: []const i32,
+    raw_cols: []const ?[]const u8,
+) PgError![][]const u8 {
+    const out = arena.alloc([]const u8, raw_cols.len) catch return error.OutOfMemory;
+    for (raw_cols, 0..) |maybe_raw, i| {
+        if (maybe_raw) |raw| {
+            // pg.zig stores OIDs as i32; cast to u32 for decodeColumnByOid.
+            const col_oid: u32 = if (i < col_oids.len) @intCast(@max(0, col_oids[i])) else 0;
+            out[i] = pg_decode.decodeColumnByOid(arena, col_oid, raw) catch return error.OutOfMemory;
+        } else {
+            out[i] = "NULL";
+        }
+    }
+    return out;
+}
+
 fn extractResult(backing: std.mem.Allocator, result: *pg.Result) PgError!QueryResult {
     var arena = std.heap.ArenaAllocator.init(backing);
     errdefer arena.deinit();
@@ -230,21 +271,19 @@ fn extractResult(backing: std.mem.Allocator, result: *pg.Result) PgError!QueryRe
 
     var rows_list = std.ArrayList([][]const u8){};
 
+    // pg.zig stores column OIDs as _oids: []i32 on the Result.
+    const col_oids = result._oids;
+
+    // Scratch buffer for raw column slices — sized once, reused across rows.
+    const scratch = alloc.alloc(?[]const u8, n_cols) catch return error.OutOfMemory;
+
     while (true) {
         const maybe_row = result.next() catch return error.QueryFailed;
         const row = maybe_row orelse break;
-
-        const row_data = alloc.alloc([]const u8, n_cols) catch return error.OutOfMemory;
         for (0..n_cols) |col_idx| {
-            // BUG: a column containing the literal text "NULL" becomes JSON null.
-            // Fixing requires changing rows to [][]?[]const u8 (~50 call sites).
-            const maybe_val: ?[]const u8 = row.get(?[]const u8, col_idx) catch null;
-            if (maybe_val) |val| {
-                row_data[col_idx] = alloc.dupe(u8, val) catch return error.OutOfMemory;
-            } else {
-                row_data[col_idx] = "NULL";
-            }
+            scratch[col_idx] = row.get(?[]const u8, col_idx) catch null;
         }
+        const row_data = decodeRow(alloc, col_oids, scratch) catch return error.OutOfMemory;
         rows_list.append(alloc, row_data) catch return error.OutOfMemory;
     }
 
@@ -268,7 +307,8 @@ pub fn fetchSchema(pool: *pg.Pool, backing: std.mem.Allocator) PgError!SchemaInf
     var conn = pool.acquire() catch return error.ConnectionFailed;
     defer conn.release();
 
-    var result = conn.queryOpts(sql, .{}, .{ .column_names = true }) catch return error.QueryFailed;
+    // Cached on the connection: schema_fetch runs on every connect + Refresh.
+    var result = conn.queryOpts(sql, .{}, .{ .column_names = true, .cache_name = "schema_fetch" }) catch return error.QueryFailed;
     defer result.deinit();
 
     var arena = std.heap.ArenaAllocator.init(backing);
@@ -330,7 +370,7 @@ pub fn fetchEnhancedSchema(pool: *pg.Pool, backing: std.mem.Allocator) PgError!E
         ") pk ON c.table_name = pk.table_name AND c.column_name = pk.column_name " ++
         "WHERE c.table_schema = 'public' ORDER BY c.table_name, c.ordinal_position";
 
-    var col_result = conn.queryOpts(col_sql, .{}, .{}) catch return error.QueryFailed;
+    var col_result = conn.queryOpts(col_sql, .{}, .{ .cache_name = "enhanced_schema_cols" }) catch return error.QueryFailed;
     defer col_result.deinit();
 
     // Read column data into temp arena
@@ -360,7 +400,7 @@ pub fn fetchEnhancedSchema(pool: *pg.Pool, backing: std.mem.Allocator) PgError!E
         "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public'";
 
     var fk_list = std.ArrayList(FkRowData){};
-    if (conn.queryOpts(fk_sql, .{}, .{})) |fk_result| {
+    if (conn.queryOpts(fk_sql, .{}, .{ .cache_name = "enhanced_schema_fks" })) |fk_result| {
         defer fk_result.deinit();
         while (true) {
             const maybe_row = fk_result.next() catch break;
@@ -382,7 +422,7 @@ pub fn fetchEnhancedSchema(pool: *pg.Pool, backing: std.mem.Allocator) PgError!E
         "WHERE n.nspname = 'public' ORDER BY cc.relname, a.attname, e.enumsortorder";
 
     var enum_list = std.ArrayList(EnumRowData){};
-    if (conn.queryOpts(enum_sql, .{}, .{})) |enum_result| {
+    if (conn.queryOpts(enum_sql, .{}, .{ .cache_name = "enhanced_schema_enums" })) |enum_result| {
         defer enum_result.deinit();
         while (true) {
             const maybe_row = enum_result.next() catch break;
@@ -622,6 +662,81 @@ test "PgErrorFields: has required optional fields" {
     try std.testing.expectEqualStrings("relation does not exist", fields.message.?);
     try std.testing.expect(fields.detail == null);
     try std.testing.expect(fields.hint == null);
+}
+
+test "decodeRow: int4 column decodes to text" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const oids = [_]i32{23}; // int4
+    const cols = [_]?[]const u8{&[_]u8{ 0, 0, 0, 42 }};
+    const out = try decodeRow(arena.allocator(), &oids, &cols);
+    try std.testing.expectEqual(@as(usize, 1), out.len);
+    try std.testing.expectEqualStrings("42", out[0]);
+}
+
+test "decodeRow: NULL column keeps NULL sentinel" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const oids = [_]i32{23};
+    const cols = [_]?[]const u8{null};
+    const out = try decodeRow(arena.allocator(), &oids, &cols);
+    try std.testing.expectEqualStrings("NULL", out[0]);
+}
+
+test "decodeRow: bool column decodes to t/f" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const oids = [_]i32{16};
+    const cols = [_]?[]const u8{&[_]u8{0x01}};
+    const out = try decodeRow(arena.allocator(), &oids, &cols);
+    try std.testing.expectEqualStrings("t", out[0]);
+}
+
+test "decodeRow: unknown OID returns placeholder, never panics" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const oids = [_]i32{99999};
+    const cols = [_]?[]const u8{&[_]u8{0xFF}};
+    const out = try decodeRow(arena.allocator(), &oids, &cols);
+    try std.testing.expect(std.mem.startsWith(u8, out[0], "?[OID="));
+}
+
+test "fetchSchema cache_name idempotent across repeated calls" {
+    const test_url = std.posix.getenv("PG_TEST_URL") orelse return error.SkipZigTest;
+    var pool = try initPool(std.testing.allocator, test_url);
+    defer pool.deinit();
+
+    var s1 = try fetchSchema(pool, std.testing.allocator);
+    defer s1.deinit();
+    var s2 = try fetchSchema(pool, std.testing.allocator);
+    defer s2.deinit();
+
+    try std.testing.expectEqual(s1.tables.len, s2.tables.len);
+    for (s1.tables, s2.tables) |t1, t2| {
+        try std.testing.expectEqualStrings(t1.name, t2.name);
+        try std.testing.expectEqual(t1.columns.len, t2.columns.len);
+        for (t1.columns, t2.columns) |c1, c2| {
+            try std.testing.expectEqualStrings(c1.name, c2.name);
+            try std.testing.expectEqualStrings(c1.data_type, c2.data_type);
+        }
+    }
+}
+
+test "fetchEnhancedSchema cache_name idempotent across repeated calls" {
+    const test_url = std.posix.getenv("PG_TEST_URL") orelse return error.SkipZigTest;
+    var pool = try initPool(std.testing.allocator, test_url);
+    defer pool.deinit();
+
+    var e1 = try fetchEnhancedSchema(pool, std.testing.allocator);
+    defer e1.deinit();
+    var e2 = try fetchEnhancedSchema(pool, std.testing.allocator);
+    defer e2.deinit();
+
+    try std.testing.expectEqual(e1.tables.len, e2.tables.len);
+    for (e1.tables, e2.tables) |t1, t2| {
+        try std.testing.expectEqual(t1.columns.len, t2.columns.len);
+        try std.testing.expectEqual(t1.primary_key_columns.len, t2.primary_key_columns.len);
+    }
 }
 
 comptime {

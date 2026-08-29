@@ -32,6 +32,7 @@ pub fn main() !void {
         return;
     }
 
+    const port_is_explicit = res.args.port != null;
     const port: u16 = res.args.port orelse 8080;
     const bind_addr: []const u8 = res.args.bind orelse "127.0.0.1";
 
@@ -56,7 +57,12 @@ pub fn main() !void {
     var state = try web.ServerState.init(allocator);
     defer state.deinit();
 
-    try web.serve(&state, port, bind_addr);
+    // A busy port is a user-facing condition, not a crash: the message above already
+    // says what to do, so exit cleanly rather than dumping a Zig stack trace.
+    web.serveOnPort(&state, port, bind_addr, port_is_explicit) catch |err| switch (err) {
+        error.NoAvailablePort => std.process.exit(1),
+        else => return err,
+    };
 }
 
 comptime {
