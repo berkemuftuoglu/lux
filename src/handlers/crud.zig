@@ -1,3 +1,7 @@
+// Response strings passed to sendJsonResponse / sendJsonError / res.body / res.header
+// MUST come from res.arena, a string literal, or toOwnedSlice — never a stack array.
+// The arena outlives the handler; stack buffers are reclaimed on function return,
+// leaving sendJsonResponse with a dangling pointer (manifests as garbled / truncated JSON).
 const std = @import("std");
 const httpz = @import("httpz");
 const postgres = @import("postgres");
@@ -8,8 +12,6 @@ const validate = @import("validate");
 const log = std.log.scoped(.crud);
 
 const ServerState = web.ServerState;
-const ChangeEntry = web.ChangeEntry;
-const max_journal_entries = web.max_journal_entries;
 
 pub const TableDataMeta = struct {
     total: usize,
@@ -115,50 +117,7 @@ pub fn addJournalEntry(
     pk_column: []const u8,
     pk_value: []const u8,
 ) !u64 {
-    const allocator = state.allocator;
-
-    // Drop oldest if at capacity -- free the inner strings to prevent leak
-    if (state.change_journal.items.len >= max_journal_entries) {
-        const old = state.change_journal.orderedRemove(0);
-        allocator.free(old.table_name);
-        allocator.free(old.operation);
-        allocator.free(old.column_name);
-        allocator.free(old.old_value);
-        allocator.free(old.new_value);
-        allocator.free(old.pk_column);
-        allocator.free(old.pk_value);
-    }
-
-    const tn = try allocator.dupe(u8, table_name);
-    errdefer allocator.free(tn);
-    const op = try allocator.dupe(u8, operation);
-    errdefer allocator.free(op);
-    const cn = try allocator.dupe(u8, column_name);
-    errdefer allocator.free(cn);
-    const ov = try allocator.dupe(u8, old_value);
-    errdefer allocator.free(ov);
-    const nv = try allocator.dupe(u8, new_value);
-    errdefer allocator.free(nv);
-    const pkc = try allocator.dupe(u8, pk_column);
-    errdefer allocator.free(pkc);
-    const pkv = try allocator.dupe(u8, pk_value);
-    errdefer allocator.free(pkv);
-
-    const entry = ChangeEntry{
-        .id = state.next_journal_id,
-        .timestamp = std.time.timestamp(),
-        .table_name = tn,
-        .operation = op,
-        .column_name = cn,
-        .old_value = ov,
-        .new_value = nv,
-        .pk_column = pkc,
-        .pk_value = pkv,
-        .undone = false,
-    };
-    try state.change_journal.append(state.allocator, entry);
-    state.next_journal_id += 1;
-    return entry.id;
+    return state.appendJournalEntry(table_name, operation, column_name, old_value, new_value, pk_column, pk_value);
 }
 
 // writeColumnsAndRows removed -- replaced by utils.writeColumnsAndRows
@@ -240,6 +199,11 @@ pub fn sendQueryResultJson(allocator: std.mem.Allocator, res: *httpz.Response, p
 
 pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
@@ -474,8 +438,37 @@ pub fn handleTableData(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
     });
 }
 
+// PostgreSQL's own message is the only actionable thing we can give the user
+// when an edit is rejected: a bad cast, a constraint, invalid JSON. A bare
+// "Update query failed" sends them back to the grid with nothing to act on.
+const UpdateErrorJsonError = error{ OutOfMemory, WriteFailed };
+
+fn buildUpdateFailedJson(allocator: std.mem.Allocator, detail: []const u8) UpdateErrorJsonError![]u8 {
+    var jw = utils.JsonWriter.init(allocator);
+    const w = jw.writer();
+    try w.beginObject();
+    try w.objectField("error");
+    try w.write("Update query failed");
+    try w.objectField("detail");
+    try w.write(detail);
+    try w.endObject();
+    return jw.toOwnedSlice();
+}
+
+fn sendUpdateFailed(allocator: std.mem.Allocator, res: *httpz.Response, pg_err: ?[]const u8) void {
+    const generic = "{\"error\":\"Update query failed\"}";
+    const detail = pg_err orelse return sendJsonError(res, 500, generic);
+    const body = buildUpdateFailedJson(allocator, detail) catch return sendJsonError(res, 500, generic);
+    sendJsonError(res, 500, body);
+}
+
 pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
@@ -572,26 +565,51 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         return;
     };
 
+    // Frontend sends the literal string "__NULL__" as a sentinel for SQL NULL (the API client
+    // converts JS null → "__NULL__" before POSTing). Detect it here and emit `SET col = NULL`
+    // with one fewer bound parameter. Without this branch, "__NULL__" would be stored as a
+    // literal text value (data-correctness bug caught in 2026-05-17 QA).
+    const is_null_set = std.mem.eql(u8, value, "__NULL__");
+
     var sql_buf = std.ArrayList(u8){};
     const w = sql_buf.writer(allocator);
     if (is_ctid_mode) {
-        try w.print("UPDATE \"{s}\" SET \"{s}\" = $1{s} WHERE ctid = $2::tid RETURNING \"{s}\"", .{
-            esc_upd_table, esc_upd_col, cast_suffix, esc_upd_col,
-        });
+        if (is_null_set) {
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = NULL WHERE ctid = $1::tid RETURNING \"{s}\"", .{
+                esc_upd_table, esc_upd_col, esc_upd_col,
+            });
+        } else {
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = $1{s} WHERE ctid = $2::tid RETURNING \"{s}\"", .{
+                esc_upd_table, esc_upd_col, cast_suffix, esc_upd_col,
+            });
+        }
     } else {
         const esc_upd_pk = utils.escapeIdentifier(allocator, pk_column) catch {
             sendJsonError(res, 400, "{\"error\":\"Invalid pk column name\"}");
             return;
         };
-        try w.print("UPDATE \"{s}\" SET \"{s}\" = $1{s} WHERE \"{s}\" = $2 RETURNING \"{s}\"", .{
-            esc_upd_table, esc_upd_col, cast_suffix, esc_upd_pk, esc_upd_col,
-        });
+        if (is_null_set) {
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = NULL WHERE \"{s}\" = $1 RETURNING \"{s}\"", .{
+                esc_upd_table, esc_upd_col, esc_upd_pk, esc_upd_col,
+            });
+        } else {
+            try w.print("UPDATE \"{s}\" SET \"{s}\" = $1{s} WHERE \"{s}\" = $2 RETURNING \"{s}\"", .{
+                esc_upd_table, esc_upd_col, cast_suffix, esc_upd_pk, esc_upd_col,
+            });
+        }
     }
 
-    var pg_result = postgres.runQueryParams(pool, allocator, sql_buf.items, .{ value, pk_value }) catch {
-        sendJsonResponse(res, "{\"error\":\"Update query failed\"}");
-        return;
-    };
+    var pg_err: ?[]const u8 = null;
+    var pg_result = if (is_null_set)
+        postgres.runQueryParamsReporting(pool, allocator, sql_buf.items, .{pk_value}, &pg_err) catch {
+            sendUpdateFailed(allocator, res, pg_err);
+            return;
+        }
+    else
+        postgres.runQueryParamsReporting(pool, allocator, sql_buf.items, .{ value, pk_value }, &pg_err) catch {
+            sendUpdateFailed(allocator, res, pg_err);
+            return;
+        };
     defer pg_result.deinit();
 
     const old_value_field = utils.getJsonString(obj, "old_value") orelse "";
@@ -600,13 +618,20 @@ pub fn handleUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         break :blk @as(u64, 0);
     };
 
-    var resp_buf: [128]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf, "{{\"success\":true,\"journal_id\":{d}}}", .{journal_id}) catch "{\"success\":true}";
+    const resp = std.fmt.allocPrint(res.arena, "{{\"success\":true,\"journal_id\":{d}}}", .{journal_id}) catch {
+        sendJsonResponse(res, "{\"success\":true}");
+        return;
+    };
     sendJsonResponse(res, resp);
 }
 
 pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
@@ -715,6 +740,11 @@ pub fn handleDeleteRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
 pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
@@ -810,8 +840,11 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         try sw.print("INSERT INTO \"{s}\" DEFAULT VALUES RETURNING *", .{esc_ins_table});
     }
 
-    var pg_result = postgres.runQuery(pool, allocator, sql_builder.items) catch {
-        sendJsonResponse(res, "{\"error\":\"Insert query failed\"}");
+    // Return 500 on query failure so the frontend's request<T> helper sees a non-2xx and toasts an error
+    // (previously this returned 200 with an error body — frontend treated it as success, data was silently lost)
+    var pg_result = postgres.runQuery(pool, allocator, sql_builder.items) catch |err| {
+        const err_msg = std.fmt.allocPrint(allocator, "{{\"error\":\"Insert failed: {s}\"}}", .{@errorName(err)}) catch "{\"error\":\"Insert query failed\"}";
+        sendJsonError(res, 500, err_msg);
         return;
     };
     defer pg_result.deinit();
@@ -848,6 +881,11 @@ pub fn handleInsertRow(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
 pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
@@ -951,6 +989,11 @@ pub fn handleFkLookup(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
 
 pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
@@ -1019,8 +1062,10 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
         if (cnt_result.n_rows > 0 and cnt_result.rows[0].len > 0) {
             affected = std.fmt.parseInt(usize, cnt_result.rows[0][0], 10) catch 0;
         }
-        var resp_buf: [128]u8 = undefined;
-        const resp = std.fmt.bufPrint(&resp_buf, "{{\"affected_rows\":{d},\"requires_confirmation\":true}}", .{affected}) catch "{\"error\":\"fmt\"}";
+        const resp = std.fmt.allocPrint(res.arena, "{{\"affected_rows\":{d},\"requires_confirmation\":true}}", .{affected}) catch {
+            sendJsonResponse(res, "{\"affected_rows\":0,\"requires_confirmation\":true}");
+            return;
+        };
         sendJsonResponse(res, resp);
     } else {
         var upd_sql = std.ArrayList(u8){};
@@ -1040,6 +1085,11 @@ pub fn handleBulkUpdate(handler: *web.Handler, req: *httpz.Request, res: *httpz.
 
 pub fn handleTruncateTable(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");

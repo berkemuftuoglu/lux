@@ -1,3 +1,7 @@
+// Response strings passed to sendJsonResponse / sendJsonError / res.body / res.header
+// MUST come from res.arena, a string literal, or toOwnedSlice — never a stack array.
+// The arena outlives the handler; stack buffers are reclaimed on function return,
+// leaving sendJsonResponse with a dangling pointer (manifests as garbled / truncated JSON).
 const std = @import("std");
 const httpz = @import("httpz");
 const pg = @import("pg");
@@ -252,6 +256,11 @@ fn buildAndExecuteInsert(
 
 pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
@@ -301,13 +310,10 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
         sendJsonError(res, 400, "{\"error\":\"Invalid table name\"}");
         return;
     };
-    var sql_buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&sql_buf);
-    fbs.writer().print("SELECT * FROM \"{s}\"", .{esc_table_id}) catch {
-        sendJsonError(res, 500, "{\"error\":\"Table name too long\"}");
+    const sql = std.fmt.allocPrint(allocator, "SELECT * FROM \"{s}\"", .{esc_table_id}) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
         return;
     };
-    const sql = sql_buf[0..fbs.pos];
 
     var result = postgres.runQuery(pool, allocator, sql) catch {
         sendJsonResponse(res, "{\"error\":\"Query failed\"}");
@@ -321,9 +327,8 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
             return;
         };
 
-        var filename_buf: [256]u8 = undefined;
-        const filename = std.fmt.bufPrint(&filename_buf, "{s}.csv", .{table_name}) catch {
-            sendJsonError(res, 500, "{\"error\":\"Filename too long\"}");
+        const filename = std.fmt.allocPrint(allocator, "{s}.csv", .{table_name}) catch {
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
 
@@ -336,9 +341,8 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
             return;
         };
 
-        var filename_buf: [256]u8 = undefined;
-        const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{table_name}) catch {
-            sendJsonError(res, 500, "{\"error\":\"Filename too long\"}");
+        const filename = std.fmt.allocPrint(allocator, "{s}.json", .{table_name}) catch {
+            sendJsonError(res, 500, "{\"error\":\"Out of memory\"}");
             return;
         };
 
@@ -350,6 +354,11 @@ pub fn handleExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Resp
 
 pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
@@ -412,6 +421,11 @@ pub fn handleSqlExport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
 
 pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
@@ -498,6 +512,11 @@ pub fn handleTableDdl(handler: *web.Handler, req: *httpz.Request, res: *httpz.Re
 
 pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (crud.enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
@@ -649,13 +668,20 @@ pub fn handleCsvImport(handler: *web.Handler, req: *httpz.Request, res: *httpz.R
         return;
     };
 
-    var resp_buf: [64]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf, "{{\"imported\":{d}}}", .{imported}) catch "{\"error\":\"fmt\"}";
+    const resp = std.fmt.allocPrint(res.arena, "{{\"imported\":{d}}}", .{imported}) catch {
+        sendJsonResponse(res, "{\"imported\":0}");
+        return;
+    };
     sendJsonResponse(res, resp);
 }
 
 pub fn handleTableStats(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;

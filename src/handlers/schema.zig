@@ -1,3 +1,7 @@
+// Response strings passed to sendJsonResponse / sendJsonError / res.body / res.header
+// MUST come from res.arena, a string literal, or toOwnedSlice — never a stack array.
+// The arena outlives the handler; stack buffers are reclaimed on function return,
+// leaving sendJsonResponse with a dangling pointer (manifests as garbled / truncated JSON).
 const std = @import("std");
 const builtin = @import("builtin");
 const httpz = @import("httpz");
@@ -81,6 +85,8 @@ fn getEnvVar(key: []const u8) ?[]const u8 {
     return std.posix.getenv(key);
 }
 
+// Caller must hold `state.schema_lock` exclusively. std.Thread.RwLock is not
+// reentrant, so taking it here would deadlock handleSchema's refresh path.
 fn freeSchemaState(state: *web.ServerState) void {
     const allocator = state.allocator;
     if (state.pool) |p| p.deinit();
@@ -192,12 +198,16 @@ pub fn handleConnect(handler: *web.Handler, req: *httpz.Request, res: *httpz.Res
 
     var enhanced = postgres.fetchEnhancedSchema(pool, allocator) catch null;
 
+    // Tearing down the old pool and arenas must exclude in-flight readers.
+    state.schema_lock.lock();
+    defer state.schema_lock.unlock();
+
     freeSchemaState(state);
     state.pool = pool;
     state.conninfo_uri = allocator.dupe(u8, conninfo_str) catch null;
     if (state.last_conninfo) |old_ci| allocator.free(@constCast(old_ci));
     state.last_conninfo = allocator.dupe(u8, conninfo_str) catch null;
-    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch |err| log.warn("schema cache put failed: {s}", .{@errorName(err)});
+    _ = state.schema_cache.del("schema"); // Invalidate — handleSchema caches JSON on first request
     state.schema_tables = schema.tables;
     state.schema_arena = schema.arena;
     if (enhanced) |*es| {
@@ -243,12 +253,11 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
 
     // Fall back to cached data if re-fetch fails
     refresh: {
-        var schema = postgres.fetchSchema(pool, allocator) catch break :refresh;
-        const new_text = schema.format(allocator) catch {
-            schema.deinit();
-            break :refresh;
-        };
+        const schema = postgres.fetchSchema(pool, allocator) catch break :refresh;
         var enhanced = postgres.fetchEnhancedSchema(pool, allocator) catch null;
+
+        state.schema_lock.lock();
+        defer state.schema_lock.unlock();
 
         // Preserve pool -- we're reusing the existing connection
         const saved_pool = state.pool;
@@ -259,14 +268,18 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
         state.pool = saved_pool;
         state.conninfo_uri = saved_uri;
 
-        state.schema_cache.put("schema", new_text, .{ .ttl = 30 }) catch |err| log.warn("schema cache put failed: {s}", .{@errorName(err)});
         state.schema_tables = schema.tables;
         state.schema_arena = schema.arena;
         if (enhanced) |*es| {
             state.enhanced_schema = es.tables;
             state.enhanced_arena = es.arena;
         }
+        // Invalidate JSON cache so it gets rebuilt below
+        _ = state.schema_cache.del("schema");
     }
+
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
 
     const tables = state.schema_tables orelse {
         sendJsonResponse(res, "{\"tables\":[]}");
@@ -344,7 +357,12 @@ pub fn handleSchema(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respon
     try s.endArray();
     try s.endObject();
 
-    sendJsonResponse(res, try jw.toOwnedSlice());
+    const json_response = try jw.toOwnedSlice();
+
+    // Cache the JSON response (not the plain text format) for 30s
+    state.schema_cache.put("schema", json_response, .{ .ttl = 30 }) catch |err| log.warn("schema cache put failed: {s}", .{@errorName(err)});
+
+    sendJsonResponse(res, json_response);
 }
 
 pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -377,10 +395,14 @@ pub fn handleReconnect(handler: *web.Handler, _: *httpz.Request, res: *httpz.Res
 
     var enhanced = postgres.fetchEnhancedSchema(pool, allocator) catch null;
 
+    // Tearing down the old pool and arenas must exclude in-flight readers.
+    state.schema_lock.lock();
+    defer state.schema_lock.unlock();
+
     freeSchemaState(state);
     state.pool = pool;
     state.conninfo_uri = allocator.dupe(u8, last_ci) catch null;
-    state.schema_cache.put("schema", schema_text, .{ .ttl = 30 }) catch |err| log.warn("schema cache put failed: {s}", .{@errorName(err)});
+    _ = state.schema_cache.del("schema"); // Invalidate — handleSchema caches JSON on first request
     state.schema_tables = schema.tables;
     state.schema_arena = schema.arena;
     if (enhanced) |*es| {
@@ -426,12 +448,31 @@ pub fn handleHealthCheck(handler: *web.Handler, _: *httpz.Request, res: *httpz.R
     const end_time = std.time.milliTimestamp();
     const latency: u64 = @intCast(@max(0, end_time - start_time));
 
-    var resp_buf: [128]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf, "{{\"connected\":true,\"latency_ms\":{d}}}", .{latency}) catch {
+    // Arena-allocated so the slice outlives this function (sendJsonResponse only stores the pointer)
+    const resp = std.fmt.allocPrint(res.arena, "{{\"connected\":true,\"latency_ms\":{d}}}", .{latency}) catch {
         sendJsonResponse(res, "{\"connected\":true}");
         return;
     };
     sendJsonResponse(res, resp);
+}
+
+/// Parse the read-only toggle request body.
+/// Returns null if no recognized key is present (caller toggles current state).
+/// Accepts both legacy {"enabled":"true"|"false"} and modern {"read_only":bool}.
+fn parseReadOnlyToggleBody(obj: std.json.ObjectMap) ?bool {
+    // Legacy string shape
+    if (utils.getJsonString(obj, "enabled")) |s| {
+        return std.mem.eql(u8, s, "true");
+    }
+    // Modern bool shape
+    if (obj.get("read_only")) |v| {
+        return switch (v) {
+            .bool => |b| b,
+            .string => |s| std.mem.eql(u8, s, "true"),
+            else => null,
+        };
+    }
+    return null;
 }
 
 pub fn handleReadOnlyToggle(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
@@ -441,19 +482,14 @@ pub fn handleReadOnlyToggle(handler: *web.Handler, req: *httpz.Request, res: *ht
         sendJsonError(res, 400, "{\"error\":\"Missing request body\"}");
         return;
     };
-    const enabled_str = utils.getJsonString(obj, "enabled") orelse {
+
+    if (parseReadOnlyToggleBody(obj)) |desired| {
+        state.flags.read_only = desired;
+    } else {
         state.flags.read_only = !state.flags.read_only;
-        setReadOnlyOnPool(state);
-        var resp_buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
-        sendJsonResponse(res, resp);
-        return;
-    };
-    state.flags.read_only = std.mem.eql(u8, enabled_str, "true");
+    }
     setReadOnlyOnPool(state);
-    var resp_buf: [64]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
-    sendJsonResponse(res, resp);
+    sendJsonResponse(res, if (state.flags.read_only) "{\"read_only\":true}" else "{\"read_only\":false}");
 }
 
 /// SET default_transaction_read_only on ALL pooled connections.
@@ -486,9 +522,7 @@ fn setReadOnlyOnPool(state: *web.ServerState) void {
 
 pub fn handleReadOnlyGet(handler: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
-    var resp_buf: [64]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf, "{{\"read_only\":{s}}}", .{if (state.flags.read_only) "true" else "false"}) catch return;
-    sendJsonResponse(res, resp);
+    sendJsonResponse(res, if (state.flags.read_only) "{\"read_only\":true}" else "{\"read_only\":false}");
 }
 
 pub fn handleGetConnections(_: *web.Handler, _: *httpz.Request, res: *httpz.Response) !void {
@@ -592,8 +626,7 @@ pub fn handlePostConnection(handler: *web.Handler, req: *httpz.Request, res: *ht
         return;
     };
 
-    var id_buf: [64]u8 = undefined;
-    const id_resp = std.fmt.bufPrint(&id_buf, "{{\"id\":{d}}}", .{new_id}) catch {
+    const id_resp = std.fmt.allocPrint(res.arena, "{{\"id\":{d}}}", .{new_id}) catch {
         sendJsonResponse(res, "{\"id\":0}");
         return;
     };
@@ -730,6 +763,45 @@ test "getConfigDir: returns a path ending with lux dir separator" {
     const ends_slash = std.mem.endsWith(u8, path, "lux/");
     const ends_backslash = std.mem.endsWith(u8, path, "lux\\");
     try std.testing.expect(ends_slash or ends_backslash);
+}
+
+test "parseReadOnlyToggleBody: legacy enabled=true" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var obj = std.json.ObjectMap.init(arena.allocator());
+    try obj.put("enabled", .{ .string = "true" });
+    try std.testing.expectEqual(@as(?bool, true), parseReadOnlyToggleBody(obj));
+}
+
+test "parseReadOnlyToggleBody: legacy enabled=false" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var obj = std.json.ObjectMap.init(arena.allocator());
+    try obj.put("enabled", .{ .string = "false" });
+    try std.testing.expectEqual(@as(?bool, false), parseReadOnlyToggleBody(obj));
+}
+
+test "parseReadOnlyToggleBody: modern read_only=true (bool)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var obj = std.json.ObjectMap.init(arena.allocator());
+    try obj.put("read_only", .{ .bool = true });
+    try std.testing.expectEqual(@as(?bool, true), parseReadOnlyToggleBody(obj));
+}
+
+test "parseReadOnlyToggleBody: modern read_only=false (bool)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var obj = std.json.ObjectMap.init(arena.allocator());
+    try obj.put("read_only", .{ .bool = false });
+    try std.testing.expectEqual(@as(?bool, false), parseReadOnlyToggleBody(obj));
+}
+
+test "parseReadOnlyToggleBody: missing keys returns null (caller should toggle)" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const obj = std.json.ObjectMap.init(arena.allocator());
+    try std.testing.expectEqual(@as(?bool, null), parseReadOnlyToggleBody(obj));
 }
 
 comptime {

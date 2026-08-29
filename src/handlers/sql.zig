@@ -43,6 +43,11 @@ pub fn addHistoryEntry(
 
 pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
@@ -129,6 +134,11 @@ pub fn handleSql(handler: *web.Handler, req: *httpz.Request, res: *httpz.Respons
 
 pub fn handleSqlPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
         return;
@@ -261,6 +271,11 @@ pub fn generateRollbackSql(sql: []const u8, writer: anytype) !void {
 
 pub fn handleSchemaPreview(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (crud.enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
@@ -354,6 +369,8 @@ pub fn handleJournal(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respo
     try s.beginObject();
     try s.objectField("entries");
     try s.beginArray();
+    state.journal_mutex.lock();
+    defer state.journal_mutex.unlock();
     const items = state.change_journal.items;
     const start = if (items.len > 100) items.len - 100 else 0;
     for (items[start..]) |entry| {
@@ -387,6 +404,11 @@ pub fn handleJournal(handler: *web.Handler, _: *httpz.Request, res: *httpz.Respo
 
 pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz.Response) !void {
     const state = handler.state;
+    // Schema arenas and the pool are torn down by connect/refresh on another
+    // worker thread; hold the read side for the life of the handler so the
+    // TableInfo strings we borrow cannot be freed mid-request.
+    state.schema_lock.lockShared();
+    defer state.schema_lock.unlockShared();
     if (crud.enforceReadOnly(state, res)) return;
     if (!state.hasDbConnection()) {
         sendJsonResponse(res, "{\"error\":\"No database connected\"}");
@@ -409,17 +431,19 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
         return;
     };
 
-    var found_entry: ?*web.ChangeEntry = null;
-    for (state.change_journal.items) |*entry| {
-        if (entry.id == id) {
-            found_entry = entry;
-            break;
-        }
-    }
-    const entry = found_entry orelse {
+    // Snapshot rather than hold a *ChangeEntry: the undo below blocks on a database
+    // round-trip, and a concurrent edit can evict-and-free or realloc the journal
+    // underneath us. `allocator` is res.arena, so the copy dies with the request.
+    var snapshot = state.snapshotJournalEntry(allocator, id) catch {
+        sendJsonError(res, 500, "{\"error\":\"Out of memory reading journal\"}");
+        return;
+    } orelse {
         sendJsonError(res, 404, "{\"error\":\"Journal entry not found\"}");
         return;
     };
+    defer snapshot.deinit(allocator);
+    const entry = snapshot.entry;
+
     if (entry.undone) {
         sendJsonError(res, 400, "{\"error\":\"Already undone\"}");
         return;
@@ -476,7 +500,8 @@ pub fn handleJournalUndo(handler: *web.Handler, req: *httpz.Request, res: *httpz
         };
     defer pg_result.deinit();
 
-    entry.undone = true;
+    // The snapshot is a copy; flip the flag on the live entry under the lock.
+    _ = state.markJournalUndone(id);
     sendJsonResponse(res, "{\"success\":true}");
 }
 
