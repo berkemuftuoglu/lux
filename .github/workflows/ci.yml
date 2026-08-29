@@ -23,9 +23,13 @@ jobs:
           cache: npm
       - run: npm ci
 
+      # Pinned, not "latest": an unpinned binary that is chmod +x'd and run is a
+      # supply-chain hole, and `latest` silently changed the asset name — the old
+      # zlint-x86_64-linux URL now 404s, which would fail the lint gate.
       - name: Install zlint
         run: |
-          curl -fsSL https://github.com/DonIsaac/zlint/releases/latest/download/zlint-x86_64-linux -o /usr/local/bin/zlint
+          curl -fsSL https://github.com/DonIsaac/zlint/releases/download/v0.9.1/zlint-linux-x86_64 -o /usr/local/bin/zlint
+          echo "3290bd511d37e4f6ccca3621b9894cd6c378195cdaac27520d0bd894058b2b9b  /usr/local/bin/zlint" | sha256sum -c -
           chmod +x /usr/local/bin/zlint
 
       # TODO: switch to mlugg/setup-zig@v1 once mirrors carry 0.15.2
