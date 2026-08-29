@@ -17,6 +17,7 @@ TODO.md
 docs/*
 !docs/CHANGELOG.md
 !docs/logo.svg
+!docs/size-comparison.svg
 !docs/screenshots/
 
 # AI config
