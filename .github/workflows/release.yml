@@ -1,0 +1,162 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  # Precondition: all 3 build gates must pass on Linux x86_64 before any matrix job runs.
+  # If this fails, no binaries are built and no release is published.
+  gate:
+    name: Build gates (Linux x86_64)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install zlint
+        run: |
+          curl -fsSL https://github.com/DonIsaac/zlint/releases/latest/download/zlint-x86_64-linux -o /usr/local/bin/zlint
+          chmod +x /usr/local/bin/zlint
+
+      - name: Install Node + Biome deps
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+
+      - name: Setup Zig 0.15.2
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
+
+      - name: Gate 1 — zig build test
+        run: zig build test
+
+      - name: Gate 2 — zig build -Doptimize=ReleaseSafe
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Gate 3 — zig build lint
+        run: zig build lint
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: gate
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            runs-on: ubuntu-22.04
+            target: x86_64-linux-gnu
+            artifact: lux-${{ github.ref_name }}-linux-x86_64
+            zig-tarball: zig-x86_64-linux-0.15.2.tar.xz
+            zig-dir: zig-x86_64-linux-0.15.2
+            bin-name: lux
+          - name: linux-aarch64
+            runs-on: ubuntu-22.04
+            target: aarch64-linux-gnu
+            artifact: lux-${{ github.ref_name }}-linux-aarch64
+            zig-tarball: zig-x86_64-linux-0.15.2.tar.xz
+            zig-dir: zig-x86_64-linux-0.15.2
+            bin-name: lux
+          - name: macos-x86_64
+            runs-on: macos-13
+            target: x86_64-macos
+            artifact: lux-${{ github.ref_name }}-macos-x86_64
+            zig-tarball: zig-x86_64-macos-0.15.2.tar.xz
+            zig-dir: zig-x86_64-macos-0.15.2
+            bin-name: lux
+          - name: macos-aarch64
+            runs-on: macos-14
+            target: aarch64-macos
+            artifact: lux-${{ github.ref_name }}-macos-aarch64
+            zig-tarball: zig-aarch64-macos-0.15.2.tar.xz
+            zig-dir: zig-aarch64-macos-0.15.2
+            bin-name: lux
+          - name: windows-x86_64
+            runs-on: windows-2022
+            target: x86_64-windows-gnu
+            artifact: lux-${{ github.ref_name }}-windows-x86_64.exe
+            zig-tarball: zig-x86_64-windows-0.15.2.zip
+            zig-dir: zig-x86_64-windows-0.15.2
+            bin-name: lux.exe
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # No libpq step: lux uses pg.zig (pure Zig) and links no C libraries, so the
+      # binaries have no dynamic Postgres dependency on any platform.
+
+      - name: Setup Zig 0.15.2 (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          curl -fsSL https://ziglang.org/download/0.15.2/${{ matrix.zig-tarball }} -o zig.tar.xz
+          tar -xf zig.tar.xz
+          echo "$PWD/${{ matrix.zig-dir }}" >> "$GITHUB_PATH"
+
+      - name: Setup Zig 0.15.2 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://ziglang.org/download/0.15.2/${{ matrix.zig-tarball }}" -OutFile zig.zip
+          Expand-Archive zig.zip -DestinationPath .
+          echo "$pwd\${{ matrix.zig-dir }}" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Cross-compile (ReleaseSmall)
+        run: zig build -Dtarget=${{ matrix.target }} -Doptimize=ReleaseSmall
+
+      - name: Rename artifact (Unix)
+        if: runner.os != 'Windows'
+        run: cp zig-out/bin/${{ matrix.bin-name }} ${{ matrix.artifact }}
+
+      - name: Rename artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Copy-Item zig-out/bin/${{ matrix.bin-name }} ${{ matrix.artifact }}
+
+      - name: Upload artifact (workflow-internal)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/lux-*
+          # Pre-release if the tag contains a hyphen (e.g. v0.2.0-alpha, v1.0.0-rc.1).
+          # v0.1.0 has no hyphen, so it ships as "Latest release".
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+# Notes for future maintainers:
+# - Code signing (Apple Developer ID, Windows EV cert) is deferred to v0.2.0+
+#   per the scope-discipline brief. macOS users see Gatekeeper warning; Windows
+#   users see SmartScreen warning. README install instructions document the workaround.
+# - No libpq at all: pg.zig speaks the wire protocol in pure Zig, so the shipped
+#   binaries have zero dynamic Postgres dependency. (Was: dynamically linked libpq.)
+# - Mirror this workflow's Zig install with .github/workflows/ci.yml's pattern until
+#   mlugg/setup-zig@v1 carries Zig 0.15.2.

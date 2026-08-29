@@ -7,13 +7,26 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  gates:
+    name: Build gates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install libpq-dev
-        run: sudo apt-get update && sudo apt-get install -y libpq-dev
+      # libpq is NOT installed: lux uses pg.zig (pure Zig) and links no C libraries.
+      # Verified by `grep -r '@cImport\|linkSystemLibrary' build.zig src/` returning nothing.
+
+      - name: Setup Node (Biome)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+
+      - name: Install zlint
+        run: |
+          curl -fsSL https://github.com/DonIsaac/zlint/releases/latest/download/zlint-x86_64-linux -o /usr/local/bin/zlint
+          chmod +x /usr/local/bin/zlint
 
       # TODO: switch to mlugg/setup-zig@v1 once mirrors carry 0.15.2
       - name: Setup Zig
@@ -22,8 +35,48 @@ jobs:
           tar -xf zig.tar.xz
           echo "$PWD/zig-x86_64-linux-0.15.2" >> "$GITHUB_PATH"
 
-      - name: Run tests
+      - name: Cache Zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: zig-0.15.2-${{ runner.os }}-${{ hashFiles('build.zig.zon') }}
+          restore-keys: zig-0.15.2-${{ runner.os }}-
+
+      - name: Gate 1 — zig build test
         run: zig build test
 
-      - name: Release build
+      - name: Gate 2 — zig build -Doptimize=ReleaseSafe
         run: zig build -Doptimize=ReleaseSafe
+
+      - name: Gate 3 — zig build lint
+        run: zig build lint
+
+  frontend:
+    name: Frontend gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check (svelte-check)
+        working-directory: frontend
+        run: pnpm run check
+
+      - name: Component + unit tests (vitest)
+        working-directory: frontend
+        run: pnpm test
