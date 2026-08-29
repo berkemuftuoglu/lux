@@ -67,3 +67,11 @@ See the project rules in the repository for the full engineering constitution.
 - Include test coverage for new functionality
 - All three gates must pass (`zig build test` + `zig build -Doptimize=ReleaseSafe` + `zig build lint`)
 - Reference related issues if applicable
+
+## End-to-End Tests
+
+After any backend or frontend change, run the Playwright smoke suite against a live Postgres:
+
+```bash
+cd e2e && npm test
+```

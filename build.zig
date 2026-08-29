@@ -20,10 +20,6 @@ pub fn build(b: *std.Build) void {
     const zul_dep = b.dependency("zul", .{ .target = target, .optimize = optimize });
     const mod_zul = zul_dep.module("zul");
 
-    // --- mecha dependency ---
-    const mecha_dep = b.dependency("mecha", .{ .target = target, .optimize = optimize });
-    _ = mecha_dep.module("mecha");
-
     // --- websocket dependency ---
     const websocket_dep = b.dependency("websocket", .{ .target = target, .optimize = optimize });
     const mod_websocket = websocket_dep.module("websocket");
@@ -57,12 +53,18 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const mod_pg_decode = b.createModule(.{
+        .root_source_file = b.path("src/lib/pg_decode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const mod_postgres = b.createModule(.{
         .root_source_file = b.path("src/server/postgres.zig"),
         .target = target,
         .optimize = optimize,
     });
     mod_postgres.addImport("pg", mod_pg);
+    mod_postgres.addImport("pg_decode", mod_pg_decode);
 
     // web.zig depends on utils, postgres, crud, schema, export, sql
     // (handlers depend on web, so web is declared after handlers below via forward ref)
@@ -175,6 +177,7 @@ pub fn build(b: *std.Build) void {
     addTestMod(b, test_step, mod_utils);
     addTestMod(b, test_step, mod_sql_guard);
     addTestMod(b, test_step, mod_html_writer);
+    addTestMod(b, test_step, mod_pg_decode);
     addTestMod(b, test_step, mod_crud);
     addTestMod(b, test_step, mod_schema);
     addTestMod(b, test_step, mod_export);
@@ -210,9 +213,20 @@ pub fn build(b: *std.Build) void {
     // Biome JS/CSS lint + format check (replaces grep-based JS checks)
     // Biome is installed as a local npm dev dependency (node_modules/.bin/biome).
     // npx resolves it without requiring a global install or sudo.
-    const run_biome = b.addSystemCommand(&.{ "npx", "biome", "check", "src/static/" });
+    // Biome checks hand-written frontend source, not Svelte build output
+    const run_biome = b.addSystemCommand(&.{ "npx", "biome", "check", "--no-errors-on-unmatched", "frontend/src/" });
     run_biome.stdio = .inherit;
     lint_step.dependOn(&run_biome.step);
+
+    // Guard: reject any sendJsonResponse call that receives a stack-buffer slice.
+    // Stack slices are reclaimed on return; sendJsonResponse only stores the pointer,
+    // so the caller gets garbled or truncated JSON. Arena or string literals only.
+    const guard_step = b.addSystemCommand(&.{
+        "bash", "-c",
+        "if grep -rn -E 'sendJsonResponse\\(res, *[a-z_]+_buf' src/handlers/; then echo 'STACK-BUFFER REGRESSION: see CLAUDE.md'; exit 1; fi",
+    });
+    guard_step.stdio = .inherit;
+    lint_step.dependOn(&guard_step.step);
 }
 
 /// Add a test compilation for a module.

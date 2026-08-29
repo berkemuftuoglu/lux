@@ -20,10 +20,6 @@
             .url = "git+https://github.com/Hejsil/zig-clap?ref=0.11.0#5289e0753cd274d65344bef1c114284c633536ea",
             .hash = "clap-0.11.0-oBajB-HnAQDPCKYzwF7rO3qDFwRcD39Q0DALlTSz5H7e",
         },
-        .mecha = .{
-            .url = "git+https://github.com/Hejsil/mecha?ref=master#4ee15ea13107bc504a5c17291a7de1d3bf909a32",
-            .hash = "mecha-0.11.0-dVGaSNuLAQDk3kihQu0WAoRKEOaR1KUF7z55Mj33DQ6A",
-        },
         .websocket = .{
             .url = "git+https://github.com/karlseguin/websocket.zig?ref=master#97fefafa59cc78ce177cff540b8685cd7f699276",
             .hash = "websocket-0.1.0-ZPISdRlzAwBB_Bz2UMMqxYqF6YEVTIBoFsbzwPUJTHIc",
