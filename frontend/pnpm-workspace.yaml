@@ -1,0 +1,8 @@
+packages:
+  - .
+
+# pnpm 11 gates dependency build scripts and fails a CI install with
+# ERR_PNPM_IGNORED_BUILDS unless each one is explicitly allowed here.
+# esbuild's postinstall resolves its platform binary, so vite/vitest need it.
+allowBuilds:
+  esbuild: true
